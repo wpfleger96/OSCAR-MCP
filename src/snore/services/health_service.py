@@ -5,11 +5,11 @@ from __future__ import annotations
 from datetime import date
 
 from sqlalchemy import case, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
 from snore.parsers.apple_health.type_handlers import SLEEP_TYPE
+from snore.services._base import ProfileScopedService
 from snore.services.schemas import (
     HealthNightDetailRead,
     HealthNightSummaryRead,
@@ -27,11 +27,7 @@ def _normalize_spo2(v: float) -> float:
     return round(v * 100, 1) if v <= 1.5 else round(v, 1)
 
 
-class HealthService:
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
-
+class HealthService(ProfileScopedService):
     async def list_nights(
         self,
         from_date: date | None = None,

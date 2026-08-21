@@ -5,12 +5,17 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, UnaryExpression, delete, func, select
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.constants import DEFAULT_LIST_SESSIONS_LIMIT
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.exceptions import NotFoundError
+from snore.services._base import (
+    ProfileScopedService,
+    get_owned_session_ids,
+    paginate,
+    session_device_join,
+)
 from snore.services.mask_log_service import MaskLogService
 from snore.services.schemas import (
     DeletePreview,
@@ -24,16 +29,8 @@ from snore.services.schemas import (
 __all__ = ["SessionService"]
 
 
-class SessionService:
+class SessionService(ProfileScopedService):
     """Service for session listing, detail, deletion, and management."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: limit sessions to this profile via device ownership."""
-        return models.Device.profile_id == self.profile_id
 
     @staticmethod
     def _session_filters(
@@ -78,34 +75,27 @@ class SessionService:
             "session-id": models.Session.id.asc(),
             "duration": models.Session.duration_seconds.desc(),
         }
-        order_by = sort_map.get(sort_by, models.Session.start_time.desc())
-
-        count_query = (
-            select(func.count())
-            .select_from(models.Session)
-            .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(self._profile_filter(), *filters)
-        )
-        total_count = (await self.db_session.execute(count_query)).scalar() or 0
 
         list_query = (
-            select(models.Session, models.Device, models.Statistics.ahi)
-            .join(models.Device, models.Session.device_id == models.Device.id)
+            session_device_join(
+                select(models.Session, models.Device, models.Statistics.ahi)
+            )
             .outerjoin(
                 models.Statistics, models.Session.id == models.Statistics.session_id
             )
             .where(self._profile_filter(), *filters)
-            .order_by(order_by)
         )
 
-        if limit > 0:
-            list_query = list_query.limit(limit)
-
-        if offset > 0:
-            list_query = list_query.offset(offset)
+        result, total_count = await paginate(
+            self.db_session,
+            list_query,
+            order_by=sort_map.get(sort_by, models.Session.start_time.desc()),
+            limit=limit,
+            offset=offset,
+        )
 
         sessions = []
-        for session, dev, ahi in await self.db_session.execute(list_query):
+        for session, dev, ahi in result:
             sessions.append(
                 SessionListItem(
                     id=session.id,
@@ -135,9 +125,7 @@ class SessionService:
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
+                    session_device_join(select(models.Session)).where(
                         models.Session.id == session_id,
                         self._profile_filter(),
                     )
@@ -287,8 +275,7 @@ class SessionService:
             filters.append(models.Session.start_time <= to_date)
 
         query = (
-            select(models.Session, models.Device)
-            .join(models.Device, models.Session.device_id == models.Device.id)
+            session_device_join(select(models.Session, models.Device))
             .where(self._profile_filter(), *filters)
             .order_by(models.Session.start_time.desc())
         )
@@ -360,13 +347,11 @@ class SessionService:
         day_ids = (
             (
                 await self.db_session.execute(
-                    select(models.Session.day_id)
+                    session_device_join(select(models.Session.day_id))
                     .where(
                         models.Session.id.in_(session_ids),
                         models.Session.day_id.is_not(None),
-                        models.Session.device_id.in_(
-                            select(models.Device.id).where(self._profile_filter())
-                        ),
+                        self._profile_filter(),
                     )
                     .distinct()
                 )
@@ -408,23 +393,9 @@ class SessionService:
         Used by routes to validate ownership before mutation: any ID absent from
         the returned set is either missing or owned by a different profile.
         """
-        if not session_ids:
-            return set()
-        rows = (
-            (
-                await self.db_session.execute(
-                    select(models.Session.id)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
-                        models.Session.id.in_(session_ids),
-                        self._profile_filter(),
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        return await get_owned_session_ids(
+            self.db_session, self.profile_id, session_ids
         )
-        return set(rows)
 
     async def set_session_enabled(self, session_id: int, enabled: bool) -> None:
         """Toggle session enabled/disabled status.
@@ -435,9 +406,7 @@ class SessionService:
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
+                    session_device_join(select(models.Session)).where(
                         models.Session.id == session_id,
                         self._profile_filter(),
                     )
@@ -481,9 +450,7 @@ class SessionService:
             # Validate ownership — foreign session → not found.
             owned = (
                 await self.db_session.execute(
-                    select(models.Session.id)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
+                    session_device_join(select(models.Session.id)).where(
                         models.Session.id == session_id,
                         self._profile_filter(),
                     )
@@ -499,8 +466,7 @@ class SessionService:
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
+                    session_device_join(select(models.Session))
                     .join(models.Day, models.Session.day_id == models.Day.id)
                     .where(
                         models.Day.date == date.date(),

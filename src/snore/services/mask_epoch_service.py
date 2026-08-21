@@ -1,8 +1,7 @@
 """Mask epoch service: contiguous device-reported mask-type periods."""
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from snore.analysis.rx_tracker import RxTracker
+from snore.services._base import ProfileScopedService
 from snore.services.schemas import MaskEpochResponse
 
 __all__ = ["MaskEpochService"]
@@ -17,12 +16,8 @@ _MASK_TYPE_TO_STYLE: dict[str, str] = {
 }
 
 
-class MaskEpochService:
+class MaskEpochService(ProfileScopedService):
     """Service for querying contiguous device-reported mask-type epochs."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
 
     async def list_epochs(self) -> list[MaskEpochResponse]:
         """Return contiguous device mask-type epochs in chronological order.

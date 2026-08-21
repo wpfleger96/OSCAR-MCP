@@ -12,6 +12,7 @@ from sqlalchemy.orm import joinedload
 
 from snore.database.models import Day, Statistics
 from snore.database.models import Session as SessionModel
+from snore.metrics import DAY_METRIC_STAT_COLUMNS, DayAgg
 
 
 class DayManager:
@@ -94,7 +95,7 @@ class DayManager:
             Updated Day object
         """
         day = await cls.get_or_create_day(device_id, day_date, db_session)
-        await cls._aggregate_day_statistics(day, db_session)
+        await cls.aggregate_day_statistics(day, db_session)
         return day
 
     @staticmethod
@@ -135,9 +136,7 @@ class DayManager:
         return float(sum(v * w for v, w in values) / total_weight)
 
     @classmethod
-    async def _aggregate_day_statistics(
-        cls, day: Day, db_session: AsyncSession
-    ) -> None:
+    async def aggregate_day_statistics(cls, day: Day, db_session: AsyncSession) -> None:
         """
         Aggregate statistics from all sessions belonging to a day.
 
@@ -168,24 +167,8 @@ class DayManager:
             day.oai = None
             day.cai = None
             day.hi = None
-            day.pressure_min = None
-            day.pressure_max = None
-            day.pressure_median = None
-            day.pressure_mean = None
-            day.pressure_95th = None
-            day.epap_min = None
-            day.epap_max = None
-            day.epap_median = None
-            day.epap_mean = None
-            day.epap_95th = None
-            day.leak_min = None
-            day.leak_max = None
-            day.leak_median = None
-            day.leak_mean = None
-            day.leak_95th = None
-            day.spo2_min = None
-            day.spo2_max = None
-            day.spo2_mean = None
+            for spec in DAY_METRIC_STAT_COLUMNS:
+                setattr(day, spec.name, None)
             return
 
         day.session_count = len(sessions)
@@ -219,45 +202,25 @@ class DayManager:
                 day.cai = cls._weighted_average(stat_pairs, "cai")
                 day.hi = cls._weighted_average(stat_pairs, "hi")
 
-            pressure_mins = [s.pressure_min for s in stats_records if s.pressure_min]
-            pressure_maxs = [s.pressure_max for s in stats_records if s.pressure_max]
-            day.pressure_min = min(pressure_mins) if pressure_mins else None
-            day.pressure_max = max(pressure_maxs) if pressure_maxs else None
+            for spec in DAY_METRIC_STAT_COLUMNS:
+                if spec.day_agg in (DayAgg.MIN, DayAgg.MAX):
+                    # Truthiness filter is intentional-legacy: 0.0 values are
+                    # excluded from min/max, matching historical behavior.
+                    values = [
+                        getattr(s, spec.name)
+                        for s in stats_records
+                        if getattr(s, spec.name)
+                    ]
+                    reduce = min if spec.day_agg is DayAgg.MIN else max
+                    setattr(day, spec.name, reduce(values) if values else None)
+                elif spec.day_agg is DayAgg.USAGE_WEIGHTED_MEAN and total_hours > 0:
+                    setattr(
+                        day, spec.name, cls._weighted_average(stat_pairs, spec.name)
+                    )
 
-            if total_hours > 0:
-                day.pressure_median = cls._weighted_average(
-                    stat_pairs, "pressure_median"
-                )
-                day.pressure_mean = cls._weighted_average(stat_pairs, "pressure_mean")
-                day.pressure_95th = cls._weighted_average(stat_pairs, "pressure_95th")
-
-            epap_mins = [s.epap_min for s in stats_records if s.epap_min]
-            epap_maxs = [s.epap_max for s in stats_records if s.epap_max]
-            day.epap_min = min(epap_mins) if epap_mins else None
-            day.epap_max = max(epap_maxs) if epap_maxs else None
-
-            if total_hours > 0:
-                day.epap_median = cls._weighted_average(stat_pairs, "epap_median")
-                day.epap_mean = cls._weighted_average(stat_pairs, "epap_mean")
-                day.epap_95th = cls._weighted_average(stat_pairs, "epap_95th")
-
-            leak_mins = [s.leak_min for s in stats_records if s.leak_min]
-            leak_maxs = [s.leak_max for s in stats_records if s.leak_max]
-            day.leak_min = min(leak_mins) if leak_mins else None
-            day.leak_max = max(leak_maxs) if leak_maxs else None
-
-            if total_hours > 0:
-                day.leak_median = cls._weighted_average(stat_pairs, "leak_median")
-                day.leak_mean = cls._weighted_average(stat_pairs, "leak_mean")
-                day.leak_95th = cls._weighted_average(stat_pairs, "leak_95th")
-
-            spo2_mins = [s.spo2_min for s in stats_records if s.spo2_min]
-            spo2_maxs = [s.spo2_max for s in stats_records if s.spo2_max]
-            day.spo2_min = min(spo2_mins) if spo2_mins else None
-            day.spo2_max = max(spo2_maxs) if spo2_maxs else None
-
-            if total_hours > 0:
-                day.spo2_mean = cls._weighted_average(stat_pairs, "spo2_mean")
+    # Private alias kept for existing callers (importers.py, tests) that still
+    # use the pre-rename name.
+    _aggregate_day_statistics = aggregate_day_statistics
 
     @classmethod
     async def link_session_to_day(
@@ -285,7 +248,7 @@ class DayManager:
 
         session.day_id = day.id
 
-        await cls._aggregate_day_statistics(day, db_session)
+        await cls.aggregate_day_statistics(day, db_session)
 
         return day
 
@@ -298,4 +261,4 @@ class DayManager:
             day: Day object to recalculate
             db_session: SQLAlchemy async database session
         """
-        await cls._aggregate_day_statistics(day, db_session)
+        await cls.aggregate_day_statistics(day, db_session)

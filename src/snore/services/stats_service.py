@@ -3,8 +3,7 @@
 from bisect import bisect_right
 from datetime import date, timedelta
 
-from sqlalchemy import ColumnElement, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 
 from snore.analysis.calculations import (
     PeriodType,
@@ -16,12 +15,14 @@ from snore.analysis.calculations import (
     calculate_trends_extended,
 )
 from snore.database import models
+from snore.services._base import ProfileScopedService
 from snore.services.schemas import (
     DataRange,
     EventTypeCount,
     PeriodStatistics,
     TherapySummary,
 )
+from snore.utils.stats import usage_weighted_means
 
 # ---------------------------------------------------------------------------
 # Type alias for the health nights list used across multiple helpers.
@@ -31,16 +32,8 @@ _HealthNights = list[models.HealthNightlySummary]
 __all__ = ["StatsService"]
 
 
-class StatsService:
+class StatsService(ProfileScopedService):
     """Service for therapy statistics computation and analysis."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: limit Day rows to this profile via device ownership."""
-        return models.Device.profile_id == self.profile_id
 
     async def _query_days(
         self,
@@ -246,49 +239,25 @@ class StatsService:
             .all()
         )
 
-        weighted_sums: dict[str, float] = {
-            "rr": 0.0,
-            "tv": 0.0,
-            "mv": 0.0,
-            "pulse": 0.0,
-            "rei": 0.0,
-            "epap": 0.0,
-        }
-        usage_hours_for: dict[str, float] = {
-            "rr": 0.0,
-            "tv": 0.0,
-            "mv": 0.0,
-            "pulse": 0.0,
-            "rei": 0.0,
-            "epap": 0.0,
-        }
-        total_spo2_time_below_90 = 0
-
-        for stat in stats_records:
-            if not stat.usage_hours or stat.usage_hours <= 0:
-                continue
-            hours = stat.usage_hours
-            for field, key in [
-                ("respiratory_rate_mean", "rr"),
-                ("tidal_volume_mean", "tv"),
-                ("minute_ventilation_mean", "mv"),
-                ("pulse_mean", "pulse"),
-                ("rei", "rei"),
-                ("epap_mean", "epap"),
-            ]:
-                val = getattr(stat, field)
-                if val is not None:
-                    weighted_sums[key] += val * hours
-                    usage_hours_for[key] += hours
-            if stat.spo2_time_below_90 is not None:
-                total_spo2_time_below_90 += stat.spo2_time_below_90
-
-        def _avg(key: str) -> float | None:
-            return (
-                weighted_sums[key] / usage_hours_for[key]
-                if usage_hours_for[key] > 0
-                else None
-            )
+        usage_means = usage_weighted_means(
+            stats_records,
+            {
+                "rr": "respiratory_rate_mean",
+                "tv": "tidal_volume_mean",
+                "mv": "minute_ventilation_mean",
+                "pulse": "pulse_mean",
+                "rei": "rei",
+                "epap": "epap_mean",
+            },
+            lambda stat: stat.usage_hours,
+        )
+        total_spo2_time_below_90 = sum(
+            stat.spo2_time_below_90
+            for stat in stats_records
+            if stat.usage_hours
+            and stat.usage_hours > 0
+            and stat.spo2_time_below_90 is not None
+        )
 
         return TherapySummary(
             first_date=first_date,
@@ -299,19 +268,19 @@ class StatsService:
             days_with_data=days_with_data,
             avg_ahi=avg_ahi,
             effectiveness=effectiveness,
-            avg_rei=_avg("rei"),
+            avg_rei=usage_means["rei"],
             avg_pressure=avg_pressure,
             min_pressure=min_pressure,
             max_pressure=max_pressure,
-            avg_epap=_avg("epap"),
+            avg_epap=usage_means["epap"],
             avg_leak=avg_leak,
             avg_spo2=avg_spo2,
             min_spo2=min_spo2,
             total_spo2_time_below_90=total_spo2_time_below_90,
-            avg_pulse=_avg("pulse"),
-            avg_respiratory_rate=_avg("rr"),
-            avg_tidal_volume=_avg("tv"),
-            avg_minute_ventilation=_avg("mv"),
+            avg_pulse=usage_means["pulse"],
+            avg_respiratory_rate=usage_means["rr"],
+            avg_tidal_volume=usage_means["tv"],
+            avg_minute_ventilation=usage_means["mv"],
             ahi_trend_direction=ahi_trend_direction,
             event_counts=event_type_counts,
         )
@@ -363,55 +332,31 @@ class StatsService:
             )
         ).all()
 
-        _KEYS = ["epap", "rr", "pulse", "mv"]
-        _FIELD_MAP = {
+        field_map = {
             "epap": "epap_mean",
             "rr": "respiratory_rate_mean",
             "pulse": "pulse_mean",
             "mv": "minute_ventilation_mean",
         }
 
-        weighted_sums: dict[date, dict[str, float]] = {}
-        total_hours: dict[date, dict[str, float]] = {}
-
+        grouped: dict[date, list[models.Statistics]] = {}
         for stat, day_date in rows:
-            if not stat.usage_hours or stat.usage_hours <= 0:
-                continue
-
             idx = bisect_right(sorted_starts, day_date) - 1
             if idx < 0:
                 continue
             period_start = sorted_starts[idx]
             if day_date > period_end_by_start[period_start]:
                 continue
+            grouped.setdefault(period_start, []).append(stat)
 
-            if period_start not in weighted_sums:
-                weighted_sums[period_start] = {k: 0.0 for k in _KEYS}
-                total_hours[period_start] = {k: 0.0 for k in _KEYS}
-
-            hours = stat.usage_hours
-            for key in _KEYS:
-                val: float | None = getattr(stat, _FIELD_MAP[key])
-                if val is not None:
-                    weighted_sums[period_start][key] += val * hours
-                    total_hours[period_start][key] += hours
-
-        result: dict[date, dict[str, float | None]] = {}
-        for ps in period_stats:
-            pstart = ps.period_start
-            if pstart not in weighted_sums:
-                result[pstart] = {k: None for k in _KEYS}
-            else:
-                result[pstart] = {
-                    k: (
-                        weighted_sums[pstart][k] / total_hours[pstart][k]
-                        if total_hours[pstart][k] > 0
-                        else None
-                    )
-                    for k in _KEYS
-                }
-
-        return result
+        return {
+            ps.period_start: usage_weighted_means(
+                grouped.get(ps.period_start, []),
+                field_map,
+                lambda stat: stat.usage_hours,
+            )
+            for ps in period_stats
+        }
 
     async def get_trends(
         self,

@@ -6,11 +6,12 @@ import logging
 
 from datetime import date
 
-from sqlalchemy import ColumnElement, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.metrics import DAY_METRIC_STAT_COLUMNS
+from snore.services._base import ProfileScopedService, paginate
 from snore.services.schemas import DayDetail, DayListItem, HealthNightSummaryRead
 
 logger = logging.getLogger(__name__)
@@ -18,15 +19,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["DayService"]
 
 
-class DayService:
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: join session's device to this profile."""
-        return models.Device.profile_id == self.profile_id
-
+class DayService(ProfileScopedService):
     async def list_days(
         self,
         from_date: date | None = None,
@@ -49,16 +42,14 @@ class DayService:
         if device_id is not None:
             query = query.where(models.Day.device_id == device_id)
 
-        count_query = select(func.count()).select_from(query.subquery())
-        total = (await self.db_session.execute(count_query)).scalar_one()
-
-        query = query.order_by(models.Day.date.desc())
-        if limit > 0:
-            query = query.limit(limit)
-        query = query.offset(offset)
-
-        rows = (await self.db_session.execute(query)).scalars().all()
-        items = [DayListItem.model_validate(d) for d in rows]
+        result, total = await paginate(
+            self.db_session,
+            query,
+            order_by=models.Day.date.desc(),
+            limit=limit,
+            offset=offset,
+        )
+        items = [DayListItem.model_validate(d) for d in result.scalars().all()]
         return items, total
 
     async def list_dates(self) -> list[date]:
@@ -135,29 +126,25 @@ class DayService:
             else None
         )
 
+        # Identity copies: Day metric columns that DayDetail exposes under the
+        # same name.  Columns DayDetail renames (pressure_mean → avg_pressure,
+        # leak_median → avg_leak, spo2_mean → avg_spo2) are not DayDetail
+        # fields, so the membership test skips them; they are passed explicitly.
+        stat_fields = {
+            spec.name: getattr(day, spec.name)
+            for spec in DAY_METRIC_STAT_COLUMNS
+            if spec.name in DayDetail.model_fields
+        }
+
         return DayDetail(
             **DayListItem.model_validate(day).model_dump(),
+            **stat_fields,
             oai=day.oai,
             cai=day.cai,
             hi=day.hi,
             avg_pressure=day.pressure_mean,
             avg_leak=day.leak_median,
             avg_spo2=day.spo2_mean,
-            pressure_min=day.pressure_min,
-            pressure_max=day.pressure_max,
-            pressure_median=day.pressure_median,
-            pressure_95th=day.pressure_95th,
-            epap_min=day.epap_min,
-            epap_max=day.epap_max,
-            epap_median=day.epap_median,
-            epap_mean=day.epap_mean,
-            epap_95th=day.epap_95th,
-            leak_min=day.leak_min,
-            leak_max=day.leak_max,
-            leak_mean=day.leak_mean,
-            leak_95th=day.leak_95th,
-            spo2_min=day.spo2_min,
-            spo2_max=day.spo2_max,
             obstructive_apneas=day.obstructive_apneas or 0,
             central_apneas=day.central_apneas or 0,
             hypopneas=day.hypopneas or 0,

@@ -79,6 +79,14 @@ __all__ = [
 
 _RAMP_KEYS: frozenset[str] = frozenset({"ramp_enabled", "ramp_time", "smart_ramp"})
 
+# Optional waveform channels fetched by ``load_session_inputs_raw``:
+# (waveform_type, log level on absence, log message template).
+_OPTIONAL_CHANNELS: tuple[tuple[str, int, str], ...] = (
+    ("spo2", logging.INFO, "No SpO2 data available: %s"),
+    ("pulse", logging.DEBUG, "Pulse waveform not available: %s"),
+    ("leak", logging.DEBUG, "Leak waveform not available: %s"),
+)
+
 
 @dataclass
 class RawSessionBlobs:
@@ -307,6 +315,27 @@ class AnalysisService:
         raw = await self.load_session_inputs_raw(session_id, modes=modes)
         return AnalysisService.prepare_inputs(raw)
 
+    async def _fetch_optional_channel(
+        self,
+        session_id: int,
+        waveform_type: str,
+        log_level: int,
+        unavailable_msg: str,
+    ) -> tuple[bytes | None, int, dict[str, Any]]:
+        """Fetch one optional waveform channel as raw bytes.
+
+        Absence (or any fetch failure) is logged at ``log_level`` and mapped to
+        the empty ``(None, 0, {})`` triple — optional channels never raise.
+        """
+        assert self.db_session is not None, (
+            "_fetch_optional_channel requires a DB session"
+        )
+        try:
+            return await fetch_waveform_blob(self.db_session, session_id, waveform_type)
+        except Exception as e:
+            logger.log(log_level, unavailable_msg, e)
+            return None, 0, {}
+
     async def load_session_inputs_raw(
         self,
         session_id: int,
@@ -404,36 +433,16 @@ class AnalysisService:
             session_id, session.start_time.timestamp()
         )
 
-        spo2_blob: bytes | None = None
-        spo2_sample_count = 0
-        spo2_metadata: dict[str, Any] = {}
-        try:
-            spo2_blob, spo2_sample_count, spo2_metadata = await fetch_waveform_blob(
-                self.db_session, session_id, "spo2"
+        # Optional channels: absence is logged (per-channel level), never raised.
+        # Leak feeds quality-flag derivation.
+        optional: dict[str, tuple[bytes | None, int, dict[str, Any]]] = {}
+        for waveform_type, log_level, unavailable_msg in _OPTIONAL_CHANNELS:
+            optional[waveform_type] = await self._fetch_optional_channel(
+                session_id, waveform_type, log_level, unavailable_msg
             )
-        except Exception as e:
-            logger.info(f"No SpO2 data available: {e}")
-
-        pulse_blob: bytes | None = None
-        pulse_sample_count = 0
-        pulse_metadata: dict[str, Any] = {}
-        try:
-            pulse_blob, pulse_sample_count, pulse_metadata = await fetch_waveform_blob(
-                self.db_session, session_id, "pulse"
-            )
-        except Exception as e:
-            logger.debug(f"Pulse waveform not available: {e}")
-
-        # Leak channel for quality-flag derivation.
-        leak_blob: bytes | None = None
-        leak_sample_count = 0
-        leak_metadata: dict[str, Any] = {}
-        try:
-            leak_blob, leak_sample_count, leak_metadata = await fetch_waveform_blob(
-                self.db_session, session_id, "leak"
-            )
-        except Exception as e:
-            logger.debug(f"Leak waveform not available: {e}")
+        spo2_blob, spo2_sample_count, spo2_metadata = optional["spo2"]
+        pulse_blob, pulse_sample_count, pulse_metadata = optional["pulse"]
+        leak_blob, leak_sample_count, leak_metadata = optional["leak"]
 
         return RawSessionBlobs(
             session_id=session_id,
@@ -731,9 +740,15 @@ class AnalysisService:
         self,
         session_id: int,
         modes: list[str] | None = None,
+        primary_mode: str | None = None,
         store_results: bool = True,
     ) -> AnalysisResult:
         """Analyze session with specified detection mode(s).
+
+        The production entry point is ``analysis.runner.run_one``, which owns a
+        short read scope closed before compute and dispatches per policy; this
+        method runs all three phases on the injected session (same-transaction
+        write path relied on by tests and in-process callers).
 
         Uses the same three-phase pipeline as batch analysis:
 
@@ -746,6 +761,9 @@ class AnalysisService:
         Args:
             session_id: Database session ID
             modes: Detection modes to run (None = default mode)
+            primary_mode: Mode whose recovery markers are persisted.  Must be a
+                member of ``modes`` when supplied; defaults to DEFAULT_MODE when
+                DEFAULT_MODE is in modes; required otherwise (ValueError).
             store_results: Whether to persist results
 
         Returns:
@@ -761,7 +779,9 @@ class AnalysisService:
         start_time = time.time()
 
         # I/O phase: fetch raw blobs while the session is held.
-        raw = await self.load_session_inputs_raw(session_id, modes=modes_list)
+        raw = await self.load_session_inputs_raw(
+            session_id, modes=modes_list, primary_mode=primary_mode
+        )
         # Compute phase: deserialization + NumPy work — no session needed.
         inputs = AnalysisService.prepare_inputs(raw)
         computation = self.compute_analysis(inputs)
@@ -803,20 +823,9 @@ class AnalysisService:
             if owned is None:
                 return None
 
-        analysis = (
-            (
-                await self.db_session.execute(
-                    select(models.AnalysisResult)
-                    .filter_by(session_id=session_id)
-                    .order_by(
-                        models.AnalysisResult.created_at.desc(),
-                        models.AnalysisResult.id.desc(),
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
+        from snore.analysis.queries import latest_analysis_row  # noqa: PLC0415
+
+        analysis = await latest_analysis_row(self.db_session, session_id)
 
         if not analysis:
             return None

@@ -7,36 +7,26 @@ import bisect
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.services._base import ProfileScopedService, session_device_join
 from snore.services.schemas import EventMatchResult
 
 __all__ = ["EVENT_MATCH_TOLERANCE_SECONDS", "EventService"]
 
 
-class EventService:
+class EventService(ProfileScopedService):
     """Service for event matching and comparison."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: limit sessions to this profile via device ownership."""
-        return models.Device.profile_id == self.profile_id
 
     async def _get_session_owned(self, session_id: int) -> Any:
         """Return the session if it belongs to this profile, else raise NotFoundError."""
         session = (
             (
                 await self.db_session.execute(
-                    select(models.Session)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
+                    session_device_join(select(models.Session)).where(
                         models.Session.id == session_id,
                         self._profile_filter(),
                     )

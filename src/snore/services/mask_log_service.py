@@ -4,10 +4,10 @@ from collections.abc import Mapping
 from datetime import date
 
 from sqlalchemy import nulls_last, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.services._base import ProfileScopedService
 from snore.services.schemas import MaskLogEntryResponse
 
 __all__ = ["MaskLogService"]
@@ -19,12 +19,8 @@ _ALLOWED_UPDATE_KEYS = frozenset(
 )
 
 
-class MaskLogService:
+class MaskLogService(ProfileScopedService):
     """Service for CRUD on a profile's user-entered mask equipment log."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
 
     async def _get_owned_entry(self, entry_id: int) -> models.MaskLogEntry:
         """Return the entry, raising NotFoundError if missing or foreign.

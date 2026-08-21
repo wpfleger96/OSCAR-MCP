@@ -10,9 +10,15 @@ from typing import Any
 from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.analysis.queries import (
+    latest_analysis_ids,
+    latest_analysis_ranked_subquery,
+)
+from snore.analysis.runner import Dispatch, run_one, store_with_retry
 from snore.analysis.shared.versioning import AlgorithmIdentity, AlgoVersions
 from snore.analysis.types import AnalysisResult
 from snore.database import models
+from snore.services import _base
 from snore.services.schemas import (
     AnalysisDeletePreview,
     AnalysisListItem,
@@ -116,34 +122,7 @@ class AnalysisFacade:
 
     async def _latest_analysis_ids(self, session_ids: list[int]) -> dict[int, int]:
         """Map each session ID to its latest AnalysisResult ID (by created_at)."""
-        if not session_ids:
-            return {}
-
-        ranked = (
-            select(
-                models.AnalysisResult.session_id,
-                models.AnalysisResult.id,
-                func.row_number()
-                .over(
-                    partition_by=models.AnalysisResult.session_id,
-                    order_by=[
-                        models.AnalysisResult.created_at.desc(),
-                        models.AnalysisResult.id.desc(),
-                    ],
-                )
-                .label("recency_rank"),
-            )
-            .where(models.AnalysisResult.session_id.in_(session_ids))
-            .subquery()
-        )
-        rows = (
-            await self._db.execute(
-                select(ranked.c.session_id, ranked.c.id).where(
-                    ranked.c.recency_rank == 1
-                )
-            )
-        ).all()
-        return {session_id: analysis_id for session_id, analysis_id in rows}
+        return await latest_analysis_ids(self._db, session_ids)
 
     async def list_sessions_with_status(
         self,
@@ -498,28 +477,13 @@ class AnalysisFacade:
             return result.rowcount or 0  # type: ignore[attr-defined]
         else:
             # Delete only the latest (highest created_at, then id) result per owned session.
-            ranked = (
-                select(
-                    models.AnalysisResult.id,
-                    func.row_number()
-                    .over(
-                        partition_by=models.AnalysisResult.session_id,
-                        order_by=[
-                            models.AnalysisResult.created_at.desc(),
-                            models.AnalysisResult.id.desc(),
-                        ],
-                    )
-                    .label("rn"),
-                )
-                .where(
-                    models.AnalysisResult.session_id.in_(
-                        select(owned_sessions_subq.c.id)
-                    )
-                )
-                .subquery()
-            )
+            ranked = latest_analysis_ranked_subquery(select(owned_sessions_subq.c.id))
             latest_ids = (
-                (await self._db.execute(select(ranked.c.id).where(ranked.c.rn == 1)))
+                (
+                    await self._db.execute(
+                        select(ranked.c.id).where(ranked.c.recency_rank == 1)
+                    )
+                )
                 .scalars()
                 .all()
             )
@@ -538,23 +502,7 @@ class AnalysisFacade:
         Used by routes to validate ownership before mutation: any ID absent from
         the returned set is either missing or owned by a different profile.
         """
-        if not session_ids:
-            return set()
-        rows = (
-            (
-                await self._db.execute(
-                    select(models.Session.id)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
-                        models.Session.id.in_(session_ids),
-                        self._profile_filter(),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return set(rows)
+        return await _base.get_owned_session_ids(self._db, self.profile_id, session_ids)
 
     async def run_analysis(
         self,
@@ -580,88 +528,27 @@ class AnalysisFacade:
                 DEFAULT_MODE is in modes; required otherwise (ValueError).
             store_results: Whether to persist results to DB.
         """
-        import time  # noqa: PLC0415
-
-        from snore.analysis.service import AnalysisService  # noqa: PLC0415
-        from snore.database.session import session_scope  # noqa: PLC0415
-        from snore.exceptions import NotFoundError as _NotFoundError  # noqa: PLC0415
-
-        t_start = time.monotonic()
-
-        # I/O phase: open a dedicated short async scope — close it before compute.
-        # Ownership check runs inside this scope so self.db_session is never used
-        # (it may already be closed by the CLI before this method is called).
-        async with session_scope() as read_db:
-            owned = (
-                await read_db.execute(
-                    select(models.Session.id)
-                    .join(models.Device, models.Session.device_id == models.Device.id)
-                    .where(
-                        models.Session.id == session_id,
-                        models.Device.profile_id == self.profile_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if owned is None:
-                raise _NotFoundError(f"Session {session_id} not found")
-
-            read_svc = AnalysisService(read_db, profile_id=self.profile_id)
-            raw = await read_svc.load_session_inputs_raw(
-                session_id, modes=modes, primary_mode=primary_mode
-            )
-        # Session closed; prepare DTO (NumPy deserialization) — still sync/fast.
-        inputs = AnalysisService.prepare_inputs(raw)
-
-        # Compute phase: CPU-bound scipy/NumPy runs in a thread.
-        compute_svc = AnalysisService()  # no db_session — compute only
-        computation = await asyncio.to_thread(compute_svc.compute_analysis, inputs)
-
-        processing_time_ms = int((time.monotonic() - t_start) * 1000)
-
-        if store_results:
-            # Write phase: gated INSERT-only scope, retried on SQLite lock contention.
-            await _store_with_retry(self.profile_id, computation, processing_time_ms)
-
-        return computation.summary
+        return await run_one(
+            session_id,
+            profile_id=self.profile_id,
+            modes=modes,
+            primary_mode=primary_mode,
+            store=store_results,
+            dispatch=Dispatch.THREAD,
+        )
 
     async def get_analysis_result(self, session_id: int) -> AnalysisResult | None:
         """Get stored analysis result for a session, or None if not found.
 
         Validates session ownership — returns None for foreign IDs (treating
         "not yet analyzed" and "not found" the same to avoid oracle attacks).
+        Delegates to ``AnalysisService.get_analysis_result``, the single
+        implementation of this lookup.
         """
-        # Ownership check: confirm session belongs to this profile.
-        owned = (
-            await self._db.execute(
-                select(models.Session.id)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(
-                    models.Session.id == session_id,
-                    self._profile_filter(),
-                )
-            )
-        ).scalar_one_or_none()
-        if owned is None:
-            return None
+        from snore.analysis.service import AnalysisService  # noqa: PLC0415
 
-        analysis_row = (
-            (
-                await self._db.execute(
-                    select(models.AnalysisResult)
-                    .filter_by(session_id=session_id)
-                    .order_by(
-                        models.AnalysisResult.created_at.desc(),
-                        models.AnalysisResult.id.desc(),
-                    )
-                )
-            )
-            .scalars()
-            .first()
-        )
-
-        if analysis_row is None:
-            return None
-        return AnalysisResult.model_validate(analysis_row.programmatic_result_json)
+        svc = AnalysisService(self._db, profile_id=self.profile_id)
+        return await svc.get_analysis_result(session_id)
 
     async def list_session_ids(
         self,
@@ -791,52 +678,8 @@ class AnalysisFacade:
 # Analysis store helper
 # ---------------------------------------------------------------------------
 
-
-async def _store_with_retry(
-    profile_id: int,
-    computation: Any,
-    processing_time_ms: int,
-) -> None:
-    """Write one analysis result to the database, retrying on SQLite contention.
-
-    Re-acquires ``write_gate``, opens a fresh ``session_scope(immediate=True)``,
-    and calls ``store_result`` on each attempt.  Safe to retry because a failed
-    commit rolls back — nothing was persisted.  Non-contention exceptions
-    propagate on first occurrence.
-
-    Args:
-        profile_id: Profile that owns the analysis.
-        computation: Completed computation result to store.
-        processing_time_ms: Processing time in milliseconds.
-    """
-    from snore.analysis.service import AnalysisService  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
-    from snore.database.txn import (  # noqa: PLC0415
-        MAX_ATTEMPTS,
-        backoff_delay,
-        is_sqlite_contention,
-    )
-    from snore.database.write_gate import write_gate  # noqa: PLC0415
-
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            async with write_gate():
-                async with session_scope(immediate=True) as write_session:
-                    write_svc = AnalysisService(write_session, profile_id=profile_id)
-                    await write_svc.store_result(computation, processing_time_ms)
-            return
-        except Exception as exc:
-            if not is_sqlite_contention(exc) or attempt >= MAX_ATTEMPTS:
-                raise
-            delay = backoff_delay(attempt)
-            logger.warning(
-                "_store_with_retry: attempt %d/%d hit contention (%s); retrying in %.3fs",
-                attempt,
-                MAX_ATTEMPTS,
-                exc,
-                delay,
-            )
-            await asyncio.sleep(delay)
+# Backwards-compatible alias — the implementation lives in snore.analysis.runner.
+_store_with_retry = store_with_retry
 
 
 # ---------------------------------------------------------------------------
@@ -919,15 +762,6 @@ class BatchAnalysisCoordinator:
         Returns:
             Aggregated ``BatchAnalysisResult``.
         """
-        import time  # noqa: PLC0415
-
-        from snore.analysis.service import (  # noqa: PLC0415
-            AnalysisService,
-            _compute_session_in_process,
-        )
-        from snore.database.session import session_scope  # noqa: PLC0415
-        from snore.utils.process_pool import get_pool  # noqa: PLC0415
-
         matched_total = len(session_pairs)
         self._total = matched_total
         self._completed = 0
@@ -952,30 +786,14 @@ class BatchAnalysisCoordinator:
             if self._is_cancelled():
                 return "cancelled"
             try:
-                t_start = time.monotonic()
-
-                # --- I/O read phase: fetch raw blobs on the event loop ---
-                async with session_scope() as read_session:
-                    svc = AnalysisService(
-                        read_session,
-                        profile_id=profile_id,
-                    )
-                    raw = await svc.load_session_inputs_raw(
-                        sid,
-                        modes=modes_list,
-                        primary_mode=primary_mode,
-                    )
-
-                # --- Compute phase: NumPy only in a subprocess, no session held ---
-                computation = await asyncio.get_running_loop().run_in_executor(
-                    get_pool(), _compute_session_in_process, raw
+                await run_one(
+                    sid,
+                    profile_id=profile_id,
+                    modes=modes_list,
+                    primary_mode=primary_mode,
+                    store=store_results,
+                    dispatch=Dispatch.PROCESS,
                 )
-                processing_time_ms = int((time.monotonic() - t_start) * 1000)
-
-                # --- Write phase: persist result on the event loop, with retry ---
-                if store_results and computation is not None:
-                    await _store_with_retry(profile_id, computation, processing_time_ms)
-
                 return "success"
             except Exception as e:
                 logger.warning(

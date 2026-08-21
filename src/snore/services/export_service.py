@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.constants import DEFAULT_RAW_BACKUP_DIR
 from snore.database import models
+from snore.metrics import EXPORT_STAT_KEYS
 from snore.parsers.base import RawFileManifest
 
 if TYPE_CHECKING:
@@ -246,21 +247,7 @@ class ExportService:
             "device_model",
             "therapy_mode",
             "timezone",
-            "ahi",
-            "oai",
-            "cai",
-            "hi",
-            "obstructive_apneas",
-            "central_apneas",
-            "hypopneas",
-            "reras",
-            "pressure_mean",
-            "pressure_95th",
-            "epap_mean",
-            "leak_mean",
-            "leak_95th",
-            "spo2_mean",
-            "usage_hours",
+            *EXPORT_STAT_KEYS,
         ]
         event_header = [
             "device_session_id",
@@ -314,21 +301,7 @@ class ExportService:
                         s["model"],
                         s["therapy_mode"],
                         "local",
-                        stats.get("ahi", ""),
-                        stats.get("oai", ""),
-                        stats.get("cai", ""),
-                        stats.get("hi", ""),
-                        stats.get("obstructive_apneas", ""),
-                        stats.get("central_apneas", ""),
-                        stats.get("hypopneas", ""),
-                        stats.get("reras", ""),
-                        stats.get("pressure_mean", ""),
-                        stats.get("pressure_95th", ""),
-                        stats.get("epap_mean", ""),
-                        stats.get("leak_mean", ""),
-                        stats.get("leak_95th", ""),
-                        stats.get("spo2_mean", ""),
-                        stats.get("usage_hours", ""),
+                        *[stats.get(k, "") for k in EXPORT_STAT_KEYS],
                     ]
                 )
 
@@ -625,21 +598,7 @@ class ExportService:
                 models.Device.serial_number,
                 models.Device.model,
                 models.Device.manufacturer,
-                stats_alias.ahi,
-                stats_alias.oai,
-                stats_alias.cai,
-                stats_alias.hi,
-                stats_alias.obstructive_apneas,
-                stats_alias.central_apneas,
-                stats_alias.hypopneas,
-                stats_alias.reras,
-                stats_alias.pressure_mean,
-                stats_alias.pressure_95th,
-                stats_alias.epap_mean,
-                stats_alias.leak_mean,
-                stats_alias.leak_95th,
-                stats_alias.spo2_mean,
-                stats_alias.usage_hours,
+                *[getattr(stats_alias, k) for k in EXPORT_STAT_KEYS],
             )
             .join(models.Device, models.Session.device_id == models.Device.id)
             .outerjoin(stats_alias, models.Session.id == stats_alias.session_id)
@@ -660,28 +619,13 @@ class ExportService:
                 <= datetime(date_to.year, date_to.month, date_to.day, 23, 59, 59)
             )
 
-        stat_keys = [
-            "ahi",
-            "oai",
-            "cai",
-            "hi",
-            "obstructive_apneas",
-            "central_apneas",
-            "hypopneas",
-            "reras",
-            "pressure_mean",
-            "pressure_95th",
-            "epap_mean",
-            "leak_mean",
-            "leak_95th",
-            "spo2_mean",
-            "usage_hours",
-        ]
         result = await db_session.execute(stmt)
         for row in result:
             r = dict(row._mapping)
-            r["statistics"] = {k: r.pop(k) for k in stat_keys if r.get(k) is not None}
-            for k in stat_keys:
+            r["statistics"] = {
+                k: r.pop(k) for k in EXPORT_STAT_KEYS if r.get(k) is not None
+            }
+            for k in EXPORT_STAT_KEYS:
                 r.pop(k, None)
             yield r
 
