@@ -358,7 +358,7 @@ Key fixtures: `db_session`, `test_device`, `test_session_factory`, `recorded_ses
 
 PR screenshots are **ad hoc**: capture only what demonstrates THIS PR's UI changes — one
 focused shot per change, each with a caption. Never post the regression battery
-(`ui/screenshot.spec.ts` via `just screenshot`) to a PR; that suite is for local
+(`ui/screenshot.spec.ts` via `pnpm run test:screenshot`) to a PR; that suite is for local
 regression eyeballing only.
 
 **Capture:** the UI renders against a route-mocked API (no backend needed). Write a
