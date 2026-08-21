@@ -158,6 +158,11 @@ class BatchValidator:
 
         machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
 
+        # RERA validation is intentionally omitted here: this report's per-session
+        # and aggregate surfaces (and the low-sensitivity gate) are apnea/hypopnea
+        # only, and RERA's "no_machine_re_events" status has no home in that model.
+        # Per-session RERA validation is surfaced in the single-session analysis
+        # display instead. Passing RERAs would compute matches that go unread.
         detector = EventDetector(AASM_CONFIG)
         validation = detector.validate_against_machine_events(
             mode_result.apneas,

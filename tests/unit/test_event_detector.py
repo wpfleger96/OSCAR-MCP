@@ -19,6 +19,7 @@ from snore.analysis.modes.config import (
 )
 from snore.analysis.modes.detector import EventDetector
 from snore.analysis.modes.postprocess import (
+    EVENT_MATCH_TOLERANCE_SECONDS,
     _calculate_event_overlap,
     _deduplicate_events,
     _merge_adjacent_events,
@@ -30,6 +31,7 @@ from snore.analysis.shared.types import (
     ApneaEvent,
     BreathMetrics,
     HypopneaEvent,
+    RERAEvent,
 )
 
 
@@ -1995,6 +1997,127 @@ class TestValidateAgainstMachineEvents:
         assert result["hypopnea_validation"].false_negatives == 0
         assert result["hypopnea_validation"].sensitivity == 1.0
         assert result["hypopnea_validation"].precision < 1.0
+
+    @staticmethod
+    def _make_rera(start_time: float) -> RERAEvent:
+        return RERAEvent(
+            start_time=start_time,
+            end_time=start_time + 12.0,
+            duration=12.0,
+            obstructed_breath_count=3,
+            recovery_amplitude_increase_pct=0.6,
+            confidence=0.7,
+            baseline_flow=50.0,
+        )
+
+    def test_validation_reras_within_tolerance_match(self, aasm_detector):
+        """Programmatic and machine RERAs within tolerance match; status is 'ok'."""
+        prog_reras = [self._make_rera(100.0)]
+        machine_reras = [self._make_rera(100.5)]
+
+        result = aasm_detector.validate_against_machine_events(
+            [], [], [], [], programmatic_reras=prog_reras, machine_reras=machine_reras
+        )
+
+        assert result["rera_validation_status"] == "ok"
+        assert result["rera_validation"].matched_events == 1
+        assert result["rera_validation"].false_positives == 0
+        assert result["rera_validation"].false_negatives == 0
+        # RERAs fold into the combined lists → matched, nothing spurious.
+        assert result["false_positive_events"] == []
+        assert result["false_negative_events"] == []
+
+    def test_validation_reras_outside_tolerance(self, aasm_detector):
+        """RERAs more than tolerance apart → false positive and false negative."""
+        prog_reras = [self._make_rera(100.0)]
+        machine_reras = [self._make_rera(120.0)]
+
+        result = aasm_detector.validate_against_machine_events(
+            [], [], [], [], programmatic_reras=prog_reras, machine_reras=machine_reras
+        )
+
+        assert result["rera_validation_status"] == "ok"
+        assert result["rera_validation"].matched_events == 0
+        assert result["rera_validation"].false_positives == 1
+        assert result["rera_validation"].false_negatives == 1
+        assert len(result["false_positive_events"]) == 1
+        assert len(result["false_negative_events"]) == 1
+
+    def test_validation_reras_at_exactly_tolerance_boundary_match(self, aasm_detector):
+        """A RERA exactly EVENT_MATCH_TOLERANCE_SECONDS apart matches (<= is inclusive)."""
+        prog_reras = [self._make_rera(100.0)]
+        machine_reras = [self._make_rera(100.0 + EVENT_MATCH_TOLERANCE_SECONDS)]
+
+        result = aasm_detector.validate_against_machine_events(
+            [], [], [], [], programmatic_reras=prog_reras, machine_reras=machine_reras
+        )
+
+        assert result["rera_validation_status"] == "ok"
+        assert result["rera_validation"].matched_events == 1
+        assert result["rera_validation"].false_positives == 0
+        assert result["rera_validation"].false_negatives == 0
+        assert result["false_positive_events"] == []
+        assert result["false_negative_events"] == []
+
+    def test_validation_reras_average_is_three_way_when_machine_present(
+        self, aasm_detector
+    ):
+        """A missed machine RERA pulls overall average sensitivity below the 2-way value."""
+        machine_reras = [self._make_rera(100.0)]
+
+        result = aasm_detector.validate_against_machine_events(
+            [], [], [], [], machine_reras=machine_reras
+        )
+
+        # apnea (empty→1.0) + hypopnea (empty→1.0) + rera (missed→0.0), /3
+        assert result["rera_validation_status"] == "ok"
+        assert result["rera_validation"].sensitivity == 0.0
+        assert (
+            abs(result["overall_agreement"]["average_sensitivity"] - (2.0 / 3.0)) < 1e-9
+        )
+
+    def test_validation_no_machine_reras_status_and_two_way_average(
+        self, aasm_detector
+    ):
+        """No machine RERAs → status flag set, prog RERAs excluded from combined lists and averages."""
+        prog_apneas = [
+            ApneaEvent(
+                start_time=10.0,
+                end_time=20.0,
+                duration=10.0,
+                event_type="OA",
+                flow_reduction=0.9,
+                confidence=0.8,
+                baseline_flow=50.0,
+            ),
+        ]
+        machine_apneas = [
+            ApneaEvent(
+                start_time=10.5,
+                end_time=20.5,
+                duration=10.0,
+                event_type="OA",
+                flow_reduction=0.9,
+                confidence=0.8,
+                baseline_flow=50.0,
+            ),
+        ]
+        prog_reras = [self._make_rera(200.0)]
+
+        result = aasm_detector.validate_against_machine_events(
+            prog_apneas,
+            [],
+            machine_apneas,
+            [],
+            programmatic_reras=prog_reras,
+            machine_reras=[],
+        )
+
+        assert result["rera_validation_status"] == "no_machine_re_events"
+        # Programmatic RERA must NOT surface as a cross-type false positive.
+        assert result["false_positive_events"] == []
+        # Average stays 2-way (apnea 1.0 + hypopnea 1.0) / 2 = 1.0.
+        assert abs(result["overall_agreement"]["average_sensitivity"] - 1.0) < 1e-9
 
     def test_hypopnea_aasm_3pct_mode(self, aasm_detector):
         """Hypopnea detection with AASM_3PCT mode and SpO2 desaturation."""

@@ -17,6 +17,7 @@ from snore.analysis.modes.classification import (
 from snore.analysis.modes.config import DetectionModeConfig
 from snore.analysis.modes.postprocess import (
     EVENT_MATCH_TOLERANCE_SECONDS,
+    MatchableEvent,
     _deduplicate_events,
     _merge_adjacent_events,
     _validate_event,
@@ -896,6 +897,8 @@ class EventDetector:
         machine_apneas: list[ApneaEvent],
         machine_hypopneas: list[HypopneaEvent],
         tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
+        programmatic_reras: list[RERAEvent] | None = None,
+        machine_reras: list[RERAEvent] | None = None,
     ) -> dict[str, Any]:
         """
         Validate programmatic event detection against machine-detected events.
@@ -903,33 +906,56 @@ class EventDetector:
         Compares timing of detected events with machine events and calculates
         agreement statistics (sensitivity, precision, F1 score).
 
+        RERAs are validated only when the device flagged at least one machine RE
+        event: many ResMed configurations never emit RE, and their absence must
+        not read as an algorithm failure. When no machine RERAs are supplied the
+        RERA validation is excluded from the averaged agreement and from the
+        combined event lists, and reported via
+        ``rera_validation_status = "no_machine_re_events"`` so overall agreement
+        stays comparable to the apnea/hypopnea-only baseline.
+
         Args:
             programmatic_apneas: Apneas detected by our algorithm
             programmatic_hypopneas: Hypopneas detected by our algorithm
             machine_apneas: Apneas reported by the CPAP machine
             machine_hypopneas: Hypopneas reported by the CPAP machine
             tolerance_seconds: Max time difference for event matching (default 5s)
+            programmatic_reras: RERAs detected by our algorithm (optional)
+            machine_reras: RERAs reported by the CPAP machine (optional)
 
         Returns:
-            Dictionary with validation metrics for apneas and hypopneas, the
-            per-type matched/unmatched event lists ("apnea_matches",
-            "hypopnea_matches") and the combined cross-type
-            "false_negative_events" / "false_positive_events" lists.
+            Dictionary with validation metrics for apneas, hypopneas and RERAs,
+            the per-type matched/unmatched event lists ("apnea_matches",
+            "hypopnea_matches", "rera_matches"), the combined cross-type
+            "false_negative_events" / "false_positive_events" lists, and
+            "rera_validation_status" ("ok" or "no_machine_re_events").
         """
+        programmatic_reras = programmatic_reras or []
+        machine_reras = machine_reras or []
+        has_machine_reras = len(machine_reras) > 0
+
         apnea_validation, apnea_matches = validate_event_type(
             programmatic_apneas, machine_apneas, tolerance_seconds
         )
         hypopnea_validation, hypopnea_matches = validate_event_type(
             programmatic_hypopneas, machine_hypopneas, tolerance_seconds
         )
+        rera_validation, rera_matches = validate_event_type(
+            programmatic_reras, machine_reras, tolerance_seconds
+        )
 
-        all_programmatic: list[ApneaEvent | HypopneaEvent] = [
+        all_programmatic: list[MatchableEvent] = [
             *programmatic_apneas,
             *programmatic_hypopneas,
         ]
-        all_machine: list[ApneaEvent | HypopneaEvent] = sorted(
-            [*machine_apneas, *machine_hypopneas], key=lambda e: e.start_time
-        )
+        all_machine: list[MatchableEvent] = [*machine_apneas, *machine_hypopneas]
+        # Fold RERAs into the combined lists only when the device provides RERAs
+        # to match against; otherwise unmatched programmatic RERAs would inflate
+        # the cross-type false-positive list against absent ground truth.
+        if has_machine_reras:
+            all_programmatic.extend(programmatic_reras)
+            all_machine.extend(machine_reras)
+        all_machine.sort(key=lambda e: e.start_time)
 
         _, false_negative_events = split_by_tolerance_match(
             all_machine, all_programmatic, tolerance_seconds
@@ -938,27 +964,35 @@ class EventDetector:
             all_programmatic, all_machine, tolerance_seconds
         )
 
+        event_validations = [apnea_validation, hypopnea_validation]
+        total_machine = len(machine_apneas) + len(machine_hypopneas)
+        total_programmatic = len(programmatic_apneas) + len(programmatic_hypopneas)
+        if has_machine_reras:
+            event_validations.append(rera_validation)
+            total_machine += len(machine_reras)
+            total_programmatic += len(programmatic_reras)
+
+        n = len(event_validations)
+
         return {
             "apnea_validation": apnea_validation,
             "hypopnea_validation": hypopnea_validation,
+            "rera_validation": rera_validation,
+            "rera_validation_status": (
+                "ok" if has_machine_reras else "no_machine_re_events"
+            ),
             "apnea_matches": apnea_matches,
             "hypopnea_matches": hypopnea_matches,
+            "rera_matches": rera_matches,
             "matched_events": matched_events,
             "false_negative_events": false_negative_events,
             "false_positive_events": false_positive_events,
             "overall_agreement": {
-                "total_machine_events": len(machine_apneas) + len(machine_hypopneas),
-                "total_programmatic_events": len(programmatic_apneas)
-                + len(programmatic_hypopneas),
-                "average_sensitivity": (
-                    apnea_validation.sensitivity + hypopnea_validation.sensitivity
-                )
-                / 2,
-                "average_precision": (
-                    apnea_validation.precision + hypopnea_validation.precision
-                )
-                / 2,
-                "average_f1": (apnea_validation.f1_score + hypopnea_validation.f1_score)
-                / 2,
+                "total_machine_events": total_machine,
+                "total_programmatic_events": total_programmatic,
+                "average_sensitivity": sum(v.sensitivity for v in event_validations)
+                / n,
+                "average_precision": sum(v.precision for v in event_validations) / n,
+                "average_f1": sum(v.f1_score for v in event_validations) / n,
             },
         }

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from snore.analysis.modes.config import DetectionModeConfig
-from snore.analysis.shared.types import ApneaEvent, HypopneaEvent
+from snore.analysis.shared.types import ApneaEvent, HypopneaEvent, RERAEvent
 
 if TYPE_CHECKING:
     from snore.services.schemas import EventValidationResult
@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 # Single source of truth for machine vs programmatic event matching tolerance
 EVENT_MATCH_TOLERANCE_SECONDS = 5.0
+
+# Events comparable by start-time tolerance matching. Apneas, hypopneas and
+# RERAs all expose ``start_time``; matching never inspects type-specific fields.
+MatchableEvent = ApneaEvent | HypopneaEvent | RERAEvent
 
 
 def _calculate_event_overlap(event1: ApneaEvent, event2: ApneaEvent) -> float:
@@ -138,6 +142,9 @@ def _deduplicate_events(
     return deduplicated
 
 
+# The merge helpers stay on the narrower ApneaEvent | HypopneaEvent union (unlike
+# the MatchableEvent matching helpers): RERAs are never merged, and merging reads
+# type-specific fields (flow_reduction, classification_confidence, has_arousal).
 def _merge_adjacent_events(
     events: Sequence[ApneaEvent | HypopneaEvent],
     max_gap: float,
@@ -235,14 +242,14 @@ class MatchedEvents:
         false_negatives: Machine events with no matching programmatic event
     """
 
-    matched: list[tuple[ApneaEvent | HypopneaEvent, ApneaEvent | HypopneaEvent]]
-    false_positives: list[ApneaEvent | HypopneaEvent]
-    false_negatives: list[ApneaEvent | HypopneaEvent]
+    matched: list[tuple[MatchableEvent, MatchableEvent]]
+    false_positives: list[MatchableEvent]
+    false_negatives: list[MatchableEvent]
 
 
 def match_events_by_start_time(
-    programmatic: Sequence[ApneaEvent | HypopneaEvent],
-    machine: Sequence[ApneaEvent | HypopneaEvent],
+    programmatic: Sequence[MatchableEvent],
+    machine: Sequence[MatchableEvent],
     tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
 ) -> MatchedEvents:
     """
@@ -259,9 +266,9 @@ def match_events_by_start_time(
     Returns:
         MatchedEvents with matched pairs and unmatched events per side
     """
-    matched: list[tuple[ApneaEvent | HypopneaEvent, ApneaEvent | HypopneaEvent]] = []
+    matched: list[tuple[MatchableEvent, MatchableEvent]] = []
     matched_machine_indices: set[int] = set()
-    false_positives: list[ApneaEvent | HypopneaEvent] = []
+    false_positives: list[MatchableEvent] = []
 
     for prog_event in programmatic:
         match_found = False
@@ -279,7 +286,7 @@ def match_events_by_start_time(
         if not match_found:
             false_positives.append(prog_event)
 
-    false_negatives: list[ApneaEvent | HypopneaEvent] = [
+    false_negatives: list[MatchableEvent] = [
         mach_event
         for m_idx, mach_event in enumerate(machine)
         if m_idx not in matched_machine_indices
@@ -293,10 +300,10 @@ def match_events_by_start_time(
 
 
 def split_by_tolerance_match(
-    events: Sequence[ApneaEvent | HypopneaEvent],
-    references: Sequence[ApneaEvent | HypopneaEvent],
+    events: Sequence[MatchableEvent],
+    references: Sequence[MatchableEvent],
     tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
-) -> tuple[list[ApneaEvent | HypopneaEvent], list[ApneaEvent | HypopneaEvent]]:
+) -> tuple[list[MatchableEvent], list[MatchableEvent]]:
     """
     Split events into (matched, unmatched) by start-time proximity.
 
@@ -311,8 +318,8 @@ def split_by_tolerance_match(
     Returns:
         Tuple of (matched events, unmatched events), preserving input order
     """
-    matched: list[ApneaEvent | HypopneaEvent] = []
-    unmatched: list[ApneaEvent | HypopneaEvent] = []
+    matched: list[MatchableEvent] = []
+    unmatched: list[MatchableEvent] = []
 
     for event in events:
         is_matched = any(
@@ -328,8 +335,8 @@ def split_by_tolerance_match(
 
 
 def validate_event_type(
-    programmatic: Sequence[ApneaEvent | HypopneaEvent],
-    machine: Sequence[ApneaEvent | HypopneaEvent],
+    programmatic: Sequence[MatchableEvent],
+    machine: Sequence[MatchableEvent],
     tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
 ) -> tuple[EventValidationResult, MatchedEvents]:
     """

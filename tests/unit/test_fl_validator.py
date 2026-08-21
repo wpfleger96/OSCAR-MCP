@@ -193,6 +193,8 @@ def _make_breath_mock(
     mid_insp_flattening: float,
     flatness_index: float,
     breath_number: int = 0,
+    flow_class: int | None = None,
+    flow_confidence: float | None = None,
 ) -> MagicMock:
     b = MagicMock()
     b.start_offset_s = start
@@ -201,6 +203,8 @@ def _make_breath_mock(
     b.flatness_index = flatness_index
     b.breath_number = breath_number
     b.leak_valid = True
+    b.flow_class = flow_class
+    b.flow_confidence = flow_confidence
     return b
 
 
@@ -646,3 +650,148 @@ class TestNumericPipeline:
 
         assert s.auc_t25 is not None
         assert abs(s.auc_t25 - 1.0) < 1e-9
+
+
+class TestFlowClassValidation:
+    """flow_class weight vs FLG metrics, including fallback-confidence exclusion."""
+
+    @pytest.mark.asyncio
+    async def test_class_weight_metrics_exclude_fallback_breaths(self, mock_db_session):
+        """
+        Five rule-matched breaths whose class weight tracks FLG perfectly, plus a
+        sixth fallback-confidence breath (flow_confidence == 0.5) whose FLG would
+        break the correlation if it were not excluded.
+
+        Rule-matched breaths (class → weight, breath-averaged FLG):
+          class 1 (w=0.0) FLG 0.1
+          class 4 (w=0.6) FLG 0.3
+          class 5 (w=0.7) FLG 0.5
+          class 6 (w=0.9) FLG 0.7
+          class 7 (w=1.0) FLG 0.9
+        Monotone → spearman_class_weight_r = 1.0; positives (FLG>=0.25) all
+        outscore the single negative → auc_class_t25 = 1.0.
+
+        Excluded breath: class 7 (w=1.0) conf 0.5 FLG 0.05 — included, it would
+        pair the max weight with the min FLG and drop Spearman below 1.0.
+        """
+        session_row = _make_mock_session_row(11)
+
+        ts = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0]
+        vs = [0.1, 0.1, 0.3, 0.3, 0.5, 0.5, 0.7, 0.7, 0.9, 0.9, 0.05, 0.05]
+        blob = _make_waveform_blob(ts, vs)
+        waveform_mock = MagicMock()
+        waveform_mock.data_blob = blob
+        waveform_mock.sample_count = 12
+
+        analysis_row = _make_analysis_result_mock(101)
+
+        breaths = [
+            _make_breath_mock(0.0, 4.0, 0.9, 0.1, 0, flow_class=1, flow_confidence=0.8),
+            _make_breath_mock(4.0, 8.0, 0.7, 0.3, 1, flow_class=4, flow_confidence=0.8),
+            _make_breath_mock(
+                8.0, 12.0, 0.5, 0.5, 2, flow_class=5, flow_confidence=0.8
+            ),
+            _make_breath_mock(
+                12.0, 16.0, 0.3, 0.7, 3, flow_class=6, flow_confidence=0.8
+            ),
+            _make_breath_mock(
+                16.0, 20.0, 0.1, 0.9, 4, flow_class=7, flow_confidence=0.8
+            ),
+            _make_breath_mock(
+                20.0, 24.0, 0.5, 0.5, 5, flow_class=7, flow_confidence=0.5
+            ),
+        ]
+
+        sessions_result = MagicMock()
+        sessions_result.scalars.return_value.all.return_value = [session_row]
+
+        waveform_result = MagicMock()
+        waveform_result.scalars.return_value.first.return_value = waveform_mock
+
+        analysis_result = MagicMock()
+        analysis_result.scalars.return_value.first.return_value = analysis_row
+
+        breaths_result = MagicMock()
+        breaths_result.scalars.return_value.all.return_value = breaths
+
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                sessions_result,
+                waveform_result,
+                analysis_result,
+                breaths_result,
+            ]
+        )
+
+        validator = FlowLimitationValidator(mock_db_session, profile_id=1)
+        report = await validator.validate_date_range("2025-01-01", "2025-01-31")
+
+        s = report.sessions[0]
+        assert s.skipped_reason is None
+        # Only the five rule-matched breaths enter the class-weight metrics.
+        assert s.n_class_breaths_compared == 5
+        assert s.spearman_class_weight_r is not None
+        assert abs(s.spearman_class_weight_r - 1.0) < 1e-9
+        assert s.auc_class_t25 is not None
+        assert abs(s.auc_class_t25 - 1.0) < 1e-9
+        # t50 positives (FLG>=0.50: weights 0.7/0.9/1.0) all outscore the two
+        # negatives (0.0/0.6) → perfect separation.
+        assert s.auc_class_t50 is not None
+        assert abs(s.auc_class_t50 - 1.0) < 1e-9
+
+        # Aggregate means propagate the per-session class-weight metrics.
+        assert report.aggregate.mean_spearman_class_weight_r is not None
+        assert abs(report.aggregate.mean_spearman_class_weight_r - 1.0) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_no_classified_breaths_yields_none_class_metrics(
+        self, mock_db_session
+    ):
+        """Breaths without flow_class → class-weight metrics stay None, flattening unaffected."""
+        session_row = _make_mock_session_row(12)
+
+        ts = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+        vs = [0.1, 0.1, 0.3, 0.3, 0.5, 0.5]
+        blob = _make_waveform_blob(ts, vs)
+        waveform_mock = MagicMock()
+        waveform_mock.data_blob = blob
+        waveform_mock.sample_count = 6
+
+        analysis_row = _make_analysis_result_mock(102)
+
+        # flow_class defaults to None (unclassified)
+        breaths = [
+            _make_breath_mock(0.0, 4.0, 0.9, 0.1, 0),
+            _make_breath_mock(4.0, 8.0, 0.7, 0.3, 1),
+            _make_breath_mock(8.0, 12.0, 0.5, 0.5, 2),
+        ]
+
+        sessions_result = MagicMock()
+        sessions_result.scalars.return_value.all.return_value = [session_row]
+
+        waveform_result = MagicMock()
+        waveform_result.scalars.return_value.first.return_value = waveform_mock
+
+        analysis_result = MagicMock()
+        analysis_result.scalars.return_value.first.return_value = analysis_row
+
+        breaths_result = MagicMock()
+        breaths_result.scalars.return_value.all.return_value = breaths
+
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                sessions_result,
+                waveform_result,
+                analysis_result,
+                breaths_result,
+            ]
+        )
+
+        validator = FlowLimitationValidator(mock_db_session, profile_id=1)
+        report = await validator.validate_date_range("2025-01-01", "2025-01-31")
+
+        s = report.sessions[0]
+        assert s.skipped_reason is None
+        assert s.spearman_class_weight_r is None
+        assert s.auc_class_t25 is None
+        assert s.auc_class_t50 is None
