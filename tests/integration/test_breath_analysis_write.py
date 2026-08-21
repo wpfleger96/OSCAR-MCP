@@ -18,6 +18,10 @@ A4. Non-UTC host determinism: AnalysisResult timestamps stored in naive UTC
 A5. Validity flags end-to-end: analyze_session over a seeded session with ramp
     settings + persisted mask-on segments persists Breath rows whose
     ramp_active / mask_off values and reasons match the v1 derivations.
+
+A6. primary_mode threading: analyze_session with an explicit non-default
+    primary_mode persists that mode into engine_versions_json.run.primary_mode,
+    rather than falling back to DEFAULT_MODE.
 """
 
 from __future__ import annotations
@@ -584,6 +588,53 @@ class TestValidityFlagsEndToEnd:
             assert rows, "analysis must still persist Breath rows"
             assert all(r.mask_off is None for r in rows)
             assert all(r.mask_off_reason == "segments_unknown" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# A6 — primary_mode threaded through analyze_session into storage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestAnalyzeSessionPrimaryModeThreading:
+    async def test_explicit_primary_mode_persisted_in_engine_versions(self, temp_db):
+        """analyze_session persists an explicit non-default primary_mode.
+
+        With modes=["aasm", "resmed"] and primary_mode="resmed", the stored
+        engine_versions_json.run.primary_mode must be "resmed".  If analyze_session
+        failed to thread primary_mode into load_session_inputs_raw, the load phase
+        would resolve None → DEFAULT_MODE ("aasm"), and this assertion would catch
+        the silent fallback.
+        """
+        await init_database(str(temp_db))
+        async with session_scope() as db:
+            _, profile_id = await _make_profile(db)
+            session_id = await _seed_flow_session(
+                db,
+                profile_id,
+                duration_s=300.0,
+                mask_on_segments=[[0.0, 300.0]],
+                settings={},
+            )
+            svc = AnalysisService(db, profile_id=profile_id)
+            await svc.analyze_session(
+                session_id, modes=["aasm", "resmed"], primary_mode="resmed"
+            )
+
+        async with session_scope() as db:
+            stored = (
+                (
+                    await db.execute(
+                        select(AnalysisResult_ORM).where(
+                            AnalysisResult_ORM.session_id == session_id
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert stored is not None
+            assert stored.engine_versions_json["run"]["primary_mode"] == "resmed"
 
 
 # ---------------------------------------------------------------------------

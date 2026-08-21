@@ -159,6 +159,47 @@ class TestRunOne:
         assert comp_a.summary == comp_b.summary
         assert comp_a.primary_mode == comp_b.primary_mode
 
+    async def test_process_dispatch_stores_result_via_pool(
+        self,
+        patched_session_scope,
+        async_test_device,
+        patched_compute,
+        captured_stores,
+    ):
+        """PROCESS dispatch runs compute through the shared pool and stores it.
+
+        get_pool is patched to a real ThreadPoolExecutor so the process branch is
+        exercised without spawning a subprocess; the pooled worker still runs the
+        (patched) prepare/compute pipeline in-process, so the stored envelope is
+        assertable exactly as for INLINE/THREAD.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        sess = await _seed_session(
+            patched_session_scope, async_test_device, date(2025, 1, 6)
+        )
+        await patched_session_scope.commit()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with (
+                _patch_waveform(),
+                _patch_events(),
+                patch("snore.utils.process_pool.get_pool", return_value=pool),
+            ):
+                summary = await run_one(
+                    sess.id,
+                    profile_id=async_test_device.profile_id,
+                    dispatch=Dispatch.PROCESS,
+                )
+
+        assert summary.session_id == sess.id
+
+        # The pooled compute result was stored for the owning profile.
+        assert len(captured_stores) == 1
+        pid, computation = captured_stores[0]
+        assert pid == async_test_device.profile_id
+        assert computation.summary == summary
+
     async def test_store_false_skips_write_phase(
         self,
         patched_session_scope,
