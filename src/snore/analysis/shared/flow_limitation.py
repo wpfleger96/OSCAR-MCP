@@ -149,6 +149,10 @@ class FlowLimitationClassifier:
         else:
             peak_position = 0.5
 
+        # Confidence margins are contributed only by continuous threshold
+        # comparisons (``>``/``<``), whose distance past the threshold measures
+        # evidence strength.  Equality, range-membership, and count checks are
+        # structural gates and append no margin.
         if (
             flatness > FLC.FL_CLASS7_FLATNESS_MIN
             and plateau_fraction > FLC.FL_CLASS7_PLATEAU_FRAC_MIN
@@ -217,7 +221,7 @@ class FlowLimitationClassifier:
             and flatness > FLC.FL_CLASS3_FLATNESS_MIN
         ):
             max_prominence = (
-                max(peaks.peak_prominences) if peaks.peak_prominences else 0
+                peaks.peak_prominences[dominant_idx] if peaks.peak_prominences else 0
             )
             if max_prominence < FLC.FL_CLASS3_PROMINENCE_MAX:
                 matched_features["multiple_small_peaks"] = peak_count

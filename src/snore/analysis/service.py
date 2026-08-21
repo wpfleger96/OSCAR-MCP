@@ -602,12 +602,16 @@ class AnalysisService:
 
         breath_features = []
         breath_shape_by_number: dict[int, Any] = {}
+        # Memoize the extracted inspiratory flow so _build_computed_breaths reuses
+        # it instead of repeating the searchsorted + slice + segment extraction.
+        insp_flow_by_number: dict[int, np.ndarray] = {}
         for breath in breaths:
             breath_start_idx = np.searchsorted(timestamps, breath.start_time)
             breath_end_idx = np.searchsorted(timestamps, breath.end_time)
 
             breath_flow = flow_values[breath_start_idx:breath_end_idx]
             insp_flow = largest_inspiratory_segment(breath_flow)
+            insp_flow_by_number[breath.breath_number] = insp_flow
 
             if len(insp_flow) > 10:
                 shape = self.feature_extractor.extract_shape_features(
@@ -720,10 +724,9 @@ class AnalysisService:
 
         computed_breaths = _build_computed_breaths(
             breaths=breaths,
-            timestamps=timestamps,
-            flow_values=flow_values,
             flow_pattern_by_number=flow_pattern_by_number,
             breath_shape_by_number=breath_shape_by_number,
+            insp_flow_by_number=insp_flow_by_number,
             recovery_breath_indices=recovery_breath_indices,
             leak_timestamps=inputs.leak_timestamps,
             leak_values=inputs.leak_values,
@@ -1056,10 +1059,9 @@ def _collect_recovery_breath_indices(
 def _build_computed_breaths(
     *,
     breaths: list[Any],
-    timestamps: Any,
-    flow_values: Any,
     flow_pattern_by_number: dict[int, Any],
     breath_shape_by_number: dict[int, Any],
+    insp_flow_by_number: dict[int, np.ndarray],
     recovery_breath_indices: set[int],
     leak_timestamps: Any | None,
     leak_values: Any | None,
@@ -1074,12 +1076,12 @@ def _build_computed_breaths(
 
     Args:
         breaths: List of BreathMetrics from the segmenter.
-        timestamps: Flow timestamps array — used to extract per-breath insp flow.
-        flow_values: Full session flow array — used to extract per-breath insp flow.
         flow_pattern_by_number: Maps breath_number → FlowPattern (from classifier).
         breath_shape_by_number: Pre-computed ShapeFeatures keyed by breath_number.
             Only present for breaths where len(insp_flow) > 10; absent entries
             produce None flatness_index (same as the prior per-breath extraction).
+        insp_flow_by_number: Pre-extracted inspiratory flow keyed by breath_number,
+            memoized by compute_analysis so this loop skips re-extraction.
         recovery_breath_indices: Set of breath_numbers identified as recovery breaths.
         leak_timestamps: Leak waveform timestamps (may be None).
         leak_values: Leak waveform values (may be None).
@@ -1124,11 +1126,9 @@ def _build_computed_breaths(
 
     computed: list[ComputedBreath] = []
     for idx, breath in enumerate(breaths):
-        # Slice the inspiratory flow for mid-insp flattening and trigger inference.
-        b_start = np.searchsorted(timestamps, breath.start_time)
-        b_end = np.searchsorted(timestamps, breath.end_time)
-        breath_flow = flow_values[b_start:b_end]
-        insp_flow: np.ndarray = largest_inspiratory_segment(breath_flow)
+        # Inspiratory flow (for mid-insp flattening and trigger inference) was
+        # extracted once in compute_analysis; reuse the memoized slice.
+        insp_flow: np.ndarray = insp_flow_by_number[breath.breath_number]
 
         flatness_idx: float | None = None
         mid_insp: float | None = None

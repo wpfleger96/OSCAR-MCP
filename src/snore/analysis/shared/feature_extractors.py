@@ -46,7 +46,7 @@ def largest_inspiratory_segment(flow: np.ndarray) -> np.ndarray:
 
     Returns:
         The longest contiguous positive-valued slice, or an empty array if no
-        sample is positive.
+        sample is positive.  This is a view into ``flow``; do not mutate it.
     """
     if len(flow) == 0:
         return flow
