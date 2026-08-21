@@ -44,7 +44,10 @@ from snore.analysis.data.waveform_loader import (
 )
 from snore.analysis.modes import DEFAULT_MODE, get_mode
 from snore.analysis.shared.breath_segmenter import BreathSegmenter
-from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
+from snore.analysis.shared.feature_extractors import (
+    WaveformFeatureExtractor,
+    largest_inspiratory_segment,
+)
 from snore.analysis.shared.flow_limitation import FlowLimitationClassifier
 from snore.analysis.shared.pattern_detector import ComplexPatternDetector
 from snore.analysis.shared.pulse_detector import PulseChangeDetector
@@ -604,7 +607,7 @@ class AnalysisService:
             breath_end_idx = np.searchsorted(timestamps, breath.end_time)
 
             breath_flow = flow_values[breath_start_idx:breath_end_idx]
-            insp_flow = breath_flow[breath_flow > 0]
+            insp_flow = largest_inspiratory_segment(breath_flow)
 
             if len(insp_flow) > 10:
                 shape = self.feature_extractor.extract_shape_features(
@@ -1125,7 +1128,7 @@ def _build_computed_breaths(
         b_start = np.searchsorted(timestamps, breath.start_time)
         b_end = np.searchsorted(timestamps, breath.end_time)
         breath_flow = flow_values[b_start:b_end]
-        insp_flow: np.ndarray = breath_flow[breath_flow > 0]
+        insp_flow: np.ndarray = largest_inspiratory_segment(breath_flow)
 
         flatness_idx: float | None = None
         mid_insp: float | None = None

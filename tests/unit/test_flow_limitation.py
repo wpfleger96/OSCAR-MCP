@@ -44,6 +44,11 @@ class TestClass1Sinusoidal:
         assert pattern.flow_class == 1
         assert pattern.class_name == "Sinusoidal"
         assert pattern.severity == "normal"
+        # Regression: the class-1 rule must actually match (confidence > 0.5),
+        # not fall through to the 0.5 fallback as it did when the rule required
+        # positive kurtosis (unsatisfiable for smooth platykurtic breaths).
+        assert pattern.confidence > 0.5
+        assert "low_flatness" in pattern.matched_features
 
     def test_class1_confidence_high(self):
         """Normal breathing should have reasonable confidence."""
@@ -79,6 +84,7 @@ class TestClass2DoublePeak:
         shape = ShapeFeatures(
             flatness_index=0.4,
             plateau_duration=0.2,
+            plateau_fraction=0.1,
             symmetry_score=0.1,
             kurtosis=1.5,
             rise_time=0.3,
@@ -109,6 +115,7 @@ class TestClass2DoublePeak:
         shape = ShapeFeatures(
             flatness_index=0.4,
             plateau_duration=0.2,
+            plateau_fraction=0.1,
             symmetry_score=0.1,
             kurtosis=1.5,
             rise_time=0.3,
@@ -169,6 +176,7 @@ class TestClass4EarlyPeak:
         shape = ShapeFeatures(
             flatness_index=0.5,
             plateau_duration=0.6,
+            plateau_fraction=0.4,
             symmetry_score=-0.3,
             kurtosis=1.2,
             rise_time=0.2,
@@ -204,6 +212,7 @@ class TestClass5MidPeak:
         shape = ShapeFeatures(
             flatness_index=0.75,
             plateau_duration=0.4,
+            plateau_fraction=0.3,
             symmetry_score=0.05,
             kurtosis=1.0,
             rise_time=0.4,
@@ -239,6 +248,7 @@ class TestClass6LatePeak:
         shape = ShapeFeatures(
             flatness_index=0.65,
             plateau_duration=0.5,
+            plateau_fraction=0.3,
             symmetry_score=0.3,
             kurtosis=0.8,
             rise_time=0.8,
@@ -298,6 +308,7 @@ class TestClass7PlateauThroughout:
         shape = ShapeFeatures(
             flatness_index=0.96,
             plateau_duration=0.9,
+            plateau_fraction=1.0,
             symmetry_score=0.0,
             kurtosis=0.5,
             rise_time=0.1,
@@ -324,13 +335,14 @@ class TestClass7PlateauThroughout:
 class TestConfidenceScoring:
     """Test confidence score calculation."""
 
-    def test_confidence_multiple_features_matched(self):
-        """More matched features should give higher confidence."""
+    def test_confidence_large_margins_high(self):
+        """Values far past their thresholds should give higher confidence."""
         classifier = FlowLimitationClassifier()
 
         shape = ShapeFeatures(
             flatness_index=0.92,
             plateau_duration=0.85,
+            plateau_fraction=1.0,
             symmetry_score=0.0,
             kurtosis=0.6,
             rise_time=0.1,
@@ -443,6 +455,34 @@ class TestFlowLimitationIndex:
 
         assert fli == 0.0
 
+    def test_fli_strictly_increasing_in_class(self):
+        """Uniform sessions must score monotonically by class severity.
+
+        Guards against the confidence-weighting inversion where a confident
+        Class 6 outscored a less-certain Class 7.  The index now uses class
+        weights only, so it must be strictly increasing in class number.
+        """
+        classifier = FlowLimitationClassifier()
+
+        def uniform_index(flow_class: int) -> float:
+            patterns = [
+                FlowPattern(
+                    breath_number=i,
+                    flow_class=flow_class,
+                    class_name="x",
+                    # Confidence deliberately varies inversely with severity to
+                    # prove it does not affect the ordering.
+                    confidence=1.0 - 0.1 * flow_class,
+                    matched_features={},
+                    severity="x",
+                )
+                for i in range(1, 6)
+            ]
+            return classifier.calculate_flow_limitation_index(patterns)
+
+        indices = [uniform_index(c) for c in range(1, 8)]
+        assert all(a < b for a, b in zip(indices, indices[1:], strict=False))
+
 
 class TestSessionAnalysis:
     """Test complete session analysis."""
@@ -479,6 +519,7 @@ class TestSessionAnalysis:
             shape = ShapeFeatures(
                 flatness_index=0.2,
                 plateau_duration=0.1,
+                plateau_fraction=0.1,
                 symmetry_score=0.0,
                 kurtosis=3.0,
                 rise_time=0.3,
@@ -496,6 +537,7 @@ class TestSessionAnalysis:
             shape = ShapeFeatures(
                 flatness_index=0.95,
                 plateau_duration=0.9,
+                plateau_fraction=0.6,
                 symmetry_score=0.0,
                 kurtosis=0.5,
                 rise_time=0.1,

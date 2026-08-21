@@ -77,12 +77,13 @@ class FlowLimitationClassifier:
             FlowPattern with classification and confidence score
         """
         matched_features: dict[str, float | int | str] = {}
+        margins: list[float] = []
 
         flow_class = self._apply_classification_rules(
-            shape_features, peak_features, matched_features
+            shape_features, peak_features, matched_features, margins
         )
 
-        confidence = self._calculate_confidence(flow_class, matched_features)
+        confidence = self._calculate_confidence(matched_features, margins)
 
         class_info = self.classes[flow_class]
 
@@ -95,11 +96,26 @@ class FlowLimitationClassifier:
             severity=class_info["severity"],
         )
 
+    @staticmethod
+    def _margin_above(value: float, threshold: float) -> float:
+        """Fractional distance of ``value`` above ``threshold`` for a ``>`` rule."""
+        if threshold <= 0:
+            return 0.0
+        return float(np.clip((value - threshold) / threshold, 0.0, 1.0))
+
+    @staticmethod
+    def _margin_below(value: float, threshold: float) -> float:
+        """Fractional distance of ``value`` below ``threshold`` for a ``<`` rule."""
+        if threshold <= 0:
+            return 0.0
+        return float(np.clip((threshold - value) / threshold, 0.0, 1.0))
+
     def _apply_classification_rules(
         self,
         shape: ShapeFeatures,
         peaks: PeakFeatures,
         matched_features: dict[str, Any],
+        margins: list[float],
     ) -> int:
         """
         Apply rule-based logic to determine flow limitation class.
@@ -111,35 +127,55 @@ class FlowLimitationClassifier:
             shape: Shape features
             peaks: Peak features
             matched_features: Dictionary to populate with matched features
+            margins: List to populate with per-condition threshold margins
+                (evidence strength) of the matched rule
 
         Returns:
             Flow limitation class (1-7)
         """
         flatness = shape.flatness_index
-        plateau = shape.plateau_duration
+        plateau_fraction = shape.plateau_fraction
         peak_count = peaks.peak_count
         peak_positions = peaks.peak_positions
         symmetry = shape.symmetry_score
-        kurtosis = shape.kurtosis
 
-        peak_position = peak_positions[0] if peak_positions else 0.5
+        # The dominant (most prominent) peak defines the shape class; a small
+        # early peak must not hide a dominant late peak (e.g. Class 6).
+        if peaks.peak_prominences:
+            dominant_idx = int(np.argmax(peaks.peak_prominences))
+            peak_position = peak_positions[dominant_idx]
+        elif peak_positions:
+            peak_position = peak_positions[0]
+        else:
+            peak_position = 0.5
 
         if (
             flatness > FLC.FL_CLASS7_FLATNESS_MIN
-            and plateau > FLC.FL_CLASS7_PLATEAU_MIN
+            and plateau_fraction > FLC.FL_CLASS7_PLATEAU_FRAC_MIN
         ):
             matched_features["flatness_very_high"] = flatness
-            matched_features["plateau_extensive"] = plateau
+            matched_features["plateau_extensive"] = plateau_fraction
+            margins.append(self._margin_above(flatness, FLC.FL_CLASS7_FLATNESS_MIN))
+            margins.append(
+                self._margin_above(plateau_fraction, FLC.FL_CLASS7_PLATEAU_FRAC_MIN)
+            )
             return 7
 
         if (
             peak_position > FLC.FL_CLASS6_PEAK_POSITION_MIN
             and flatness > FLC.FL_CLASS6_FLATNESS_MIN
-            and plateau > FLC.FL_CLASS6_PLATEAU_MIN
+            and plateau_fraction > FLC.FL_CLASS6_PLATEAU_FRAC_MIN
         ):
             matched_features["late_peak"] = peak_position
             matched_features["flatness_high"] = flatness
-            matched_features["plateau_present"] = plateau
+            matched_features["plateau_present"] = plateau_fraction
+            margins.append(
+                self._margin_above(peak_position, FLC.FL_CLASS6_PEAK_POSITION_MIN)
+            )
+            margins.append(self._margin_above(flatness, FLC.FL_CLASS6_FLATNESS_MIN))
+            margins.append(
+                self._margin_above(plateau_fraction, FLC.FL_CLASS6_PLATEAU_FRAC_MIN)
+            )
             return 6
 
         if (
@@ -148,21 +184,32 @@ class FlowLimitationClassifier:
             and FLC.FL_CLASS5_PEAK_POSITION_MIN
             <= peak_position
             <= FLC.FL_CLASS5_PEAK_POSITION_MAX
-            and plateau > FLC.FL_CLASS5_PLATEAU_MIN
+            and plateau_fraction > FLC.FL_CLASS5_PLATEAU_FRAC_MIN
         ):
             matched_features["flatness_high"] = flatness
             matched_features["central_peak"] = peak_position
-            matched_features["plateau_both_sides"] = plateau
+            matched_features["plateau_both_sides"] = plateau_fraction
+            margins.append(self._margin_above(flatness, FLC.FL_CLASS5_FLATNESS_MIN))
+            margins.append(
+                self._margin_above(plateau_fraction, FLC.FL_CLASS5_PLATEAU_FRAC_MIN)
+            )
             return 5
 
         if (
             flatness > FLC.FL_CLASS4_FLATNESS_MIN
             and peak_position < FLC.FL_CLASS4_PEAK_POSITION_MAX
-            and plateau > FLC.FL_CLASS4_PLATEAU_MIN
+            and plateau_fraction > FLC.FL_CLASS4_PLATEAU_FRAC_MIN
         ):
             matched_features["early_peak"] = peak_position
-            matched_features["plateau_sustained"] = plateau
+            matched_features["plateau_sustained"] = plateau_fraction
             matched_features["flatness_moderate"] = flatness
+            margins.append(self._margin_above(flatness, FLC.FL_CLASS4_FLATNESS_MIN))
+            margins.append(
+                self._margin_below(peak_position, FLC.FL_CLASS4_PEAK_POSITION_MAX)
+            )
+            margins.append(
+                self._margin_above(plateau_fraction, FLC.FL_CLASS4_PLATEAU_FRAC_MIN)
+            )
             return 4
 
         if (
@@ -176,6 +223,10 @@ class FlowLimitationClassifier:
                 matched_features["multiple_small_peaks"] = peak_count
                 matched_features["low_prominence"] = max_prominence
                 matched_features["flatness_mild"] = flatness
+                margins.append(self._margin_above(flatness, FLC.FL_CLASS3_FLATNESS_MIN))
+                margins.append(
+                    self._margin_below(max_prominence, FLC.FL_CLASS3_PROMINENCE_MAX)
+                )
                 return 3
 
         if peak_count == FLC.FL_CLASS2_PEAK_COUNT:
@@ -184,16 +235,23 @@ class FlowLimitationClassifier:
                 if spacing > FLC.FL_CLASS2_PEAK_SPACING_MIN:
                     matched_features["double_peak"] = peak_count
                     matched_features["peak_spacing"] = spacing
+                    margins.append(
+                        self._margin_above(spacing, FLC.FL_CLASS2_PEAK_SPACING_MIN)
+                    )
                     return 2
 
         if (
             flatness < FLC.FL_CLASS1_FLATNESS_MAX
             and abs(symmetry) < FLC.FL_CLASS1_SYMMETRY_MAX
-            and kurtosis > FLC.FL_CLASS1_KURTOSIS_MIN
+            and peak_count == 1
         ):
             matched_features["low_flatness"] = flatness
             matched_features["symmetric"] = symmetry
-            matched_features["high_kurtosis"] = kurtosis
+            matched_features["single_peak"] = peak_count
+            margins.append(self._margin_below(flatness, FLC.FL_CLASS1_FLATNESS_MAX))
+            margins.append(
+                self._margin_below(abs(symmetry), FLC.FL_CLASS1_SYMMETRY_MAX)
+            )
             return 1
 
         matched_features["default_classification"] = "no_clear_match"
@@ -205,52 +263,38 @@ class FlowLimitationClassifier:
             return 7
 
     def _calculate_confidence(
-        self, flow_class: int, matched_features: dict[str, Any]
+        self, matched_features: dict[str, Any], margins: list[float]
     ) -> float:
         """
-        Calculate confidence score for classification.
+        Calculate confidence score for classification from threshold margins.
 
-        Confidence is based on:
-        - Number of features that matched the classification rules
-        - Strength of feature values relative to thresholds
-        - Absence of conflicting features
+        A rule matches on how far each value sits past its threshold: the
+        confidence scales with the mean margin (evidence strength) rather than a
+        per-class constant.  Rule-matched confidence is always strictly above the
+        fallback (``FL_DEFAULT_CONFIDENCE``), which is what nightly metrics gate on.
 
         Args:
-            flow_class: Assigned flow class
             matched_features: Features that matched during classification
+            margins: Per-condition threshold margins of the matched rule
 
         Returns:
             Confidence score (0-1)
         """
-        if "default_classification" in matched_features:
+        if "default_classification" in matched_features or not margins:
             return FLC.FL_DEFAULT_CONFIDENCE
 
-        feature_count = len(matched_features)
-
-        if feature_count >= FLC.FL_HIGH_FEATURE_COUNT:
-            base_confidence = FLC.FL_HIGH_CONFIDENCE
-        elif feature_count == FLC.FL_MEDIUM_FEATURE_COUNT:
-            base_confidence = FLC.FL_MEDIUM_CONFIDENCE
-        else:
-            base_confidence = FLC.FL_LOW_CONFIDENCE
-
-        if "flatness_very_high" in matched_features:
-            if matched_features["flatness_very_high"] > FLC.FL_VERY_HIGH_FLATNESS:
-                base_confidence = min(1.0, base_confidence + FLC.FL_CONFIDENCE_BONUS)
-
-        if "double_peak" in matched_features:
-            spacing = matched_features.get("peak_spacing", 0)
-            if spacing > FLC.FL_HIGH_PEAK_SPACING:
-                base_confidence = min(1.0, base_confidence + FLC.FL_CONFIDENCE_BONUS)
-
-        return base_confidence
+        mean_margin = float(np.mean(margins))
+        return FLC.FL_CONFIDENCE_BASE + FLC.FL_CONFIDENCE_MARGIN_SCALE * mean_margin
 
     def calculate_flow_limitation_index(self, patterns: list[FlowPattern]) -> float:
         """
         Calculate session-level flow limitation index.
 
-        The index is a weighted average of flow limitation severity across
-        all breaths, ranging from 0 (no limitation) to 1 (severe limitation).
+        The index is the mean class-severity weight across all breaths, ranging
+        from 0 (no limitation) to 1 (severe limitation).  Confidence is
+        deliberately excluded: it measures certainty, not severity, and folding
+        it in inverts the ordering (a confident Class 6 outscoring a less-certain
+        Class 7).
 
         Args:
             patterns: List of classified breath patterns
@@ -263,8 +307,7 @@ class FlowLimitationClassifier:
 
         total_weight = 0.0
         for pattern in patterns:
-            class_weight = self.classes[pattern.flow_class]["weight"]
-            total_weight += class_weight * pattern.confidence
+            total_weight += self.classes[pattern.flow_class]["weight"]
 
         return total_weight / len(patterns)
 
