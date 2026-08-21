@@ -45,6 +45,7 @@ from snore.analysis.shared.versioning import (
 )
 from snore.analysis.types import AnalysisComputation
 from snore.analysis.types import AnalysisResult as AnalysisResultDTO
+from snore.constants import FlowLimitationConstants as FLC
 from snore.database import models
 from snore.services.breath_service import (
     BreathQueryRange,
@@ -1568,6 +1569,9 @@ class TestVendorApplicability:
         from snore.analysis.shared.breath_segmenter import (
             BreathMetrics,  # noqa: PLC0415
         )
+        from snore.analysis.shared.feature_extractors import (  # noqa: PLC0415
+            largest_inspiratory_segment,
+        )
         from snore.analysis.shared.trigger_cycle import (  # noqa: PLC0415
             APPLICABILITY_UNVALIDATED_DEVICE,
         )
@@ -1595,12 +1599,14 @@ class TestVendorApplicability:
             is_complete=True,
         )
 
+        insp_flow = largest_inspiratory_segment(
+            flow[np.searchsorted(t, bm.start_time) : np.searchsorted(t, bm.end_time)]
+        )
         results = _build_computed_breaths(
             breaths=[bm],
-            timestamps=t,
-            flow_values=flow,
             flow_pattern_by_number={},
             breath_shape_by_number={},
+            insp_flow_by_number={bm.breath_number: insp_flow},
             recovery_breath_indices=set(),
             leak_timestamps=None,
             leak_values=None,
@@ -1620,6 +1626,9 @@ class TestVendorApplicability:
         from snore.analysis.service import _build_computed_breaths  # noqa: PLC0415
         from snore.analysis.shared.breath_segmenter import (
             BreathMetrics,  # noqa: PLC0415
+        )
+        from snore.analysis.shared.feature_extractors import (  # noqa: PLC0415
+            largest_inspiratory_segment,
         )
 
         t = np.linspace(0.0, 30.0, 750)
@@ -1645,12 +1654,14 @@ class TestVendorApplicability:
             is_complete=True,
         )
 
+        insp_flow = largest_inspiratory_segment(
+            flow[np.searchsorted(t, bm.start_time) : np.searchsorted(t, bm.end_time)]
+        )
         results = _build_computed_breaths(
             breaths=[bm],
-            timestamps=t,
-            flow_values=flow,
             flow_pattern_by_number={},
             breath_shape_by_number={},
+            insp_flow_by_number={bm.breath_number: insp_flow},
             recovery_breath_indices=set(),
             leak_timestamps=None,
             leak_values=None,
@@ -4513,7 +4524,7 @@ async def _store_night_with_breath_specs(
     Each dict in ``breath_specs`` may set any ``ComputedBreath`` field;
     unset keys fall back to sensible defaults.  Supported overrides:
     ``inspiration_time_s``, ``i_e_ratio``, ``leak_valid``, ``flow_class``,
-    ``peak_flow_lpm``, ``is_recovery_breath``.
+    ``flow_confidence``, ``peak_flow_lpm``, ``is_recovery_breath``.
     """
     from snore.analysis.types import ComputedBreath  # noqa: PLC0415
 
@@ -4540,7 +4551,7 @@ async def _store_night_with_breath_specs(
                 flatness_index=0.2,
                 mid_insp_flattening=0.35,
                 flow_class=spec.get("flow_class", 1),
-                flow_confidence=0.9,
+                flow_confidence=spec.get("flow_confidence", 0.9),
                 is_recovery_breath=spec.get("is_recovery_breath", False),
                 inferred_trigger_type="normal",
                 trigger_confidence=0.8,
@@ -4806,6 +4817,64 @@ class TestNightlySummaryFlClassGe4Pct:
         night = summary.nights[0]
         assert night.fl_class_ge4_pct is None
         assert night.fl_class_ge4_pct_reason == NullReason.NOT_AVAILABLE
+
+    async def test_fallback_confidence_breath_excluded_from_numerator_and_denominator(
+        self, async_db_session
+    ):
+        """A fallback-confidence breath (== FL_DEFAULT_CONFIDENCE) is dropped from
+        both numerator and denominator; only rule-matched breaths count."""
+        therapy_date = date(2025, 7, 12)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                # Rule-matched class >= 4 → numerator and denominator
+                {"flow_class": 5, "flow_confidence": 0.9},
+                # Rule-matched class < 4 → denominator only
+                {"flow_class": 1, "flow_confidence": 0.9},
+                # Fallback guess sitting at the gate boundary → excluded from both
+                {"flow_class": 5, "flow_confidence": FLC.FL_DEFAULT_CONFIDENCE},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        # Denominator 2 (the two 0.9-confidence breaths), numerator 1.  Counting
+        # the fallback class-5 breath would give 2/3 instead.
+        assert night.fl_class_ge4_pct == pytest.approx(50.0)
+        assert night.fl_class_ge4_pct_reason is None
+
+    async def test_null_confidence_breath_excluded_from_numerator_and_denominator(
+        self, async_db_session
+    ):
+        """A breath with flow_confidence=None is dropped from both numerator and
+        denominator (the gate requires a determinate confidence)."""
+        therapy_date = date(2025, 7, 13)
+        profile_id, device_id = await _store_night_with_breath_specs(
+            async_db_session,
+            therapy_date,
+            breath_specs=[
+                {"flow_class": 5, "flow_confidence": 0.9},
+                {"flow_class": 1, "flow_confidence": 0.9},
+                # No confidence recorded → excluded from both
+                {"flow_class": 5, "flow_confidence": None},
+            ],
+        )
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        summary = await svc.get_nightly_range_summary(
+            date_start=therapy_date,
+            date_end=therapy_date,
+            device_id=device_id,
+        )
+
+        night = summary.nights[0]
+        assert night.fl_class_ge4_pct == pytest.approx(50.0)
+        assert night.fl_class_ge4_pct_reason is None
 
 
 # ---------------------------------------------------------------------------

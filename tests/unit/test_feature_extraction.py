@@ -7,13 +7,93 @@ and spectral analysis.
 
 import numpy as np
 
-from snore.analysis.shared.feature_extractors import WaveformFeatureExtractor
+from snore.analysis.shared.feature_extractors import (
+    WaveformFeatureExtractor,
+    largest_inspiratory_segment,
+)
 from tests.helpers.synthetic_data import (
     generate_flattened_breath,
     generate_multi_peak_breath,
     generate_sinusoidal_breath,
 )
 from tests.helpers.validation_helpers import assert_features_in_range
+
+
+class TestLargestInspiratorySegment:
+    """Test contiguous-run extraction of inspiratory flow."""
+
+    def test_mid_breath_dip_returns_single_hump(self):
+        """A mid-breath dip below zero must not stitch two humps together."""
+        flow = np.array(
+            [
+                1.0,
+                2.0,
+                3.0,
+                2.0,
+                1.0,
+                -1.0,
+                -2.0,
+                -1.0,
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                3.0,
+                2.0,
+                1.0,
+            ]
+        )
+
+        segment = largest_inspiratory_segment(flow)
+
+        # Longest contiguous positive run is the second hump (7 samples), not the
+        # 12-sample concatenation that a boolean mask would produce.
+        assert len(segment) == 7
+        assert np.array_equal(segment, np.array([1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0]))
+        assert len(flow[flow > 0]) == 12
+
+    def test_single_run_returned_whole(self):
+        """A waveform with one positive run returns that run unchanged."""
+        flow = np.array([-1.0, 2.0, 4.0, 2.0, -1.0])
+
+        segment = largest_inspiratory_segment(flow)
+
+        assert np.array_equal(segment, np.array([2.0, 4.0, 2.0]))
+
+    def test_no_positive_samples_returns_empty(self):
+        """All-negative or empty input returns an empty array."""
+        assert len(largest_inspiratory_segment(np.array([-1.0, -2.0, -3.0]))) == 0
+        assert len(largest_inspiratory_segment(np.array([]))) == 0
+
+
+class TestPlateauFraction:
+    """Test plateau_fraction normalization by inspiration time."""
+
+    def test_plateau_fraction_normalized_to_duration(self):
+        """plateau_fraction equals plateau_duration / inspiration time."""
+        extractor = WaveformFeatureExtractor()
+        _, flow = generate_flattened_breath(duration=2.0, flatness_index=0.9)
+        insp_flow = flow[flow > 0]
+
+        shape = extractor.extract_shape_features(insp_flow, sample_rate=25.0)
+
+        inspiration_time = len(insp_flow) / 25.0
+        expected = shape.plateau_duration / inspiration_time
+        assert abs(shape.plateau_fraction - expected) < 1e-9
+        assert 0.0 <= shape.plateau_fraction <= 1.0
+
+    def test_plateau_fraction_independent_of_breath_duration(self):
+        """Same shape sampled at two durations yields the same plateau_fraction."""
+        extractor = WaveformFeatureExtractor()
+        _, short = generate_flattened_breath(duration=1.5, flatness_index=0.9)
+        _, long = generate_flattened_breath(duration=3.0, flatness_index=0.9)
+
+        short_shape = extractor.extract_shape_features(
+            short[short > 0], sample_rate=25.0
+        )
+        long_shape = extractor.extract_shape_features(long[long > 0], sample_rate=25.0)
+
+        assert abs(short_shape.plateau_fraction - long_shape.plateau_fraction) < 0.05
 
 
 class TestFlatnessIndexCalculation:

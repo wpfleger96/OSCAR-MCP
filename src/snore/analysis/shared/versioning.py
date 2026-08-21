@@ -31,8 +31,8 @@ from snore.analysis.modes.config import AVAILABLE_CONFIGS
 # ---------------------------------------------------------------------------
 
 SEGMENTER_ALGO_VERSION: str = "v1"
-FL_CLASSIFIER_ALGO_VERSION: str = "v1"
-FLATTENING_ALGO_VERSION: str = "v1"  # mid-insp flattening (new)
+FL_CLASSIFIER_ALGO_VERSION: str = "v2"
+FLATTENING_ALGO_VERSION: str = "v2"  # mid-insp flattening
 TRIGGER_CYCLE_ALGO_VERSION: str = "v1"  # trigger/cycle heuristic (new, experimental)
 LEAK_VALID_ALGO: str = "v1"
 RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"

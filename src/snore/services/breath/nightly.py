@@ -18,6 +18,7 @@ from snore.analysis.shared.versioning import (
     AnalysisStatus,
     NullReason,
 )
+from snore.constants import FlowLimitationConstants as FLC
 from snore.database import models
 from snore.utils.stats import percentile_nearest_rank
 
@@ -243,7 +244,14 @@ class NightlyMixin(_BreathServiceCore):
                         ti_vals.append(b.inspiration_time_s)
                     if b.i_e_ratio is not None:
                         ie_vals.append(b.i_e_ratio)
-                    if b.flow_class is not None:
+                    # Count only rule-matched classifications. Fallback guesses
+                    # sit at exactly FL_DEFAULT_CONFIDENCE and would otherwise
+                    # inflate the FL rate with class-4 guesses.
+                    if (
+                        b.flow_class is not None
+                        and b.flow_confidence is not None
+                        and b.flow_confidence > FLC.FL_DEFAULT_CONFIDENCE
+                    ):
                         fl_class_den += 1
                         if b.flow_class >= 4:
                             fl_class_ge4_num += 1
@@ -455,7 +463,7 @@ class NightlyMixin(_BreathServiceCore):
         # Bulk latest-AnalysisResult classification (shared helper, no N+1)
         ar_classification = await self._classify_sessions_bulk(all_session_ids)
 
-        # Bulk Breath query for all OK ar_ids (9 columns only)
+        # Bulk Breath query for all OK ar_ids (10 columns only)
         ok_ar_ids = [
             ar_id
             for (_status, _algo, ar_id) in ar_classification.values()
@@ -472,6 +480,7 @@ class NightlyMixin(_BreathServiceCore):
                 models.Breath.inspiration_time_s,
                 models.Breath.i_e_ratio,
                 models.Breath.flow_class,
+                models.Breath.flow_confidence,
                 models.Breath.is_recovery_breath,
                 models.Breath.peak_flow_lpm,
             )
