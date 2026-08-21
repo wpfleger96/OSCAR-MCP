@@ -41,6 +41,8 @@ async def paginate(
     means unlimited; a non-positive ``offset`` is omitted.  Row-shape mapping
     stays with the caller — the executed page ``Result`` is returned as-is.
     """
+    # COUNT over stmt's subquery is correct only if the statement's joins are
+    # row-preserving (1:1 / non-multiplying); a multiplying join inflates total.
     total = (
         await db.execute(select(func.count()).select_from(stmt.subquery()))
     ).scalar() or 0

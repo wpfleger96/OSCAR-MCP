@@ -69,16 +69,10 @@ from snore.services.breath import (
     _count_fl_run_reras as _count_fl_run_reras,
 )
 from snore.services.breath import (
-    _extract_window_mean as _extract_window_mean,
-)
-from snore.services.breath import (
     _fetch_waveform_blobs as _fetch_waveform_blobs,
 )
 from snore.services.breath import (
     _iter_fl_run_recoveries as _iter_fl_run_recoveries,
-)
-from snore.services.breath import (
-    _resolve_timezone as _resolve_timezone,
 )
 
 __all__ = [

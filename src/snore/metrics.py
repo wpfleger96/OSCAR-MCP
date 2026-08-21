@@ -1,9 +1,14 @@
-"""Single-source registry for the session/day metric set.
+"""Drift-guard registry for the session/day metric set.
 
 The 74-field metric vocabulary is declared in several places (unified parser
 model, ORM ``Statistics``, services schema, export lists, day aggregation).
-This leaf module (stdlib-only) is the canonical declaration; schema-alignment
-tests assert the other declarations stay in sync with it.
+This leaf module (stdlib-only) does not collapse those declarations into one:
+adding a session metric still requires parallel edits to the ORM ``Statistics``
+model and the parser dataclass.  What it buys is a guard — schema-alignment
+tests assert the other declarations stay in sync with this registry, so drift
+surfaces as a test failure instead of silent data loss.  Day aggregation
+(``DAY_METRIC_STAT_COLUMNS``) and export keys (``EXPORT_STAT_KEYS``) are the
+genuine single-source wins: they are declared only here.
 """
 
 from dataclasses import dataclass
@@ -21,24 +26,22 @@ class DayAgg(StrEnum):
 
 @dataclass(frozen=True)
 class MetricSpec:
-    """One metric column: its name, display unit, and day-level aggregation.
+    """One metric column: its name and day-level aggregation.
 
     ``day_agg`` is None for metrics that have no mirrored Day-table column.
     """
 
     name: str
-    unit: str | None
     day_agg: DayAgg | None
 
 
-def _m(name: str, unit: str | None = None) -> MetricSpec:
+def _m(name: str) -> MetricSpec:
     """Session-level metric with no Day-table column."""
-    return MetricSpec(name=name, unit=unit, day_agg=None)
+    return MetricSpec(name=name, day_agg=None)
 
 
 # All models.Statistics metric columns (every column except session_id),
-# ordered as declared in the ORM.  Units follow the field descriptions in
-# parsers.unified.SessionStatistics, applied family-wide.
+# ordered as declared in the ORM.
 SESSION_METRICS: tuple[MetricSpec, ...] = (
     # Event counts
     _m("obstructive_apneas"),
@@ -48,79 +51,79 @@ SESSION_METRICS: tuple[MetricSpec, ...] = (
     _m("reras"),
     _m("flow_limitations"),
     # Indices
-    _m("ahi", "events/h"),
-    _m("oai", "events/h"),
-    _m("cai", "events/h"),
-    _m("hi", "events/h"),
-    _m("rei", "events/h"),
+    _m("ahi"),
+    _m("oai"),
+    _m("cai"),
+    _m("hi"),
+    _m("rei"),
     # Pressure
-    _m("pressure_min", "cmH2O"),
-    _m("pressure_max", "cmH2O"),
-    _m("pressure_median", "cmH2O"),
-    _m("pressure_mean", "cmH2O"),
-    _m("pressure_95th", "cmH2O"),
+    _m("pressure_min"),
+    _m("pressure_max"),
+    _m("pressure_median"),
+    _m("pressure_mean"),
+    _m("pressure_95th"),
     # EPAP
-    _m("epap_min", "cmH2O"),
-    _m("epap_max", "cmH2O"),
-    _m("epap_median", "cmH2O"),
-    _m("epap_mean", "cmH2O"),
-    _m("epap_95th", "cmH2O"),
+    _m("epap_min"),
+    _m("epap_max"),
+    _m("epap_median"),
+    _m("epap_mean"),
+    _m("epap_95th"),
     # IPAP
-    _m("ipap_median", "cmH2O"),
-    _m("ipap_95th", "cmH2O"),
-    _m("ipap_max", "cmH2O"),
+    _m("ipap_median"),
+    _m("ipap_95th"),
+    _m("ipap_max"),
     # Leak
-    _m("leak_min", "L/min"),
-    _m("leak_max", "L/min"),
-    _m("leak_median", "L/min"),
-    _m("leak_mean", "L/min"),
-    _m("leak_95th", "L/min"),
-    _m("leak_percentile_70", "L/min"),
+    _m("leak_min"),
+    _m("leak_max"),
+    _m("leak_median"),
+    _m("leak_mean"),
+    _m("leak_95th"),
+    _m("leak_percentile_70"),
     # Respiratory rate
-    _m("respiratory_rate_min", "breaths/min"),
-    _m("respiratory_rate_max", "breaths/min"),
-    _m("respiratory_rate_mean", "breaths/min"),
+    _m("respiratory_rate_min"),
+    _m("respiratory_rate_max"),
+    _m("respiratory_rate_mean"),
     # Tidal volume
-    _m("tidal_volume_min", "mL"),
-    _m("tidal_volume_max", "mL"),
-    _m("tidal_volume_mean", "mL"),
+    _m("tidal_volume_min"),
+    _m("tidal_volume_max"),
+    _m("tidal_volume_mean"),
     # Minute ventilation
-    _m("minute_ventilation_min", "L/min"),
-    _m("minute_ventilation_max", "L/min"),
-    _m("minute_ventilation_mean", "L/min"),
+    _m("minute_ventilation_min"),
+    _m("minute_ventilation_max"),
+    _m("minute_ventilation_mean"),
     # SpO2 / pulse oximetry
-    _m("spo2_min", "%"),
-    _m("spo2_max", "%"),
-    _m("spo2_mean", "%"),
-    _m("spo2_median", "%"),
-    _m("spo2_95th", "%"),
-    _m("spo2_time_below_90", "seconds"),
-    _m("pulse_min", "bpm"),
-    _m("pulse_max", "bpm"),
-    _m("pulse_mean", "bpm"),
+    _m("spo2_min"),
+    _m("spo2_max"),
+    _m("spo2_mean"),
+    _m("spo2_median"),
+    _m("spo2_95th"),
+    _m("spo2_time_below_90"),
+    _m("pulse_min"),
+    _m("pulse_max"),
+    _m("pulse_mean"),
     # Usage
-    _m("usage_hours", "hours"),
+    _m("usage_hours"),
     # STR daily summary extras
-    _m("uai", "events/h"),
-    _m("ai", "events/h"),
-    _m("rin", "events/h"),
-    _m("csr_pct", "%"),
-    _m("spont_cyc_pct", "%"),
-    _m("respiratory_rate_95th", "breaths/min"),
-    _m("tidal_volume_95th", "mL"),
-    _m("minute_ventilation_95th", "L/min"),
+    _m("uai"),
+    _m("ai"),
+    _m("rin"),
+    _m("csr_pct"),
+    _m("spont_cyc_pct"),
+    _m("respiratory_rate_95th"),
+    _m("tidal_volume_95th"),
+    _m("minute_ventilation_95th"),
     _m("ie_ratio_median"),
     _m("ie_ratio_95th"),
     _m("ie_ratio_max"),
-    _m("ti_median", "seconds"),
-    _m("ti_95th", "seconds"),
-    _m("ti_max", "seconds"),
-    _m("flow_5th", "L/min"),
-    _m("flow_95th", "L/min"),
-    _m("blow_press_5th", "cmH2O"),
-    _m("blow_press_95th", "cmH2O"),
-    _m("blow_flow_median", "L/min"),
-    _m("amb_humidity_median", "%"),
+    _m("ti_median"),
+    _m("ti_95th"),
+    _m("ti_max"),
+    _m("flow_5th"),
+    _m("flow_95th"),
+    _m("blow_press_5th"),
+    _m("blow_press_95th"),
+    _m("blow_flow_median"),
+    _m("amb_humidity_median"),
     _m("hum_temp_median"),
     _m("htube_temp_median"),
     _m("htube_pow_median"),
@@ -129,32 +132,32 @@ SESSION_METRICS: tuple[MetricSpec, ...] = (
 )
 
 
-def _day(name: str, unit: str | None, day_agg: DayAgg) -> MetricSpec:
-    return MetricSpec(name=name, unit=unit, day_agg=day_agg)
+def _day(name: str, day_agg: DayAgg) -> MetricSpec:
+    return MetricSpec(name=name, day_agg=day_agg)
 
 
 # Day-table stat columns mirroring Statistics fields, with their day-level
 # aggregation.  Counts, indices (ahi/oai/cai/hi), hours, and bookkeeping
 # columns are aggregated separately and intentionally excluded.
 DAY_METRIC_STAT_COLUMNS: tuple[MetricSpec, ...] = (
-    _day("pressure_min", "cmH2O", DayAgg.MIN),
-    _day("pressure_max", "cmH2O", DayAgg.MAX),
-    _day("pressure_median", "cmH2O", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("pressure_mean", "cmH2O", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("pressure_95th", "cmH2O", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("epap_min", "cmH2O", DayAgg.MIN),
-    _day("epap_max", "cmH2O", DayAgg.MAX),
-    _day("epap_median", "cmH2O", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("epap_mean", "cmH2O", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("epap_95th", "cmH2O", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("leak_min", "L/min", DayAgg.MIN),
-    _day("leak_max", "L/min", DayAgg.MAX),
-    _day("leak_median", "L/min", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("leak_mean", "L/min", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("leak_95th", "L/min", DayAgg.USAGE_WEIGHTED_MEAN),
-    _day("spo2_min", "%", DayAgg.MIN),
-    _day("spo2_max", "%", DayAgg.MAX),
-    _day("spo2_mean", "%", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("pressure_min", DayAgg.MIN),
+    _day("pressure_max", DayAgg.MAX),
+    _day("pressure_median", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("pressure_mean", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("pressure_95th", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("epap_min", DayAgg.MIN),
+    _day("epap_max", DayAgg.MAX),
+    _day("epap_median", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("epap_mean", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("epap_95th", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("leak_min", DayAgg.MIN),
+    _day("leak_max", DayAgg.MAX),
+    _day("leak_median", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("leak_mean", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("leak_95th", DayAgg.USAGE_WEIGHTED_MEAN),
+    _day("spo2_min", DayAgg.MIN),
+    _day("spo2_max", DayAgg.MAX),
+    _day("spo2_mean", DayAgg.USAGE_WEIGHTED_MEAN),
 )
 
 
