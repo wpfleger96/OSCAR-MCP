@@ -173,6 +173,11 @@ class DayManager:
             day.pressure_median = None
             day.pressure_mean = None
             day.pressure_95th = None
+            day.epap_min = None
+            day.epap_max = None
+            day.epap_median = None
+            day.epap_mean = None
+            day.epap_95th = None
             day.leak_min = None
             day.leak_max = None
             day.leak_median = None

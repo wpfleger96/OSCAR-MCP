@@ -217,6 +217,44 @@ class TestStatisticalAggregation:
         assert day.obstructive_apneas == 0
         assert day.ahi is None
 
+    async def test_empty_day_resets_epap_statistics(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """Regression: epap fields must reset to None when a day loses all sessions.
+
+        The reset block previously cleared pressure/leak/spo2 but left stale
+        epap aggregates behind.
+        """
+        device = async_test_device
+
+        session = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 12, 0, 0),
+            duration_hours=8.0,
+            epap_min=5.0,
+            epap_max=9.0,
+            epap_median=7.0,
+            epap_mean=7.2,
+            epap_95th=8.5,
+        )
+
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+        assert day.epap_min == pytest.approx(5.0, abs=0.01)
+        assert day.epap_max == pytest.approx(9.0, abs=0.01)
+        assert day.epap_median == pytest.approx(7.0, abs=0.01)
+        assert day.epap_mean == pytest.approx(7.2, abs=0.01)
+        assert day.epap_95th == pytest.approx(8.5, abs=0.01)
+
+        session.day_id = None
+        await async_db_session.flush()
+        await DayManager._aggregate_day_statistics(day, async_db_session)
+
+        assert day.epap_min is None
+        assert day.epap_max is None
+        assert day.epap_median is None
+        assert day.epap_mean is None
+        assert day.epap_95th is None
+
     async def test_partial_data_null_values(
         self, async_db_session, async_test_device, async_test_session_factory
     ):

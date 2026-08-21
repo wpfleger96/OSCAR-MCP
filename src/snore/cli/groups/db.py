@@ -422,37 +422,18 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
         days_q = select(Day).where(Day.device_id == src_dev.id)
         src_days = (await db.execute(days_q)).scalars().all()
         for src_day in src_days:
+            # Reflect all aggregate columns so new metrics are never silently
+            # dropped; id/device_id/date get remapped or shifted values and the
+            # audit instants regenerate via defaults.
+            day_payload = {
+                c.name: getattr(src_day, c.name)
+                for c in Day.__table__.columns
+                if c.name not in ("id", "device_id", "date", "created_at", "updated_at")
+            }
             demo_day = Day(
                 device_id=demo_dev.id,
                 date=shift_date(src_day.date),
-                session_count=src_day.session_count,
-                total_therapy_hours=src_day.total_therapy_hours,
-                obstructive_apneas=src_day.obstructive_apneas,
-                central_apneas=src_day.central_apneas,
-                hypopneas=src_day.hypopneas,
-                reras=src_day.reras,
-                ahi=src_day.ahi,
-                oai=src_day.oai,
-                cai=src_day.cai,
-                hi=src_day.hi,
-                pressure_min=src_day.pressure_min,
-                pressure_max=src_day.pressure_max,
-                pressure_median=src_day.pressure_median,
-                pressure_mean=src_day.pressure_mean,
-                pressure_95th=src_day.pressure_95th,
-                epap_min=src_day.epap_min,
-                epap_max=src_day.epap_max,
-                epap_median=src_day.epap_median,
-                epap_mean=src_day.epap_mean,
-                epap_95th=src_day.epap_95th,
-                leak_min=src_day.leak_min,
-                leak_max=src_day.leak_max,
-                leak_median=src_day.leak_median,
-                leak_mean=src_day.leak_mean,
-                leak_95th=src_day.leak_95th,
-                spo2_min=src_day.spo2_min,
-                spo2_max=src_day.spo2_max,
-                spo2_mean=src_day.spo2_mean,
+                **day_payload,
             )
             db.add(demo_day)
             await db.flush()
@@ -531,56 +512,17 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
             Statistics.session_id.in_(source_session_ids)
         )
         for src_stats in (await db.execute(stats_q)).scalars().all():
+            # Reflect all metric columns so new metrics are never silently
+            # dropped (test_demo asserts every column stays numeric).
+            payload = {
+                c.name: getattr(src_stats, c.name)
+                for c in Statistics.__table__.columns
+                if c.name not in ("id", "session_id")
+            }
             db.add(
                 Statistics(
                     session_id=src_to_demo_session[src_stats.session_id],
-                    obstructive_apneas=src_stats.obstructive_apneas,
-                    central_apneas=src_stats.central_apneas,
-                    mixed_apneas=src_stats.mixed_apneas,
-                    hypopneas=src_stats.hypopneas,
-                    reras=src_stats.reras,
-                    flow_limitations=src_stats.flow_limitations,
-                    ahi=src_stats.ahi,
-                    oai=src_stats.oai,
-                    cai=src_stats.cai,
-                    hi=src_stats.hi,
-                    rei=src_stats.rei,
-                    pressure_min=src_stats.pressure_min,
-                    pressure_max=src_stats.pressure_max,
-                    pressure_median=src_stats.pressure_median,
-                    pressure_mean=src_stats.pressure_mean,
-                    pressure_95th=src_stats.pressure_95th,
-                    epap_min=src_stats.epap_min,
-                    epap_max=src_stats.epap_max,
-                    epap_median=src_stats.epap_median,
-                    epap_mean=src_stats.epap_mean,
-                    epap_95th=src_stats.epap_95th,
-                    ipap_median=src_stats.ipap_median,
-                    ipap_95th=src_stats.ipap_95th,
-                    ipap_max=src_stats.ipap_max,
-                    leak_min=src_stats.leak_min,
-                    leak_max=src_stats.leak_max,
-                    leak_median=src_stats.leak_median,
-                    leak_mean=src_stats.leak_mean,
-                    leak_95th=src_stats.leak_95th,
-                    leak_percentile_70=src_stats.leak_percentile_70,
-                    respiratory_rate_min=src_stats.respiratory_rate_min,
-                    respiratory_rate_max=src_stats.respiratory_rate_max,
-                    respiratory_rate_mean=src_stats.respiratory_rate_mean,
-                    tidal_volume_min=src_stats.tidal_volume_min,
-                    tidal_volume_max=src_stats.tidal_volume_max,
-                    tidal_volume_mean=src_stats.tidal_volume_mean,
-                    minute_ventilation_min=src_stats.minute_ventilation_min,
-                    minute_ventilation_max=src_stats.minute_ventilation_max,
-                    minute_ventilation_mean=src_stats.minute_ventilation_mean,
-                    spo2_min=src_stats.spo2_min,
-                    spo2_max=src_stats.spo2_max,
-                    spo2_mean=src_stats.spo2_mean,
-                    spo2_time_below_90=src_stats.spo2_time_below_90,
-                    pulse_min=src_stats.pulse_min,
-                    pulse_max=src_stats.pulse_max,
-                    pulse_mean=src_stats.pulse_mean,
-                    usage_hours=src_stats.usage_hours,
+                    **payload,
                 )
             )
             counts["statistics"] += 1
