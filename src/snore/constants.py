@@ -119,6 +119,31 @@ class EventDetectionConstants:
     EVENT_TERMINATION_RECOVERY = 0.5
     EVENT_TERMINATION_MIN_BREATHS = 2
 
+    # Analysis-time RERA detector (detector.py::_detect_reras): amplitude-
+    # crescendo proxy. A run of breaths with amplitude reduction in
+    # [RERA_REDUCTION_MIN, RERA_REDUCTION_MAX) followed by a recovery breath
+    # (reduction < RERA_RECOVERY_REDUCTION_MAX AND amplitude increase >=
+    # RERA_RECOVERY_INCREASE_MIN over the run mean). Distinct from the
+    # query-time FL-run proxy in RERAProxyConstants.
+    RERA_REDUCTION_MIN = 0.20
+    RERA_REDUCTION_MAX = 0.30
+    RERA_RECOVERY_REDUCTION_MAX = 0.10
+    RERA_RECOVERY_INCREASE_MIN = 0.50
+
+
+class RERAProxyConstants:
+    """Constants for the query-time RERA proxy (breath_service.py).
+
+    Criterion: runs of >= MIN_FL_RUN_LENGTH consecutive stored breaths with
+    flow_class >= FL_CLASS_THRESHOLD ending in a recovery breath. Independent of
+    the analysis-time amplitude-crescendo RERA detector (EventDetectionConstants
+    RERA_* values); versioned separately as RERA_PROXY_ALGO_VERSION.
+    """
+
+    FL_CLASS_THRESHOLD = 4
+    MIN_FL_RUN_LENGTH = 2
+    RECOVERY_AMPLITUDE_MARGIN = 0.20
+
 
 class PatternDetectionConstants:
     """Constants for complex pattern detection (pattern_detector.py)."""

@@ -35,7 +35,12 @@ FL_CLASSIFIER_ALGO_VERSION: str = "v1"
 FLATTENING_ALGO_VERSION: str = "v1"  # mid-insp flattening (new)
 TRIGGER_CYCLE_ALGO_VERSION: str = "v1"  # trigger/cycle heuristic (new, experimental)
 LEAK_VALID_ALGO: str = "v1"
-RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"
+# v2: hypopnea-contained breaths now excluded from downstream baselines, so
+# RERA/recovery outputs shift for sessions with hypopneas. No dedicated
+# apnea/hypopnea event-detector identity key exists; the in_event fix is applied
+# after hypopnea merging, so AHI and persisted apneas/hypopneas are unchanged and
+# only recovery/RERA outputs move — this key covers them.
+RECOVERY_DETECTOR_ALGO_VERSION: str = "v2"
 # ramp_active / mask_off breath validity flags: settings-driven timed ramp
 # heuristic + persisted mask-on-segment gap overlap.
 VALIDITY_FLAGS_ALGO_VERSION: str = "v1"

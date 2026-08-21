@@ -19,6 +19,7 @@ from snore.analysis.shared.versioning import (
     NullReason,
     TimezoneStatus,
 )
+from snore.constants import RERAProxyConstants
 
 # ---------------------------------------------------------------------------
 # Analysis-status/versioning types re-exported from versioning (single source of truth)
@@ -278,9 +279,11 @@ class WindowCriterionOptions(BaseModel):
     context_breaths_before: int = Field(default=3, ge=0)
     context_breaths_after: int = Field(default=3, ge=0)
     context_seconds: float = 120.0
-    min_fl_run_length: int = 2
-    fl_class_threshold: int = 4
-    recovery_amplitude_margin: float = Field(default=0.20, ge=0.0)
+    min_fl_run_length: int = RERAProxyConstants.MIN_FL_RUN_LENGTH
+    fl_class_threshold: int = RERAProxyConstants.FL_CLASS_THRESHOLD
+    recovery_amplitude_margin: float = Field(
+        default=RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN, ge=0.0
+    )
 
 
 class WindowResult(BaseModel):
@@ -551,6 +554,11 @@ class NightlyAnalysisSummary(BaseModel):
     missing_or_stale_session_ids: list[int] = Field(default_factory=list)
     algorithm_identity: AlgorithmIdentity | None
 
+    # RERA count from the query-time FL-run proxy v2 over stored breath rows:
+    # runs of flow_class >= 4 ending in a recovery breath (see
+    # _count_fl_run_reras). This is a DIFFERENT RERA definition from the
+    # analysis-time amplitude-crescendo detector behind ModeResult.rdi; the two
+    # indices disagree by construction.
     rera_count: int | None
     rera_reason: NullReason | None
     # Version of the query-time RERA-proxy criterion (not part of
@@ -577,6 +585,10 @@ class NightlyAnalysisSummary(BaseModel):
     compliance_threshold_hours: float
     is_compliant: bool
 
+    # rera_index = rera_count (FL-run proxy v2) / therapy hours; rdi = day AHI +
+    # rera_index. RERAs come from the query-time FL-run proxy, NOT the
+    # analysis-time amplitude-crescendo detector behind ModeResult.rdi, so this
+    # nightly rdi and the per-session ModeResult.rdi disagree by construction.
     rera_index: float | None = None
     rera_index_reason: NullReason | None = None
     rdi: float | None = None

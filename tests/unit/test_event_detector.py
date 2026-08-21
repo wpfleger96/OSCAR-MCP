@@ -2329,3 +2329,109 @@ class TestDetectNearZeroFlowVectorized:
         assert len(events) == 1
         assert events[0].start_time == pytest.approx(float(timestamps[0]), abs=1e-9)
         assert events[0].end_time == pytest.approx(float(timestamps[-1]), abs=1e-9)
+
+
+def _uniform_breath(number: int, start: float, amplitude: float) -> BreathMetrics:
+    """Build a 4-second breath at a fixed amplitude for detector tests."""
+    return BreathMetrics(
+        breath_number=number,
+        start_time=start,
+        middle_time=start + 2.0,
+        end_time=start + 4.0,
+        duration=4.0,
+        tidal_volume=amplitude * 10.0,
+        tidal_volume_smoothed=amplitude * 10.0,
+        peak_inspiratory_flow=amplitude,
+        peak_expiratory_flow=amplitude * 0.8,
+        inspiration_time=2.0,
+        expiration_time=2.0,
+        i_e_ratio=1.0,
+        respiratory_rate=15.0,
+        respiratory_rate_rolling=15.0,
+        minute_ventilation=7.5,
+        amplitude=amplitude,
+        is_complete=True,
+    )
+
+
+class TestHypopneaBaselineContamination:
+    """Hypopnea-contained breaths must be excluded from downstream baselines."""
+
+    def test_hypopnea_breaths_marked_in_event_and_excluded_from_baseline(self):
+        """Detected hypopnea breaths are flagged in_event, decontaminating baselines.
+
+        The fix marks hypopnea-contained breaths in_event so they no longer feed
+        the p90 baselines used by downstream RERA detection. Here the eval window
+        straddles the flagged run: pre-fix (flags cleared) all six breaths feed a
+        percentile; post-fix the three flagged breaths are dropped, leaving fewer
+        than the time-based 5-sample floor so the clean fallback baseline is
+        returned. The computed baseline therefore differs pre/post fix.
+        """
+        # Time-based baseline over the previous 24 s (~6 breaths at 4 s each).
+        config = AASM_CONFIG.model_copy(update={"baseline_window": 24.0})
+        detector = EventDetector(config)
+
+        breaths = [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(10)]
+        # 3 hypopnea breaths (amplitude 15 → 70% reduction vs the 50 baseline);
+        # short enough that baseline drift never terminates the run early.
+        breaths += [_uniform_breath(i + 1, float(i * 4), 15.0) for i in range(10, 13)]
+        breaths += [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(13, 19)]
+
+        hypopneas = detector._detect_hypopneas(
+            breaths, flow_data=None, spo2_signal=None, exclude_events=[]
+        )
+
+        assert len(hypopneas) >= 1
+        # The whole 3-breath run is contained and flagged; neighbours are not.
+        assert [b.in_event for b in breaths[10:13]] == [True, True, True]
+        assert breaths[9].in_event is False
+        assert breaths[13].in_event is False
+
+        # Downstream baseline at index 13 (window breaths[7:13] = 3 normal + the
+        # 3 flagged breaths). Post-fix: 3 valid values < 5 → fallback 30.0.
+        baseline_post_fix = _calculate_time_based_baseline(config, breaths, 13)
+
+        # Pre-fix simulation: clear the flags the detector set, so the reduced
+        # breaths contaminate the same window (6 values → p90 = 50.0).
+        for breath in breaths:
+            breath.in_event = False
+        baseline_pre_fix = _calculate_time_based_baseline(config, breaths, 13)
+
+        assert baseline_pre_fix == pytest.approx(50.0)
+        assert baseline_post_fix == pytest.approx(30.0)
+        assert baseline_post_fix != baseline_pre_fix
+
+
+class TestReraThresholdConfig:
+    """RERA detection reads its thresholds from DetectionModeConfig."""
+
+    def _rera_pattern(self) -> list[BreathMetrics]:
+        """10 normal breaths, two 25%-reduced breaths, then a recovery breath."""
+        breaths = [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(10)]
+        breaths.append(_uniform_breath(11, 40.0, 37.5))  # 25% reduction
+        breaths.append(_uniform_breath(12, 44.0, 37.5))  # 25% reduction
+        breaths.append(_uniform_breath(13, 48.0, 60.0))  # recovery: +60% over 37.5
+        breaths += [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(13, 15)]
+        return breaths
+
+    def test_default_thresholds_detect_rera(self):
+        """The default [0.20, 0.30) band detects the 25%-reduction sequence."""
+        breaths = self._rera_pattern()
+        reras = EventDetector(AASM_CONFIG)._detect_reras(breaths, [], [])
+        assert len(reras) == 1
+
+    def test_raised_reduction_min_suppresses_rera(self):
+        """Raising rera_reduction_min above 25% removes the detection."""
+        config = AASM_CONFIG.model_copy(
+            update={"rera_reduction_min": 0.30, "rera_reduction_max": 0.40}
+        )
+        breaths = self._rera_pattern()
+        reras = EventDetector(config)._detect_reras(breaths, [], [])
+        assert len(reras) == 0
+
+    def test_raised_recovery_increase_min_suppresses_rera(self):
+        """Requiring a larger recovery increase than 60% removes the detection."""
+        config = AASM_CONFIG.model_copy(update={"rera_recovery_increase_min": 0.80})
+        breaths = self._rera_pattern()
+        reras = EventDetector(config)._detect_reras(breaths, [], [])
+        assert len(reras) == 0

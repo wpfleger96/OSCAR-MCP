@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snore.constants import RERAProxyConstants
 from snore.mcp.errors import ValidationError
 from snore.mcp.schemas import (
     FindWindowsResponse,
@@ -50,9 +51,9 @@ async def find_windows(
     context_breaths_before: int = 3,
     context_breaths_after: int = 3,
     context_seconds: float = 120.0,
-    min_fl_run_length: int = 2,
-    fl_class_threshold: int = 4,
-    recovery_amplitude_margin: float = 0.20,
+    min_fl_run_length: int = RERAProxyConstants.MIN_FL_RUN_LENGTH,
+    fl_class_threshold: int = RERAProxyConstants.FL_CLASS_THRESHOLD,
+    recovery_amplitude_margin: float = RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
 ) -> FindWindowsResponse:
     """Return N worst breath windows matching a flow-limitation criterion.
 
@@ -190,9 +191,9 @@ def register(mcp: FastMCP) -> None:
         context_breaths_before: int = 3,
         context_breaths_after: int = 3,
         context_seconds: float = 120.0,
-        min_fl_run_length: int = 2,
-        fl_class_threshold: int = 4,
-        recovery_amplitude_margin: float = 0.20,
+        min_fl_run_length: int = RERAProxyConstants.MIN_FL_RUN_LENGTH,
+        fl_class_threshold: int = RERAProxyConstants.FL_CLASS_THRESHOLD,
+        recovery_amplitude_margin: float = RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
     ) -> dict[str, Any]:
         """Find the N worst breath windows matching a flow-limitation criterion for a night.
 
