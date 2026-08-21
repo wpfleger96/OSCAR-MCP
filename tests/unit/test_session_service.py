@@ -508,6 +508,289 @@ class TestSessionServiceDelete:
         assert day_b.session_count == 0
         assert day_b.ahi is None
 
+    async def test_delete_across_chunk_boundary_recomputes_days(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_session_factory,
+        monkeypatch,
+    ):
+        """Deletes every listed session and recomputes each affected day exactly
+        once, even when a single day's sessions land in different ID chunks."""
+        from sqlalchemy import func, select
+
+        from snore.database.day_manager import DayManager
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        base = datetime(2025, 3, 1, 22, 0, 0)
+        # Day A: four sessions.  The three deleted ones span two chunks; one survives.
+        a1 = await async_test_session_factory(
+            async_test_device.id, base, duration_hours=4.0, usage_hours=4.0, ahi=8.0
+        )
+        a2 = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(hours=1),
+            duration_hours=4.0,
+            usage_hours=4.0,
+            ahi=6.0,
+        )
+        a3 = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(hours=2),
+            duration_hours=4.0,
+            usage_hours=4.0,
+            ahi=4.0,
+        )
+        a_keep = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(hours=3),
+            duration_hours=4.0,
+            usage_hours=4.0,
+            ahi=2.0,
+        )
+        # Day B and Day C: one session each; deleting it empties the day.
+        b1 = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(days=2),
+            duration_hours=6.0,
+            usage_hours=6.0,
+            ahi=10.0,
+        )
+        c1 = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(days=4),
+            duration_hours=5.0,
+            usage_hours=5.0,
+            ahi=5.0,
+        )
+
+        day_a = None
+        for s in (a1, a2, a3, a_keep):
+            day_a = await DayManager.link_session_to_day(
+                s, async_test_device.id, async_db_session
+            )
+        day_b = await DayManager.link_session_to_day(
+            b1, async_test_device.id, async_db_session
+        )
+        day_c = await DayManager.link_session_to_day(
+            c1, async_test_device.id, async_db_session
+        )
+        assert day_a.session_count == 4
+
+        service = SessionService(async_db_session, profile_id=1)
+        deleted = await service.delete_sessions([a1.id, a2.id, a3.id, b1.id, c1.id])
+        assert deleted == 5
+
+        await async_db_session.flush()
+        remaining = (
+            await async_db_session.execute(
+                select(func.count())
+                .select_from(Session)
+                .where(Session.id.in_([a1.id, a2.id, a3.id, b1.id, c1.id]))
+            )
+        ).scalar()
+        assert remaining == 0
+        survivor = (
+            await async_db_session.execute(
+                select(func.count()).select_from(Session).where(Session.id == a_keep.id)
+            )
+        ).scalar()
+        assert survivor == 1
+
+        await async_db_session.refresh(day_a)
+        await async_db_session.refresh(day_b)
+        await async_db_session.refresh(day_c)
+        assert day_a.session_count == 1
+        assert day_a.ahi == pytest.approx(2.0)
+        assert day_b.session_count == 0
+        assert day_b.ahi is None
+        assert day_c.session_count == 0
+        assert day_c.ahi is None
+
+    async def test_delete_preview_sums_counts_and_sorts_across_chunks(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_session_factory,
+        monkeypatch,
+    ):
+        """Preview counts are summed across chunks and sessions are re-sorted
+        start_time DESC after the chunked concatenation."""
+        from snore.database.models import Event, Waveform
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        base = datetime(2025, 5, 1, 22, 0, 0)
+        # Start times deliberately out of id order so the global DESC ordering is
+        # only correct after the post-concat re-sort.
+        s1 = await async_test_session_factory(
+            async_test_device.id, base + timedelta(days=0), ahi=1.0
+        )
+        s2 = await async_test_session_factory(
+            async_test_device.id, base + timedelta(days=4), ahi=2.0
+        )
+        s3 = await async_test_session_factory(
+            async_test_device.id, base + timedelta(days=1), ahi=3.0
+        )
+        s4 = await async_test_session_factory(
+            async_test_device.id, base + timedelta(days=3), ahi=4.0
+        )
+        s5 = await async_test_session_factory(
+            async_test_device.id, base + timedelta(days=2), ahi=5.0
+        )
+
+        # Events on s1, s3, s5 (span three chunks): 1 + 2 + 1 = 4.
+        for sid, n in ((s1.id, 1), (s3.id, 2), (s5.id, 1)):
+            for _ in range(n):
+                async_db_session.add(
+                    Event(
+                        session_id=sid,
+                        event_type="OA",
+                        start_time=base,
+                        duration_seconds=10.0,
+                    )
+                )
+        # Waveforms on s2, s4 (span two chunks): 1 + 2 = 3.  Distinct types per
+        # session — (session_id, waveform_type) is unique.
+        for sid, wtype in ((s2.id, "flow"), (s4.id, "flow"), (s4.id, "pressure")):
+            async_db_session.add(
+                Waveform(
+                    session_id=sid,
+                    waveform_type=wtype,
+                    sample_rate=25.0,
+                    sample_count=100,
+                    data_blob=b"x",
+                )
+            )
+        await async_db_session.flush()
+
+        service = SessionService(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(
+            session_ids=[s1.id, s2.id, s3.id, s4.id, s5.id]
+        )
+
+        assert preview.event_count == 4
+        assert preview.waveform_count == 3
+        assert preview.stats_count == 5
+        assert [s.id for s in preview.sessions] == [s2.id, s4.id, s5.id, s3.id, s1.id]
+        times = [s.start_time for s in preview.sessions]
+        assert times == sorted(times, reverse=True)
+
+    async def test_get_owned_ids_across_chunks_returns_only_owned(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_session_factory,
+        monkeypatch,
+    ):
+        """Ownership filtering unions correctly across chunks: interleaved owned
+        and foreign IDs yield exactly the owned subset."""
+        from snore.database.models import Device, Profile, User
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        now = datetime(2025, 7, 1, 22, 0, 0)
+        o1 = await async_test_session_factory(async_test_device.id, now)
+        o2 = await async_test_session_factory(
+            async_test_device.id, now + timedelta(days=1)
+        )
+        o3 = await async_test_session_factory(
+            async_test_device.id, now + timedelta(days=2)
+        )
+
+        user = User(canonical_email="foreign_a@example.com", role="admin")
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Foreign")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+        foreign_device = Device(
+            profile_id=profile.id,
+            manufacturer="Other",
+            model="Model",
+            serial_number="FOREIGN_A",
+        )
+        async_db_session.add(foreign_device)
+        await async_db_session.flush()
+        f1 = await async_test_session_factory(foreign_device.id, now)
+        f2 = await async_test_session_factory(
+            foreign_device.id, now + timedelta(days=1)
+        )
+        f3 = await async_test_session_factory(
+            foreign_device.id, now + timedelta(days=2)
+        )
+
+        service = SessionService(async_db_session, profile_id=1)
+        owned = await service.get_owned_ids([o1.id, f1.id, o2.id, f2.id, o3.id, f3.id])
+
+        assert owned == {o1.id, o2.id, o3.id}
+
+    async def test_delete_enforces_ownership_across_chunks(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_session_factory,
+        monkeypatch,
+    ):
+        """The DELETE's ownership predicate holds per chunk: foreign IDs mixed
+        into the list are never deleted."""
+        from sqlalchemy import func, select
+
+        from snore.database.models import Device, Profile, User
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        now = datetime(2025, 9, 1, 22, 0, 0)
+        o1 = await async_test_session_factory(async_test_device.id, now)
+        o2 = await async_test_session_factory(
+            async_test_device.id, now + timedelta(days=1)
+        )
+        o3 = await async_test_session_factory(
+            async_test_device.id, now + timedelta(days=2)
+        )
+
+        user = User(canonical_email="foreign_b@example.com", role="admin")
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Foreign")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+        foreign_device = Device(
+            profile_id=profile.id,
+            manufacturer="Other",
+            model="Model",
+            serial_number="FOREIGN_B",
+        )
+        async_db_session.add(foreign_device)
+        await async_db_session.flush()
+        f1 = await async_test_session_factory(foreign_device.id, now)
+        f2 = await async_test_session_factory(
+            foreign_device.id, now + timedelta(days=1)
+        )
+
+        service = SessionService(async_db_session, profile_id=1)
+        deleted = await service.delete_sessions([o1.id, f1.id, o2.id, f2.id, o3.id])
+        assert deleted == 3
+
+        await async_db_session.flush()
+        owned_remaining = (
+            await async_db_session.execute(
+                select(func.count())
+                .select_from(Session)
+                .where(Session.id.in_([o1.id, o2.id, o3.id]))
+            )
+        ).scalar()
+        assert owned_remaining == 0
+        foreign_remaining = (
+            await async_db_session.execute(
+                select(func.count())
+                .select_from(Session)
+                .where(Session.id.in_([f1.id, f2.id]))
+            )
+        ).scalar()
+        assert foreign_remaining == 2
+
 
 class TestSessionServiceEnable:
     """Tests for SessionService.set_session_enabled()."""

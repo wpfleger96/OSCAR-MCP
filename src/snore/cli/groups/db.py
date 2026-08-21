@@ -27,6 +27,7 @@ from snore.constants import DEFAULT_DATABASE_PATH
 from snore.database.models import Base
 from snore.database.session import cleanup_database, init_database, session_scope
 from snore.services.database_service import DatabaseService
+from snore.utils.db_chunk import iter_id_chunks
 
 
 @click.group()
@@ -500,138 +501,142 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
 
     if source_session_ids:
         # Events — date-shifted.
-        events_q = select(Event).where(Event.session_id.in_(source_session_ids))
-        for src_evt in (await db.execute(events_q)).scalars().all():
-            db.add(
-                Event(
-                    session_id=src_to_demo_session[src_evt.session_id],
-                    event_type=src_evt.event_type,
-                    start_time=shift_dt(src_evt.start_time),
-                    duration_seconds=src_evt.duration_seconds,
-                    spo2_drop=src_evt.spo2_drop,
-                    peak_flow_limitation=src_evt.peak_flow_limitation,
+        for chunk in iter_id_chunks(source_session_ids):
+            events_q = select(Event).where(Event.session_id.in_(chunk))
+            for src_evt in (await db.execute(events_q)).scalars().all():
+                db.add(
+                    Event(
+                        session_id=src_to_demo_session[src_evt.session_id],
+                        event_type=src_evt.event_type,
+                        start_time=shift_dt(src_evt.start_time),
+                        duration_seconds=src_evt.duration_seconds,
+                        spo2_drop=src_evt.spo2_drop,
+                        peak_flow_limitation=src_evt.peak_flow_limitation,
+                    )
                 )
-            )
-            counts["events"] += 1
+                counts["events"] += 1
 
         # Statistics — no date/PII columns.
-        stats_q = select(Statistics).where(
-            Statistics.session_id.in_(source_session_ids)
-        )
-        for src_stats in (await db.execute(stats_q)).scalars().all():
-            # Reflect all metric columns so new metrics are never silently
-            # dropped (test_demo asserts every copied column stays numeric).
-            stats_payload = {
-                c.name: getattr(src_stats, c.name)
-                for c in Statistics.__table__.columns
-                if c.name not in _STATS_CLONE_EXCLUDED_COLUMNS
-            }
-            db.add(
-                Statistics(
-                    session_id=src_to_demo_session[src_stats.session_id],
-                    **stats_payload,
+        for chunk in iter_id_chunks(source_session_ids):
+            stats_q = select(Statistics).where(Statistics.session_id.in_(chunk))
+            for src_stats in (await db.execute(stats_q)).scalars().all():
+                # Reflect all metric columns so new metrics are never silently
+                # dropped (test_demo asserts every copied column stays numeric).
+                stats_payload = {
+                    c.name: getattr(src_stats, c.name)
+                    for c in Statistics.__table__.columns
+                    if c.name not in _STATS_CLONE_EXCLUDED_COLUMNS
+                }
+                db.add(
+                    Statistics(
+                        session_id=src_to_demo_session[src_stats.session_id],
+                        **stats_payload,
+                    )
                 )
-            )
-            counts["statistics"] += 1
+                counts["statistics"] += 1
 
         # Settings — device therapy config (enum-like constants, not identity PII).
-        settings_q = select(Setting).where(Setting.session_id.in_(source_session_ids))
-        for src_setting in (await db.execute(settings_q)).scalars().all():
-            db.add(
-                Setting(
-                    session_id=src_to_demo_session[src_setting.session_id],
-                    key=src_setting.key,
-                    value=src_setting.value,
+        for chunk in iter_id_chunks(source_session_ids):
+            settings_q = select(Setting).where(Setting.session_id.in_(chunk))
+            for src_setting in (await db.execute(settings_q)).scalars().all():
+                db.add(
+                    Setting(
+                        session_id=src_to_demo_session[src_setting.session_id],
+                        key=src_setting.key,
+                        value=src_setting.value,
+                    )
                 )
-            )
-            counts["settings"] += 1
+                counts["settings"] += 1
 
         # --- Phase D: analysis results ---
-        ar_q = select(AnalysisResult).where(
-            AnalysisResult.session_id.in_(source_session_ids)
-        )
-        src_analyses = (await db.execute(ar_q)).scalars().all()
-
         src_to_demo_ar: dict[int, int] = {}
-        for src_ar in src_analyses:
-            demo_ar = AnalysisResult(
-                session_id=src_to_demo_session[src_ar.session_id],
-                timestamp_start=shift_dt(src_ar.timestamp_start),
-                timestamp_end=shift_dt(src_ar.timestamp_end),
-                programmatic_result_json=src_ar.programmatic_result_json,
-                processing_time_ms=src_ar.processing_time_ms,
-                engine_versions_json=src_ar.engine_versions_json,
-            )
-            db.add(demo_ar)
-            await db.flush()
-            src_to_demo_ar[src_ar.id] = demo_ar.id
-            counts["analysis_results"] += 1
+        for chunk in iter_id_chunks(source_session_ids):
+            ar_q = select(AnalysisResult).where(AnalysisResult.session_id.in_(chunk))
+            for src_ar in (await db.execute(ar_q)).scalars().all():
+                demo_ar = AnalysisResult(
+                    session_id=src_to_demo_session[src_ar.session_id],
+                    timestamp_start=shift_dt(src_ar.timestamp_start),
+                    timestamp_end=shift_dt(src_ar.timestamp_end),
+                    programmatic_result_json=src_ar.programmatic_result_json,
+                    processing_time_ms=src_ar.processing_time_ms,
+                    engine_versions_json=src_ar.engine_versions_json,
+                )
+                db.add(demo_ar)
+                await db.flush()
+                src_to_demo_ar[src_ar.id] = demo_ar.id
+                counts["analysis_results"] += 1
 
         # --- Phase E: detected_patterns and breaths (batched by analysis result IDs) ---
         source_ar_ids = list(src_to_demo_ar.keys())
         if source_ar_ids:
-            patterns_q = select(DetectedPattern).where(
-                DetectedPattern.analysis_result_id.in_(source_ar_ids)
-            )
-            for src_pat in (await db.execute(patterns_q)).scalars().all():
-                db.add(
-                    DetectedPattern(
-                        analysis_result_id=src_to_demo_ar[src_pat.analysis_result_id],
-                        pattern_id=src_pat.pattern_id,
-                        start_time=shift_dt(src_pat.start_time),
-                        duration=src_pat.duration,
-                        confidence=src_pat.confidence,
-                        detected_by=src_pat.detected_by,
-                        metrics_json=src_pat.metrics_json,
-                        notes=None,  # PII scrub
-                    )
+            for chunk in iter_id_chunks(source_ar_ids):
+                patterns_q = select(DetectedPattern).where(
+                    DetectedPattern.analysis_result_id.in_(chunk)
                 )
-                counts["detected_patterns"] += 1
+                for src_pat in (await db.execute(patterns_q)).scalars().all():
+                    db.add(
+                        DetectedPattern(
+                            analysis_result_id=src_to_demo_ar[
+                                src_pat.analysis_result_id
+                            ],
+                            pattern_id=src_pat.pattern_id,
+                            start_time=shift_dt(src_pat.start_time),
+                            duration=src_pat.duration,
+                            confidence=src_pat.confidence,
+                            detected_by=src_pat.detected_by,
+                            metrics_json=src_pat.metrics_json,
+                            notes=None,  # PII scrub
+                        )
+                    )
+                    counts["detected_patterns"] += 1
 
             # Breaths use session-relative offsets (seconds) — no date shift needed.
             # Both FKs (analysis_result_id, session_id) must be remapped.
-            breaths_q = select(Breath).where(
-                Breath.analysis_result_id.in_(source_ar_ids)
-            )
-            for src_breath in (await db.execute(breaths_q)).scalars().all():
-                db.add(
-                    Breath(
-                        analysis_result_id=src_to_demo_ar[
-                            src_breath.analysis_result_id
-                        ],
-                        session_id=src_to_demo_session[src_breath.session_id],
-                        breath_number=src_breath.breath_number,
-                        start_offset_s=src_breath.start_offset_s,
-                        end_offset_s=src_breath.end_offset_s,
-                        inspiration_time_s=src_breath.inspiration_time_s,
-                        expiration_time_s=src_breath.expiration_time_s,
-                        total_time_s=src_breath.total_time_s,
-                        i_e_ratio=src_breath.i_e_ratio,
-                        duty_cycle=src_breath.duty_cycle,
-                        peak_flow_lpm=src_breath.peak_flow_lpm,
-                        peak_exp_flow_lpm=src_breath.peak_exp_flow_lpm,
-                        tidal_volume_ml=src_breath.tidal_volume_ml,
-                        respiratory_rate_rolling=src_breath.respiratory_rate_rolling,
-                        flatness_index=src_breath.flatness_index,
-                        mid_insp_flattening=src_breath.mid_insp_flattening,
-                        flow_class=src_breath.flow_class,
-                        flow_confidence=src_breath.flow_confidence,
-                        is_recovery_breath=src_breath.is_recovery_breath,
-                        inferred_trigger_type=src_breath.inferred_trigger_type,
-                        trigger_confidence=src_breath.trigger_confidence,
-                        inferred_cycle_type=src_breath.inferred_cycle_type,
-                        cycle_confidence=src_breath.cycle_confidence,
-                        trigger_cycle_applicable=src_breath.trigger_cycle_applicable,
-                        trigger_cycle_reason=src_breath.trigger_cycle_reason,
-                        leak_valid=src_breath.leak_valid,
-                        leak_valid_reason=src_breath.leak_valid_reason,
-                        ramp_active=src_breath.ramp_active,
-                        ramp_active_reason=src_breath.ramp_active_reason,
-                        mask_off=src_breath.mask_off,
-                        mask_off_reason=src_breath.mask_off_reason,
+            for chunk in iter_id_chunks(source_ar_ids):
+                breaths_q = select(Breath).where(Breath.analysis_result_id.in_(chunk))
+                for src_breath in (await db.execute(breaths_q)).scalars().all():
+                    db.add(
+                        Breath(
+                            analysis_result_id=src_to_demo_ar[
+                                src_breath.analysis_result_id
+                            ],
+                            session_id=src_to_demo_session[src_breath.session_id],
+                            breath_number=src_breath.breath_number,
+                            start_offset_s=src_breath.start_offset_s,
+                            end_offset_s=src_breath.end_offset_s,
+                            inspiration_time_s=src_breath.inspiration_time_s,
+                            expiration_time_s=src_breath.expiration_time_s,
+                            total_time_s=src_breath.total_time_s,
+                            i_e_ratio=src_breath.i_e_ratio,
+                            duty_cycle=src_breath.duty_cycle,
+                            peak_flow_lpm=src_breath.peak_flow_lpm,
+                            peak_exp_flow_lpm=src_breath.peak_exp_flow_lpm,
+                            tidal_volume_ml=src_breath.tidal_volume_ml,
+                            respiratory_rate_rolling=(
+                                src_breath.respiratory_rate_rolling
+                            ),
+                            flatness_index=src_breath.flatness_index,
+                            mid_insp_flattening=src_breath.mid_insp_flattening,
+                            flow_class=src_breath.flow_class,
+                            flow_confidence=src_breath.flow_confidence,
+                            is_recovery_breath=src_breath.is_recovery_breath,
+                            inferred_trigger_type=src_breath.inferred_trigger_type,
+                            trigger_confidence=src_breath.trigger_confidence,
+                            inferred_cycle_type=src_breath.inferred_cycle_type,
+                            cycle_confidence=src_breath.cycle_confidence,
+                            trigger_cycle_applicable=(
+                                src_breath.trigger_cycle_applicable
+                            ),
+                            trigger_cycle_reason=src_breath.trigger_cycle_reason,
+                            leak_valid=src_breath.leak_valid,
+                            leak_valid_reason=src_breath.leak_valid_reason,
+                            ramp_active=src_breath.ramp_active,
+                            ramp_active_reason=src_breath.ramp_active_reason,
+                            mask_off=src_breath.mask_off,
+                            mask_off_reason=src_breath.mask_off_reason,
+                        )
                     )
-                )
-                counts["breaths"] += 1
+                    counts["breaths"] += 1
 
     await db.flush()
 

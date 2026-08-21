@@ -5620,3 +5620,69 @@ class TestCaMvFlowFallback:
 
         assert result.periodic_breathing_pct == 0.0
         assert result.pb_reason is None
+
+
+# ---------------------------------------------------------------------------
+# _fetch_waveform_channel_vals — chunked ID binding (#280)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFetchWaveformChannelValsChunked:
+    async def test_fetch_waveform_channel_vals_chunked(
+        self, async_db_session, monkeypatch
+    ):
+        """fl/snore values survive the ID-chunk boundary in _fetch_waveform_channel_vals.
+
+        With ID_CHUNK_SIZE=2 and three sessions each carrying an fl AND a snore
+        waveform, the session_ids span two chunks.  Both per-session dicts must
+        return every session on both channels — a bug that dropped any non-final
+        chunk would leave a session out.
+        """
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        session_ids: list[int] = []
+        expected_fl: dict[int, list[float]] = {}
+        expected_snore: dict[int, list[float]] = {}
+        ts = np.arange(3, dtype=np.float32)
+        for i in range(3):
+            _, session = await _make_day_and_session(
+                async_db_session, dev.id, date(2025, 8, 1) + timedelta(days=i)
+            )
+            fl_vals = np.array([1.0 + i, 2.0 + i, 3.0 + i], dtype=np.float32)
+            snore_vals = np.array([10.0 + i, 20.0 + i, 30.0 + i], dtype=np.float32)
+            async_db_session.add_all(
+                [
+                    models.Waveform(
+                        session_id=session.id,
+                        waveform_type="fl",
+                        sample_rate=1.0,
+                        sample_count=3,
+                        data_blob=_make_waveform_blob_from_arrays(ts, fl_vals),
+                    ),
+                    models.Waveform(
+                        session_id=session.id,
+                        waveform_type="snore",
+                        sample_rate=1.0,
+                        sample_count=3,
+                        data_blob=_make_waveform_blob_from_arrays(ts, snore_vals),
+                    ),
+                ]
+            )
+            session_ids.append(session.id)
+            expected_fl[session.id] = [float(v) for v in fl_vals]
+            expected_snore[session.id] = [float(v) for v in snore_vals]
+        await async_db_session.flush()
+
+        fl_by_sess, snore_by_sess = await BreathService._fetch_waveform_channel_vals(
+            async_db_session, session_ids
+        )
+
+        assert set(fl_by_sess) == set(session_ids)
+        assert set(snore_by_sess) == set(session_ids)
+        for sid in session_ids:
+            assert fl_by_sess[sid] == pytest.approx(expected_fl[sid])
+            assert snore_by_sess[sid] == pytest.approx(expected_snore[sid])

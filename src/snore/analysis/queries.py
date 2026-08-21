@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Subquery
 
 from snore.database import models
+from snore.utils.db_chunk import iter_id_chunks
 
 __all__ = [
     "latest_analysis_ids",
@@ -83,15 +84,25 @@ def latest_analysis_ranked_subquery(
 async def latest_analysis_ids(
     db: AsyncSession, session_ids: Iterable[int]
 ) -> dict[int, int]:
-    """Map each session ID to its latest AnalysisResult ID (by created_at)."""
+    """Map each session ID to its latest AnalysisResult ID (by created_at).
+
+    The id list is chunked to stay under SQLite's bound-parameter cap.  The
+    window ranking is session-partitioned, so per-chunk results have disjoint
+    session keys and merge cleanly across chunks.
+    """
     ids = list(session_ids)
     if not ids:
         return {}
 
-    ranked = latest_analysis_ranked_subquery(ids)
-    rows = (
-        await db.execute(
-            select(ranked.c.session_id, ranked.c.id).where(ranked.c.recency_rank == 1)
-        )
-    ).all()
-    return {session_id: analysis_id for session_id, analysis_id in rows}
+    result: dict[int, int] = {}
+    for chunk in iter_id_chunks(ids):
+        ranked = latest_analysis_ranked_subquery(chunk)
+        rows = (
+            await db.execute(
+                select(ranked.c.session_id, ranked.c.id).where(
+                    ranked.c.recency_rank == 1
+                )
+            )
+        ).all()
+        result.update({session_id: analysis_id for session_id, analysis_id in rows})
+    return result

@@ -328,6 +328,153 @@ async def _seed_source_profile(session: AsyncSession) -> tuple[int, dict]:
     }
 
 
+async def _seed_multi_session_source(
+    session: AsyncSession, n_sessions: int
+) -> tuple[int, dict[str, Any]]:
+    """Seed a source profile with ``n_sessions`` sessions, each carrying a full
+    child set (event, statistics, setting, analysis result, detected pattern,
+    breath) with a unique marker value on every row.
+
+    Returns (source_profile_id, expected) where ``expected`` records, per child
+    kind, the set of ``(child_marker, parent_marker)`` pairs plus the session
+    count.  Markers survive the scrub unchanged, so the demo side must reproduce
+    each pairing set exactly — a dropped row or an FK mis-remapped across a chunk
+    boundary changes a set (or points at a source id absent from the demo id map)
+    and fails the assertion.
+    """
+    src_user = models.User(
+        canonical_email="multi-source@example.com",
+        role="member",
+        session_version=0,
+    )
+    session.add(src_user)
+    await session.flush()
+
+    src_profile = models.Profile(
+        user_id=src_user.id,
+        name="Multi Source",
+        first_name="Bob",
+        last_name="Jones",
+    )
+    session.add(src_profile)
+    await session.flush()
+    src_user.default_profile_id = src_profile.id
+    await session.flush()
+
+    src_device = models.Device(
+        profile_id=src_profile.id,
+        manufacturer="ResMed",
+        model="AirSense 11",
+        serial_number="MULTI-SRC-001",
+    )
+    session.add(src_device)
+    await session.flush()
+
+    src_day = models.Day(
+        device_id=src_device.id,
+        date=date(2025, 2, 1),
+        session_count=n_sessions,
+    )
+    session.add(src_day)
+    await session.flush()
+
+    # Parent marker = session.duration_seconds / analysis_result.processing_time_ms
+    # (both copied verbatim by the scrub); child markers are the columns below.
+    event_session: set[tuple[float, float]] = set()
+    stats_session: set[tuple[float, float]] = set()
+    setting_session: set[tuple[str, float]] = set()
+    ar_session: set[tuple[int, float]] = set()
+    pattern_ar: set[tuple[float, int]] = set()
+    breath_ar: set[tuple[float, int]] = set()
+    breath_session: set[tuple[float, float]] = set()
+
+    for i in range(1, n_sessions + 1):
+        session_marker = 1000.0 + i
+        src_session = models.Session(
+            device_id=src_device.id,
+            day_id=src_day.id,
+            device_session_id=f"MULTI-SESS-{i}",
+            start_time=datetime(2025, 2, 1, 22, 0, 0),
+            end_time=datetime(2025, 2, 2, 5, 0, 0),
+            duration_seconds=session_marker,
+            import_source="original_import",
+        )
+        session.add(src_session)
+        await session.flush()
+
+        event_marker = 10.0 + i
+        session.add(
+            models.Event(
+                session_id=src_session.id,
+                event_type="ObstructiveApnea",
+                start_time=datetime(2025, 2, 1, 23, 0, 0),
+                duration_seconds=event_marker,
+            )
+        )
+        event_session.add((event_marker, session_marker))
+
+        stats_marker = float(i)
+        session.add(models.Statistics(session_id=src_session.id, ahi=stats_marker))
+        stats_session.add((stats_marker, session_marker))
+
+        setting_marker = f"VAL_{i}"
+        session.add(
+            models.Setting(
+                session_id=src_session.id, key=f"KEY_{i}", value=setting_marker
+            )
+        )
+        setting_session.add((setting_marker, session_marker))
+
+        ar_marker = 100 + i
+        src_ar = models.AnalysisResult(
+            session_id=src_session.id,
+            timestamp_start=datetime(2025, 2, 1, 22, 0, 0),
+            timestamp_end=datetime(2025, 2, 2, 5, 0, 0),
+            processing_time_ms=ar_marker,
+        )
+        session.add(src_ar)
+        await session.flush()
+        ar_session.add((ar_marker, session_marker))
+
+        pattern_marker = round(0.1 * i, 4)
+        session.add(
+            models.DetectedPattern(
+                analysis_result_id=src_ar.id,
+                pattern_id=f"pat_{i}",
+                start_time=datetime(2025, 2, 1, 23, 0, 0),
+                confidence=pattern_marker,
+                detected_by="programmatic",
+            )
+        )
+        pattern_ar.add((pattern_marker, ar_marker))
+
+        breath_marker = float(i)
+        session.add(
+            models.Breath(
+                analysis_result_id=src_ar.id,
+                session_id=src_session.id,
+                breath_number=i,
+                start_offset_s=breath_marker,
+                end_offset_s=breath_marker + 4.0,
+            )
+        )
+        breath_ar.add((breath_marker, ar_marker))
+        breath_session.add((breath_marker, session_marker))
+
+    await session.flush()
+
+    return src_profile.id, {
+        "n_sessions": n_sessions,
+        "event_session": event_session,
+        "stats_session": stats_session,
+        "setting_session": setting_session,
+        "ar_session": ar_session,
+        "pattern_ar": pattern_ar,
+        "breath_ar": breath_ar,
+        "breath_session": breath_session,
+    }
+
+
 @pytest.fixture
 def patched_raw_backup_dir(tmp_path, monkeypatch):
     """Redirect DEFAULT_RAW_BACKUP_DIR to an isolated temp dir for scrub-demo tests.
@@ -468,6 +615,118 @@ class TestScrubDemo:
                 # Both FKs must point to the demo AR and demo session — not sources.
                 assert br.analysis_result_id == demo_ar.id
                 assert br.session_id == demo_sess.id
+
+    @pytest.mark.asyncio
+    async def test_scrub_demo_chunked_id_binds_clone_all_children(
+        self, async_db_session, patched_raw_backup_dir, monkeypatch
+    ):
+        """Multi-chunk IN-binds clone every child and remap every FK correctly.
+
+        Shrinking ID_CHUNK_SIZE to 2 with 5 sessions / 5 analysis results forces
+        source_session_ids and source_ar_ids each into chunks of 2, 2, 1 — more
+        than one chunk plus a final partial chunk on every chunked site. Row
+        counts must match the source and each demo child's (marker, parent-marker)
+        pairing must reproduce the source set, proving no chunk dropped rows and no
+        FK was mis-remapped or left dangling across a chunk boundary.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.cli.groups.db import _do_scrub_demo  # noqa: PLC0415
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        async with async_db_session.begin():
+            src_profile_id, expected = await _seed_multi_session_source(
+                async_db_session, n_sessions=5
+            )
+
+        async with async_db_session.begin():
+            await _do_scrub_demo(async_db_session, src_profile_id)
+
+        async with async_db_session.begin():
+            stmt = select(models.User).where(
+                models.User.canonical_email == "demo@snore.local"
+            )
+            demo_user = (await async_db_session.execute(stmt)).scalars().first()
+            demo_profile_id = demo_user.default_profile_id
+
+            stmt = select(models.Device).where(
+                models.Device.profile_id == demo_profile_id
+            )
+            demo_dev = (await async_db_session.execute(stmt)).scalars().first()
+
+            stmt = select(models.Session).where(models.Session.device_id == demo_dev.id)
+            demo_sessions = (await async_db_session.execute(stmt)).scalars().all()
+            # id → parent marker, used to reconstruct each child's FK target.
+            sess_marker = {s.id: s.duration_seconds for s in demo_sessions}
+            assert len(demo_sessions) == expected["n_sessions"]
+
+            stmt = select(models.AnalysisResult).where(
+                models.AnalysisResult.session_id.in_(sess_marker.keys())
+            )
+            demo_ars = (await async_db_session.execute(stmt)).scalars().all()
+            ar_marker = {a.id: a.processing_time_ms for a in demo_ars}
+
+            stmt = select(models.Event).where(
+                models.Event.session_id.in_(sess_marker.keys())
+            )
+            demo_events = (await async_db_session.execute(stmt)).scalars().all()
+
+            stmt = select(models.Statistics).where(
+                models.Statistics.session_id.in_(sess_marker.keys())
+            )
+            demo_stats = (await async_db_session.execute(stmt)).scalars().all()
+
+            stmt = select(models.Setting).where(
+                models.Setting.session_id.in_(sess_marker.keys())
+            )
+            demo_settings = (await async_db_session.execute(stmt)).scalars().all()
+
+            stmt = select(models.DetectedPattern).where(
+                models.DetectedPattern.analysis_result_id.in_(ar_marker.keys())
+            )
+            demo_patterns = (await async_db_session.execute(stmt)).scalars().all()
+
+            stmt = select(models.Breath).where(
+                models.Breath.analysis_result_id.in_(ar_marker.keys())
+            )
+            demo_breaths = (await async_db_session.execute(stmt)).scalars().all()
+
+            # Counts match source exactly — no chunk silently dropped rows.
+            n = expected["n_sessions"]
+            assert len(demo_ars) == n
+            assert len(demo_events) == n
+            assert len(demo_stats) == n
+            assert len(demo_settings) == n
+            assert len(demo_patterns) == n
+            assert len(demo_breaths) == n
+
+            # Every FK remaps to a cloned parent: reconstructing the
+            # (child_marker, parent_marker) pairs from the demo FKs reproduces the
+            # source pairing set. A dangling FK (parent id absent from the demo id
+            # map) raises KeyError; a mis-remap changes a pair and fails equality.
+            assert {
+                (e.duration_seconds, sess_marker[e.session_id]) for e in demo_events
+            } == expected["event_session"]
+            assert {(s.ahi, sess_marker[s.session_id]) for s in demo_stats} == expected[
+                "stats_session"
+            ]
+            assert {
+                (st.value, sess_marker[st.session_id]) for st in demo_settings
+            } == expected["setting_session"]
+            assert {
+                (a.processing_time_ms, sess_marker[a.session_id]) for a in demo_ars
+            } == expected["ar_session"]
+            assert {
+                (p.confidence, ar_marker[p.analysis_result_id]) for p in demo_patterns
+            } == expected["pattern_ar"]
+            assert {
+                (b.start_offset_s, ar_marker[b.analysis_result_id])
+                for b in demo_breaths
+            } == expected["breath_ar"]
+            assert {
+                (b.start_offset_s, sess_marker[b.session_id]) for b in demo_breaths
+            } == expected["breath_session"]
 
     @pytest.mark.asyncio
     async def test_scrub_demo_date_rotation_consistent(

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.utils.db_chunk import iter_id_chunks
 
 __all__ = [
     "ProfileScopedService",
@@ -77,19 +78,22 @@ async def get_owned_session_ids(
     """
     if not session_ids:
         return set()
-    rows = (
-        (
-            await db.execute(
-                session_device_join(select(models.Session.id)).where(
-                    models.Session.id.in_(session_ids),
-                    models.Device.profile_id == profile_id,
+    owned: set[int] = set()
+    for chunk in iter_id_chunks(session_ids):
+        rows = (
+            (
+                await db.execute(
+                    session_device_join(select(models.Session.id)).where(
+                        models.Session.id.in_(chunk),
+                        models.Device.profile_id == profile_id,
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    return set(rows)
+        owned.update(rows)
+    return owned
 
 
 async def require_owned_session(
