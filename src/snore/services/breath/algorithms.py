@@ -12,6 +12,7 @@ import numpy as np
 from snore.analysis.data.waveform_loader import deserialize_waveform_blob
 from snore.analysis.shared.versioning import DayAnalysisStatus, NullReason
 from snore.analysis.types import AnalysisResult as AnalysisResultDTO
+from snore.constants import RERAProxyConstants
 from snore.services.lttb import lttb_downsample
 
 from .dtos import (
@@ -112,9 +113,9 @@ def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
 def _iter_fl_run_recoveries(
     breath_rows: Sequence[Any],
     *,
-    fl_class_threshold: int = 4,
-    min_fl_run_length: int = 2,
-    recovery_amplitude_margin: float = 0.20,
+    fl_class_threshold: int = RERAProxyConstants.FL_CLASS_THRESHOLD,
+    min_fl_run_length: int = RERAProxyConstants.MIN_FL_RUN_LENGTH,
+    recovery_amplitude_margin: float = RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
 ) -> Iterator[tuple[int, int, int]]:
     """Yield (run_start_idx, run_last_idx, recovery_idx) per RERA-proxy event.
 
@@ -123,7 +124,8 @@ def _iter_fl_run_recoveries(
     (no gap; a ``flow_class is None`` breath ends the run) is a recovery
     breath.  The follower is a recovery breath when EITHER:
 
-    (a) ``is_recovery_breath is True`` — the analysis-time amplitude detector; OR
+    (a) ``is_recovery_breath is True`` — the analysis-time amplitude detector
+        (``detector.py::_detect_reras``); OR
     (b) self-contained (RERA-proxy v2): the follower's ``flow_class`` drops to
         <= 2 AND its ``peak_flow_lpm`` is >= ``(1 + recovery_amplitude_margin)``
         times the mean of the run's non-null ``peak_flow_lpm`` values.
@@ -171,9 +173,9 @@ def _iter_fl_run_recoveries(
 
 def _count_fl_run_reras(
     breath_rows: Sequence[Any],
-    fl_class_threshold: int = 4,
-    min_fl_run_length: int = 2,
-    recovery_amplitude_margin: float = 0.20,
+    fl_class_threshold: int = RERAProxyConstants.FL_CLASS_THRESHOLD,
+    min_fl_run_length: int = RERAProxyConstants.MIN_FL_RUN_LENGTH,
+    recovery_amplitude_margin: float = RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
 ) -> int:
     """Count RERA-proxy events: FL runs ending in a recovery breath."""
     return sum(

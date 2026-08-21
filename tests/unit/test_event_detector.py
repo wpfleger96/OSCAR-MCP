@@ -11,7 +11,12 @@ from snore.analysis.modes.classification import (
     _check_desaturation,
     _classify_apnea_type,
 )
-from snore.analysis.modes.config import AASM_CONFIG, AASM_RELAXED_CONFIG, RESMED_CONFIG
+from snore.analysis.modes.config import (
+    AASM_CONFIG,
+    AASM_RELAXED_CONFIG,
+    RESMED_CONFIG,
+    DetectionModeConfig,
+)
 from snore.analysis.modes.detector import EventDetector
 from snore.analysis.modes.postprocess import (
     _calculate_event_overlap,
@@ -2329,3 +2334,198 @@ class TestDetectNearZeroFlowVectorized:
         assert len(events) == 1
         assert events[0].start_time == pytest.approx(float(timestamps[0]), abs=1e-9)
         assert events[0].end_time == pytest.approx(float(timestamps[-1]), abs=1e-9)
+
+
+def _uniform_breath(number: int, start: float, amplitude: float) -> BreathMetrics:
+    """Build a 4-second breath at a fixed amplitude for detector tests."""
+    return BreathMetrics(
+        breath_number=number,
+        start_time=start,
+        middle_time=start + 2.0,
+        end_time=start + 4.0,
+        duration=4.0,
+        tidal_volume=amplitude * 10.0,
+        tidal_volume_smoothed=amplitude * 10.0,
+        peak_inspiratory_flow=amplitude,
+        peak_expiratory_flow=amplitude * 0.8,
+        inspiration_time=2.0,
+        expiration_time=2.0,
+        i_e_ratio=1.0,
+        respiratory_rate=15.0,
+        respiratory_rate_rolling=15.0,
+        minute_ventilation=7.5,
+        amplitude=amplitude,
+        is_complete=True,
+    )
+
+
+class TestHypopneaBaselineContamination:
+    """Hypopnea-contained breaths must be excluded from downstream baselines."""
+
+    def test_hypopnea_breaths_marked_in_event_and_excluded_from_baseline(self):
+        """Detected hypopnea breaths are flagged in_event, decontaminating baselines.
+
+        The fix marks hypopnea-contained breaths in_event so they no longer feed
+        the p90 baselines used by downstream RERA detection. Here the eval window
+        straddles the flagged run: pre-fix (flags cleared) all six breaths feed a
+        percentile; post-fix the three flagged breaths are dropped, leaving fewer
+        than the time-based 5-sample floor so the clean fallback baseline is
+        returned. The computed baseline therefore differs pre/post fix.
+        """
+        # Time-based baseline over the previous 24 s (~6 breaths at 4 s each).
+        config = AASM_CONFIG.model_copy(update={"baseline_window": 24.0})
+        detector = EventDetector(config)
+
+        breaths = [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(10)]
+        # 3 hypopnea breaths (amplitude 15 → 70% reduction vs the 50 baseline);
+        # short enough that baseline drift never terminates the run early.
+        breaths += [_uniform_breath(i + 1, float(i * 4), 15.0) for i in range(10, 13)]
+        breaths += [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(13, 19)]
+
+        hypopneas = detector._detect_hypopneas(
+            breaths, flow_data=None, spo2_signal=None, exclude_events=[]
+        )
+
+        assert len(hypopneas) >= 1
+        # The whole 3-breath run is contained and flagged; neighbours are not.
+        assert [b.in_event for b in breaths[10:13]] == [True, True, True]
+        assert breaths[9].in_event is False
+        assert breaths[13].in_event is False
+
+        # Downstream baseline at index 13 (window breaths[7:13] = 3 normal + the
+        # 3 flagged breaths). Post-fix: 3 valid values < 5 → fallback 30.0.
+        baseline_post_fix = _calculate_time_based_baseline(config, breaths, 13)
+
+        # Pre-fix simulation: clear the flags the detector set, so the reduced
+        # breaths contaminate the same window (6 values → p90 = 50.0).
+        for breath in breaths:
+            breath.in_event = False
+        baseline_pre_fix = _calculate_time_based_baseline(config, breaths, 13)
+
+        assert baseline_pre_fix == pytest.approx(50.0)
+        assert baseline_post_fix == pytest.approx(30.0)
+        assert baseline_post_fix != baseline_pre_fix
+
+
+class TestReraThresholdConfig:
+    """RERA detection reads its thresholds from DetectionModeConfig."""
+
+    def _rera_pattern(self) -> list[BreathMetrics]:
+        """10 normal breaths, two 25%-reduced breaths, then a recovery breath."""
+        breaths = [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(10)]
+        breaths.append(_uniform_breath(11, 40.0, 37.5))  # 25% reduction
+        breaths.append(_uniform_breath(12, 44.0, 37.5))  # 25% reduction
+        breaths.append(_uniform_breath(13, 48.0, 60.0))  # recovery: +60% over 37.5
+        breaths += [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(13, 15)]
+        return breaths
+
+    def test_default_thresholds_detect_rera(self):
+        """The default [0.20, 0.30) band detects the 25%-reduction sequence."""
+        breaths = self._rera_pattern()
+        reras = EventDetector(AASM_CONFIG)._detect_reras(breaths, [], [])
+        assert len(reras) == 1
+
+    def test_raised_reduction_min_suppresses_rera(self):
+        """Raising rera_reduction_min above 25% removes the detection."""
+        config = AASM_CONFIG.model_copy(
+            update={"rera_reduction_min": 0.30, "rera_reduction_max": 0.40}
+        )
+        breaths = self._rera_pattern()
+        reras = EventDetector(config)._detect_reras(breaths, [], [])
+        assert len(reras) == 0
+
+    def test_raised_recovery_increase_min_suppresses_rera(self):
+        """Requiring a larger recovery increase than 60% removes the detection."""
+        config = AASM_CONFIG.model_copy(update={"rera_recovery_increase_min": 0.80})
+        breaths = self._rera_pattern()
+        reras = EventDetector(config)._detect_reras(breaths, [], [])
+        assert len(reras) == 0
+
+    def test_lowered_recovery_reduction_max_suppresses_rera(self):
+        """A recovery-reduction ceiling of 0 rejects the recovery breath.
+
+        The recovery breath exceeds baseline, so its clamped reduction is 0.0;
+        the default 0.10 ceiling admits it, but 0.0 (strict <) rejects it. This
+        isolates rera_recovery_reduction_max — no other threshold changes.
+        """
+        config = AASM_CONFIG.model_copy(update={"rera_recovery_reduction_max": 0.0})
+        breaths = self._rera_pattern()
+        reras = EventDetector(config)._detect_reras(breaths, [], [])
+        assert len(reras) == 0
+
+
+class TestDetectEventsModeIsolation:
+    """detect_events resets per-breath state so multi-mode runs stay independent."""
+
+    def _flow_data(self, breaths: list[BreathMetrics]) -> tuple[np.ndarray, np.ndarray]:
+        """Flat flow signal spanning the breath timeline (no apnea to classify)."""
+        timestamps = np.arange(0.0, breaths[-1].end_time + 1.0, 0.1)
+        return timestamps, np.zeros_like(timestamps)
+
+    def _hypopnea_pattern(self) -> list[BreathMetrics]:
+        """15 normal breaths, a 4-breath 50%-reduced run, then normal breaths."""
+        breaths = [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(15)]
+        breaths += [_uniform_breath(i + 1, float(i * 4), 25.0) for i in range(15, 19)]
+        breaths += [_uniform_breath(i + 1, float(i * 4), 50.0) for i in range(19, 30)]
+        return breaths
+
+    def test_preset_in_event_flags_do_not_change_results(self):
+        """Contaminated in_event flags from a prior mode do not alter detection.
+
+        Without the reset, pre-set flags would starve the baselines (falling to
+        the fixed floor) and suppress the hypopnea; the reset makes each
+        detect_events call self-contained and mode-order-independent.
+        """
+        detector = EventDetector(AASM_CONFIG)
+
+        fresh = self._hypopnea_pattern()
+        flow_data = self._flow_data(fresh)
+        expected = detector.detect_events(
+            fresh,
+            flow_data=flow_data,
+            sample_rate=25.0,
+            session_duration_hours=1.0,
+        )
+        # Guard: the fixture must actually produce an event, else the test is vacuous.
+        assert len(expected.hypopneas) >= 1
+
+        contaminated = self._hypopnea_pattern()
+        for breath in contaminated:
+            breath.in_event = True
+        actual = detector.detect_events(
+            contaminated,
+            flow_data=flow_data,
+            sample_rate=25.0,
+            session_duration_hours=1.0,
+        )
+
+        assert len(actual.apneas) == len(expected.apneas)
+        assert len(actual.hypopneas) == len(expected.hypopneas)
+        assert len(actual.reras) == len(expected.reras)
+        assert actual.ahi == pytest.approx(expected.ahi)
+        assert actual.rdi == pytest.approx(expected.rdi)
+
+
+class TestThresholdBandValidation:
+    """DetectionModeConfig rejects inverted [min, max) threshold bands."""
+
+    def _config_dict(self, **overrides: float) -> dict:
+        base = AASM_CONFIG.model_dump()
+        base.update(overrides)
+        return base
+
+    def test_inverted_rera_band_rejected(self):
+        """rera_reduction_min >= rera_reduction_max is rejected at construction."""
+        with pytest.raises(ValueError, match="rera_reduction_min"):
+            DetectionModeConfig.model_validate(
+                self._config_dict(rera_reduction_min=0.40, rera_reduction_max=0.30)
+            )
+
+    def test_inverted_hypopnea_band_rejected(self):
+        """hypopnea_min_threshold >= hypopnea_max_threshold is rejected."""
+        with pytest.raises(ValueError, match="hypopnea_min_threshold"):
+            DetectionModeConfig.model_validate(
+                self._config_dict(
+                    hypopnea_min_threshold=0.90, hypopnea_max_threshold=0.30
+                )
+            )

@@ -35,6 +35,27 @@ from snore.constants import EventDetectionConstants as EDC
 logger = logging.getLogger(__name__)
 
 
+def _mark_breaths_in_events(
+    breaths: list[BreathMetrics],
+    events: list[ApneaEvent] | list[HypopneaEvent],
+) -> None:
+    """Flag breaths fully contained in any event as ``in_event``.
+
+    Contained breaths are dropped from the rolling baselines used by downstream
+    detection. Breaths are time-ordered, so each event's scan stops once a
+    breath starts after the event ends.
+    """
+    for event in events:
+        for breath in breaths:
+            if breath.start_time > event.end_time:
+                break  # breaths are time-ordered
+            if (
+                breath.start_time >= event.start_time
+                and breath.end_time <= event.end_time
+            ):
+                breath.in_event = True
+
+
 class EventDetector:
     """
     Configurable respiratory event detector.
@@ -140,6 +161,15 @@ class EventDetector:
         Returns:
             ModeResult with detected events and metrics
         """
+        # Reset per-call breath state so each detect_events call is
+        # self-contained. detect_events runs once per mode over the SAME breaths
+        # list, and the apnea and hypopnea loops set in_event=True; without this
+        # reset a prior mode's flags would contaminate this mode's baselines and
+        # make results mode-order-dependent. in_event is the only breath field
+        # detect_events mutates.
+        for breath in breaths:
+            breath.in_event = False
+
         if self.config.name == "resmed":
             apneas = self._detect_events_resmed(breaths, flow_data, sample_rate)
         else:
@@ -311,13 +341,7 @@ class EventDetector:
             f"{self.config.name}: Detected {len(apneas)} apneas: {oa} OA, {ca} CA, {ma} MA, {ua} UA"
         )
 
-        for apnea in apneas:
-            for breath in breaths:
-                if (
-                    breath.start_time >= apnea.start_time
-                    and breath.end_time <= apnea.end_time
-                ):
-                    breath.in_event = True
+        _mark_breaths_in_events(breaths, apneas)
 
         return apneas
 
@@ -505,6 +529,12 @@ class EventDetector:
             _merge_adjacent_events(hypopneas, self.config.merge_gap),
         )
 
+        # Mark contained breaths as in-event so they are excluded from the
+        # baselines used by downstream detection (RERAs run after hypopneas).
+        # Applied after merging so it does not perturb the hypopneas computed in
+        # this same call.
+        _mark_breaths_in_events(breaths, hypopneas)
+
         logger.info(f"{self.config.name}: Detected {len(hypopneas)} hypopneas")
 
         return hypopneas
@@ -522,9 +552,17 @@ class EventDetector:
         without EEG arousal detection. Uses amplitude reduction as proxy for
         flow limitation.
 
-        Algorithm:
-        1. Find sequences of ≥2 breaths with moderate flow reduction (20-30%)
-        2. Look for recovery breath with ≥50% amplitude increase
+        This is the analysis-time amplitude-crescendo RERA detector and feeds
+        ModeResult.rdi. It is a DIFFERENT RERA definition from the query-time
+        FL-run proxy (breath_service.py::_count_fl_run_reras, versioned as
+        RERA_PROXY_ALGO_VERSION) that feeds the nightly rera_index/rdi; the two
+        disagree by construction.
+
+        Algorithm (thresholds from DetectionModeConfig):
+        1. Find sequences of ≥2 breaths with amplitude reduction in
+           [rera_reduction_min, rera_reduction_max)
+        2. Look for recovery breath with reduction < rera_recovery_reduction_max
+           and amplitude increase ≥ rera_recovery_increase_min over the run mean
         3. Ensure ≥2-breath separation from apneas/hypopneas
 
         Args:
@@ -556,11 +594,18 @@ class EventDetector:
         excluded = np.zeros(len(breaths), dtype=bool)
         for event in list(apneas) + list(hypopneas):
             for i, breath in enumerate(breaths):
+                if breath.start_time > event.end_time:
+                    break  # breaths are time-ordered
                 if (
                     breath.start_time >= event.start_time
                     and breath.end_time <= event.end_time
                 ):
                     excluded[i] = True
+
+        reduction_min = self.config.rera_reduction_min
+        reduction_max = self.config.rera_reduction_max
+        recovery_reduction_max = self.config.rera_recovery_reduction_max
+        recovery_increase_min = self.config.rera_recovery_increase_min
 
         reras = []
         i = 0
@@ -569,13 +614,13 @@ class EventDetector:
                 i += 1
                 continue
 
-            if 0.20 <= reductions[i] < 0.30:
+            if reduction_min <= reductions[i] < reduction_max:
                 seq_start = i
                 seq_count = 0
                 while (
                     i < len(breaths)
                     and not excluded[i]
-                    and 0.20 <= reductions[i] < 0.30
+                    and reduction_min <= reductions[i] < reduction_max
                 ):
                     seq_count += 1
                     i += 1
@@ -593,7 +638,7 @@ class EventDetector:
                         if excluded[j]:
                             continue
 
-                        if reductions[j] < 0.10:
+                        if reductions[j] < recovery_reduction_max:
                             seq_avg_amplitude = np.mean(
                                 [breaths[k].amplitude for k in range(seq_start, i)]
                             )
@@ -604,7 +649,7 @@ class EventDetector:
                                     recovery_amplitude - seq_avg_amplitude
                                 ) / seq_avg_amplitude
 
-                                if increase_pct >= 0.50:
+                                if increase_pct >= recovery_increase_min:
                                     recovery_found = True
                                     recovery_idx = j
                                     break
