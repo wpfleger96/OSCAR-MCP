@@ -217,6 +217,15 @@ source first and keep the citations current.
 - Alembic (database migrations)
 - pytest with coverage
 
+## Production Deployment
+
+Production runs as a Docker stack on a homelab host, provisioned from the private [`wpfleger96/homelabconfigs`](https://github.com/wpfleger96/homelabconfigs) repo (Ansible playbook `ansible/playbooks/install_and_configure_snore.yml`, compose file under `ansible/playbooks/files/snore/`). Host details, env templates, and public URL live there, not here.
+
+- **Deploys are automatic.** Merging to `main` triggers `.github/workflows/docker.yml`, which pushes `ghcr.io/wpfleger96/snore:latest`; Watchtower on the host polls every 5 minutes and swaps the container (a pre-update lifecycle hook defers the swap while an import/analysis/reset is in flight). There is no manual deploy step for app code. Env/infra changes deploy via `just config snore` from homelabconfigs.
+- **Data layout:** the stack lives in `/opt/snore` on the host; `/opt/snore/data` mounts to `/data` in the container, and `HOME=/data`, so the production DB is `/data/.snore/snore.db`.
+- **Running the CLI in production:** SSH to the host, then `docker exec snore snore <command>`. Production is multiuser — most commands need `--user <email>` (and `--profile <name>` when the user has several).
+- **Re-analysis after algorithm version bumps is manual.** Bumping any `*_ALGO_VERSION` constant (`src/snore/analysis/shared/versioning.py`) marks every stored analysis row `STALE_VERSION` on the next deploy; aggregates null stale sessions rather than serving old numbers, but nothing re-analyzes automatically. Re-run per profile with an open-ended range — `snore analysis run --from 2000-01-01 --user <email> --profile <name>` — which processes every session in range (no already-analyzed skip) and stores new version rows. Optionally drop the superseded rows afterward: `snore analysis delete --all --stale-versions`, then `snore db vacuum`.
+
 ## Key Patterns
 
 **Parser Plugin Architecture:**
