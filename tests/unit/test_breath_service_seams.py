@@ -5686,3 +5686,71 @@ class TestFetchWaveformChannelValsChunked:
         for sid in session_ids:
             assert fl_by_sess[sid] == pytest.approx(expected_fl[sid])
             assert snore_by_sess[sid] == pytest.approx(expected_snore[sid])
+
+
+# ---------------------------------------------------------------------------
+# get_nightly_range_summary — chunked Day / AnalysisResult / Breath binds (#280)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNightlyRangeSummaryChunked:
+    async def test_multichunk_range_summary_equals_single_chunk(
+        self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chunking the nightly range binds does not change the summary.
+
+        Seeds five analysed nights so the date IN-list (Day query), the
+        AnalysisResult-id IN-list (_classify_sessions_bulk), and the ok_ar_id
+        IN-list (Breath query) each span three chunks at ID_CHUNK_SIZE=2.  The
+        summary produced at size 2 must equal the single-chunk (default) run —
+        proving the chunk boundary drops no night, metric, or Day linkage.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+
+        date_start = date(2025, 9, 1)
+        n_days = 5  # 5 dates / 5 ar ids / 5 ok ar ids → 3 chunks each at size 2
+        for i in range(n_days):
+            day, session = await _make_day_and_session(
+                async_db_session, dev.id, date_start + timedelta(days=i)
+            )
+            # Distinct day-level total so day linkage (not the session-duration
+            # fallback of 7.0) is observable per night — a dropped Day chunk
+            # would surface the fallback instead.
+            day.total_therapy_hours = 5.5
+            await _store_analysis_with_breaths(
+                async_db_session, session, profile_id, n_breaths=6
+            )
+        await async_db_session.flush()
+
+        date_end = date_start + timedelta(days=n_days - 1)
+
+        # Single-chunk baseline first (default ID_CHUNK_SIZE).
+        baseline = await BreathService(
+            async_db_session, profile_id=profile_id
+        ).get_nightly_range_summary(
+            date_start=date_start, date_end=date_end, device_id=dev.id
+        )
+
+        # Force multi-chunk execution and re-run against the same seeded data.
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+        chunked = await BreathService(
+            async_db_session, profile_id=profile_id
+        ).get_nightly_range_summary(
+            date_start=date_start, date_end=date_end, device_id=dev.id
+        )
+
+        assert chunked.model_dump() == baseline.model_dump()
+
+        # Concrete behaviour: every seeded night is present, analysed, compliant,
+        # carries breath-derived metrics, and reflects the linked Day total.
+        assert chunked.n_nights == n_days
+        assert chunked.days_compliant == n_days
+        assert chunked.compliance_pct == pytest.approx(100.0)
+        assert len(chunked.nights) == n_days
+        for night in chunked.nights:
+            assert night.day_status == DayAnalysisStatus.OK
+            assert night.analyzed_session_count == 1
+            assert night.fl_median == pytest.approx(0.35)
+            assert night.total_therapy_hours == pytest.approx(5.5)

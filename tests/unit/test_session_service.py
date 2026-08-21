@@ -726,6 +726,49 @@ class TestSessionServiceDelete:
 
         assert owned == {o1.id, o2.id, o3.id}
 
+    async def test_delete_preview_dedupes_duplicate_ids_across_chunks(
+        self,
+        async_db_session,
+        async_test_device,
+        async_test_session_factory,
+        monkeypatch,
+    ):
+        """A duplicate id split across chunks must not double-count related rows
+        or list the session twice.
+
+        Without the entry-point dedup, [s1, s2, s1] chunks to [s1, s2] then [s1]
+        at size 2, so s1's events/stats are counted twice and s1 appears twice in
+        the session list.
+        """
+        from snore.database.models import Event
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        base = datetime(2025, 10, 1, 22, 0, 0)
+        s1 = await async_test_session_factory(async_test_device.id, base, ahi=1.0)
+        s2 = await async_test_session_factory(
+            async_test_device.id, base + timedelta(days=1), ahi=2.0
+        )
+        # Two events on s1 — double-counting would report four.
+        for _ in range(2):
+            async_db_session.add(
+                Event(
+                    session_id=s1.id,
+                    event_type="OA",
+                    start_time=base,
+                    duration_seconds=10.0,
+                )
+            )
+        await async_db_session.flush()
+
+        service = SessionService(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(session_ids=[s1.id, s2.id, s1.id])
+
+        # s1 listed once; DESC by start_time puts the later s2 first.
+        assert [s.id for s in preview.sessions] == [s2.id, s1.id]
+        assert preview.event_count == 2  # s1's two events, counted once
+        assert preview.stats_count == 2  # one Statistics row per distinct session
+
     async def test_delete_enforces_ownership_across_chunks(
         self,
         async_db_session,

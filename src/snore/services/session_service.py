@@ -261,6 +261,10 @@ class SessionService(ProfileScopedService):
                 "--device, --session-id, --from, --to, or --all"
             )
 
+        if session_ids:
+            # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+            session_ids = list(dict.fromkeys(session_ids))
+
         filters: list[ColumnElement[bool]] = []
 
         if device:
@@ -354,6 +358,8 @@ class SessionService(ProfileScopedService):
         (mirrors ``set_session_enabled``), so a day left with fewer sessions is
         re-aggregated and a day left with none has its statistics reset.
         """
+        # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+        session_ids = list(dict.fromkeys(session_ids))
         if not session_ids:
             return 0
 

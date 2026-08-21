@@ -18,11 +18,12 @@ session_service).
 """
 
 
-def iter_id_chunks(ids: Sequence[int]) -> Iterator[tuple[int, ...]]:
+def iter_id_chunks[T](ids: Sequence[T]) -> Iterator[tuple[T, ...]]:
     """Yield ``ids`` in tuples of at most ``ID_CHUNK_SIZE`` for IN-binding.
 
     Empty input yields nothing; a list already within the cap yields exactly one chunk (no
     behavioural or performance change for the common small case).  SQLAlchemy accepts a
-    tuple in ``.in_()``.
+    tuple in ``.in_()``.  The element type is preserved, so non-integer bind values (e.g.
+    ``date`` objects) are chunked against the same parameter cap too.
     """
     yield from batched(ids, ID_CHUNK_SIZE, strict=False)

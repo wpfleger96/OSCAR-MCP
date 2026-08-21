@@ -19,6 +19,7 @@ from snore.analysis.shared.versioning import (
     NullReason,
 )
 from snore.database import models
+from snore.utils.db_chunk import iter_id_chunks
 from snore.utils.stats import percentile_nearest_rank
 
 from ._core import _BreathServiceCore
@@ -430,21 +431,25 @@ class NightlyMixin(_BreathServiceCore):
                 nights=[],
             )
 
-        # Bulk Day query for all dates that have sessions
+        # Bulk Day query for all dates that have sessions.  Chunk the unbounded
+        # date IN-list (SQLite bound-param cap); dates are disjoint across chunks,
+        # so the merged dict never collides.
         all_dates = list(sessions_by_date.keys())
-        day_rows = (
-            (
-                await self._db.execute(
-                    select(models.Day).where(
-                        models.Day.device_id == resolved_device_id,
-                        models.Day.date.in_(all_dates),
+        day_by_date: dict[date, Any] = {}
+        for date_chunk in iter_id_chunks(all_dates):
+            chunk_rows = (
+                (
+                    await self._db.execute(
+                        select(models.Day).where(
+                            models.Day.device_id == resolved_device_id,
+                            models.Day.date.in_(date_chunk),
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        day_by_date: dict[date, Any] = {d.date: d for d in day_rows}
+            day_by_date.update({d.date: d for d in chunk_rows})
 
         # Collect all session IDs across the range
         all_sessions: list[Any] = []
@@ -475,16 +480,20 @@ class NightlyMixin(_BreathServiceCore):
                 models.Breath.is_recovery_breath,
                 models.Breath.peak_flow_lpm,
             )
-            breath_result = await self._db.execute(
-                select(*breath_cols)
-                .where(models.Breath.analysis_result_id.in_(ok_ar_ids))
-                .order_by(
-                    models.Breath.analysis_result_id,
-                    models.Breath.breath_number,
+            # Chunk the unbounded ar_id IN-list (SQLite bound-param cap).  Each
+            # ar_id lands in exactly one chunk, so the per-ar_id breath ordering
+            # (analysis_result_id, breath_number) is preserved within its chunk.
+            for ar_id_chunk in iter_id_chunks(ok_ar_ids):
+                breath_result = await self._db.execute(
+                    select(*breath_cols)
+                    .where(models.Breath.analysis_result_id.in_(ar_id_chunk))
+                    .order_by(
+                        models.Breath.analysis_result_id,
+                        models.Breath.breath_number,
+                    )
                 )
-            )
-            for row in breath_result:
-                breath_rows_by_ar_id[row.analysis_result_id].append(row)
+                for row in breath_result:
+                    breath_rows_by_ar_id[row.analysis_result_id].append(row)
 
         # Bulk fetch fl and snore waveform values for all sessions in range
         (

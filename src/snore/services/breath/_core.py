@@ -118,18 +118,23 @@ class _BreathServiceCore:
         ar_id_by_session = await latest_analysis_ids(self._db, session_ids)
         if not ar_id_by_session:
             return classification
-        rows = (
-            (
-                await self._db.execute(
-                    select(models.AnalysisResult).where(
-                        models.AnalysisResult.id.in_(list(ar_id_by_session.values()))
+        # Chunk the unbounded AnalysisResult-id IN-list (SQLite bound-param cap).
+        # Ids are disjoint across chunks, so the merged dict never collides.
+        ar_ids = list(ar_id_by_session.values())
+        row_by_id: dict[int, models.AnalysisResult] = {}
+        for chunk in iter_id_chunks(ar_ids):
+            chunk_rows = (
+                (
+                    await self._db.execute(
+                        select(models.AnalysisResult).where(
+                            models.AnalysisResult.id.in_(chunk)
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        row_by_id = {row.id: row for row in rows}
+            row_by_id.update({row.id: row for row in chunk_rows})
         for sid, ar_id in ar_id_by_session.items():
             row = row_by_id.get(ar_id)
             if row is not None:

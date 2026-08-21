@@ -245,6 +245,10 @@ class AnalysisFacade:
                 "session_ids, from_date, to_date, or delete_all"
             )
 
+        if session_ids:
+            # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+            session_ids = list(dict.fromkeys(session_ids))
+
         base_query = (
             select(
                 models.Session.id,
@@ -460,6 +464,8 @@ class AnalysisFacade:
         Returns:
             Number of analysis records deleted
         """
+        # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+        session_ids = list(dict.fromkeys(session_ids))
         if not session_ids:
             return 0
 

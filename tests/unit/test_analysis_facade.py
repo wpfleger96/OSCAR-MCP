@@ -1189,3 +1189,187 @@ class TestChunkedIdBinds:
             date(2025, 6, 4),
             date(2025, 6, 5),
         ]
+
+    async def test_delete_latest_only_dedupes_duplicate_ids_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """A duplicate id split across chunks must not delete a second version.
+
+        Without the entry-point dedup, [s1, s2, s1] chunks to [s1, s2] then [s1]:
+        chunk 1 deletes s1's latest, chunk 2 re-ranks the survivors and deletes
+        s1's now-latest — a second, unintended version.  Deduping to [s1, s2]
+        restores the single-IN "one latest per session" semantics.
+        """
+        from sqlalchemy import select as sa_select  # noqa: PLC0415
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        base = date(2025, 7, 1)
+        sessions = []
+        for i in range(3):  # third session proves scoping — it must stay untouched
+            _, sess = await _create_session_with_analysis(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                num_analyses=2,
+            )
+            sessions.append(sess)
+        sess1, sess2, sess3 = sessions
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+
+        # Preview must not double-count the duplicated id: [s1, s2, s1] == [s1, s2].
+        dup_preview = await service.get_delete_preview(
+            session_ids=[sess1.id, sess2.id, sess1.id]
+        )
+        deduped_preview = await service.get_delete_preview(
+            session_ids=[sess1.id, sess2.id]
+        )
+        assert dup_preview.sessions_with_analysis == 2
+        assert len(dup_preview.session_details) == 2
+        assert {d.id for d in dup_preview.session_details} == {sess1.id, sess2.id}
+        assert (
+            dup_preview.sessions_with_analysis == deduped_preview.sessions_with_analysis
+        )
+        assert (
+            dup_preview.total_analysis_records == deduped_preview.total_analysis_records
+        )
+
+        deleted = await service.delete_analysis(
+            [sess1.id, sess2.id, sess1.id], all_versions=False, stale_versions=False
+        )
+
+        # One latest per distinct session — never two for the duplicated s1.
+        assert deleted == 2
+
+        async def _versions(session_id: int) -> list[int]:
+            rows = (
+                (
+                    await async_db_session.execute(
+                        sa_select(AnalysisResult).filter_by(session_id=session_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return sorted(r.programmatic_result_json["version"] for r in rows)
+
+        # s1's older version survives (bug would delete it); s2 likewise; s3 untouched.
+        assert await _versions(sess1.id) == [1]
+        assert await _versions(sess2.id) == [1]
+        assert await _versions(sess3.id) == [1, 2]
+
+    async def test_delete_latest_only_sums_rowcount_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """latest-only delete over a chunk boundary removes one row per session.
+
+        Proves the per-chunk rowcount accumulation for the default (latest-only)
+        branch: 3 distinct sessions at chunk size 2 span two chunks.
+        """
+        from sqlalchemy import select as sa_select  # noqa: PLC0415
+
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        base = date(2025, 8, 1)
+        sessions = []
+        for i in range(3):  # 3 sessions → 2 chunks at size 2
+            _, sess = await _create_session_with_analysis(
+                async_db_session,
+                async_test_device,
+                base + timedelta(days=i),
+                num_analyses=2,
+            )
+            sessions.append(sess)
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        deleted = await service.delete_analysis(
+            [s.id for s in sessions], all_versions=False, stale_versions=False
+        )
+
+        assert deleted == 3  # one latest per session, summed across chunks
+
+        for sess in sessions:
+            versions = sorted(
+                r.programmatic_result_json["version"]
+                for r in (
+                    await async_db_session.execute(
+                        sa_select(AnalysisResult).filter_by(session_id=sess.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert versions == [1]  # only the older version remains
+
+    async def test_stale_versions_preview_concats_rows_and_sums_patterns_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """Stale preview concats all_rows and sums stale patterns across chunks.
+
+        3 sessions (one stale + one current row each) span two chunks at size 2.
+        Only the stale rows and their patterns are counted; the current rows'
+        patterns are excluded.
+        """
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+
+        base = date(2025, 9, 1)
+        sessions = []
+        stale_pattern_counts = [2, 1, 2]  # 5 stale patterns, spanning chunks
+        for i, n_patterns in enumerate(stale_pattern_counts):
+            _, sess, stale_ar, current_ar = await _create_session_with_mixed_analyses(
+                async_db_session, async_test_device, base + timedelta(days=i)
+            )
+            sessions.append(sess)
+            for _ in range(n_patterns):
+                async_db_session.add(
+                    DetectedPattern(
+                        analysis_result_id=stale_ar.id,
+                        pattern_id="p",
+                        start_time=datetime(2025, 9, 1),
+                        confidence=0.9,
+                        detected_by="programmatic",
+                    )
+                )
+            # A pattern on the current row must NOT be counted.
+            async_db_session.add(
+                DetectedPattern(
+                    analysis_result_id=current_ar.id,
+                    pattern_id="c",
+                    start_time=datetime(2025, 9, 1),
+                    confidence=0.5,
+                    detected_by="programmatic",
+                )
+            )
+        await async_db_session.commit()
+
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(
+            session_ids=[s.id for s in sessions], stale_versions=True
+        )
+
+        assert preview.sessions_with_analysis == 3  # one stale row per session
+        assert preview.total_analysis_records == 6  # all rows, concat across chunks
+        assert preview.records_to_delete == 3  # only the stale rows
+        assert preview.patterns_count == 5  # 2+1+2 stale patterns; current excluded
+        assert {d.id for d in preview.session_details} == {s.id for s in sessions}
+
+    async def test_get_delete_preview_respects_real_bind_cap_without_monkeypatch(
+        self, async_db_session
+    ):
+        """1500 non-existent ids never trip SQLite's bind cap at the real chunk size.
+
+        No monkeypatch: a single unchunked IN(1..1500) would overrun SQLite's
+        999-parameter floor.  Chunks of 500 stay under the cap, so the preview
+        returns a normal empty result instead of raising OperationalError.
+        """
+        service = AnalysisFacade(async_db_session, profile_id=1)
+        preview = await service.get_delete_preview(session_ids=list(range(1, 1501)))
+
+        assert preview.sessions_with_analysis == 0
+        assert preview.total_analysis_records == 0
+        assert preview.records_to_delete == 0
+        assert preview.patterns_count == 0
+        assert preview.session_details == []
