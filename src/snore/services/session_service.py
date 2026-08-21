@@ -348,9 +348,32 @@ class SessionService:
         caller should have validated first (via ``get_owned_ids``) and returned
         404 before calling this method.  The DELETE itself carries the predicate
         as a defence-in-depth measure.
+
+        Day aggregates for the affected days are recalculated after the DELETE
+        (mirrors ``set_session_enabled``), so a day left with fewer sessions is
+        re-aggregated and a day left with none has its statistics reset.
         """
         if not session_ids:
             return 0
+
+        # Collect affected day IDs before the rows disappear.
+        day_ids = (
+            (
+                await self.db_session.execute(
+                    select(models.Session.day_id)
+                    .where(
+                        models.Session.id.in_(session_ids),
+                        models.Session.day_id.is_not(None),
+                        models.Session.device_id.in_(
+                            select(models.Device.id).where(self._profile_filter())
+                        ),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         # Ownership predicate inside the DELETE — foreign IDs cannot be deleted
         # even if the caller skips the pre-validation.
@@ -363,6 +386,20 @@ class SessionService:
                 )
             )
         )
+
+        if day_ids:
+            days = (
+                (
+                    await self.db_session.execute(
+                        select(models.Day).where(models.Day.id.in_(day_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for day in days:
+                await DayManager.recalculate_day(day, self.db_session)
+
         return cursor.rowcount or 0
 
     async def get_owned_ids(self, session_ids: list[int]) -> set[int]:

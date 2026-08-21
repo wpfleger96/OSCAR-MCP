@@ -257,13 +257,18 @@ async def _seed_source_profile(session: AsyncSession) -> tuple[int, dict]:
     )
     session.add(src_event)
 
-    # Statistics
+    # Statistics — includes STR-extra columns to lock reflection-copy coverage
     src_stats = models.Statistics(
         session_id=src_session.id,
         ahi=3.2,
         obstructive_apneas=5,
         hypopneas=3,
         usage_hours=7.5,
+        spo2_median=94.0,
+        spo2_95th=97.0,
+        ie_ratio_median=0.6,
+        csr_pct=1.5,
+        mask_events=4.0,
     )
     session.add(src_stats)
 
@@ -655,6 +660,100 @@ class TestScrubDemo:
             src_pat = (await async_db_session.execute(stmt)).scalars().first()
             assert src_pat.notes is not None
             assert "PII" in src_pat.notes
+
+    def test_statistics_reflection_columns_all_numeric(self):
+        """Reflection-clone safety: every copied Statistics column must be numeric.
+
+        The scrub copies all columns except session_id verbatim; a future
+        date/string/PII column must fail here instead of being silently cloned.
+        """
+        from sqlalchemy import Integer, Numeric  # noqa: PLC0415
+
+        from snore.cli.groups.db import _STATS_CLONE_EXCLUDED_COLUMNS  # noqa: PLC0415
+
+        for col in models.Statistics.__table__.columns:
+            if col.name in _STATS_CLONE_EXCLUDED_COLUMNS:
+                continue
+            # Float subclasses Numeric.
+            assert isinstance(col.type, (Integer, Numeric)), (
+                f"Statistics.{col.name} has non-numeric type {col.type!r}; "
+                "review for PII/dates before letting the demo scrub clone it"
+            )
+
+    def test_day_reflection_columns_all_numeric(self):
+        """Reflection-clone safety: every copied Day column must be numeric.
+
+        Same tripwire as the Statistics guard — a future date/string/PII
+        column on Day must fail here instead of being cloned verbatim
+        (and, for dates, unshifted) into the demo profile.
+        """
+        from sqlalchemy import Integer, Numeric  # noqa: PLC0415
+
+        from snore.cli.groups.db import _DAY_CLONE_EXCLUDED_COLUMNS  # noqa: PLC0415
+
+        for col in models.Day.__table__.columns:
+            if col.name in _DAY_CLONE_EXCLUDED_COLUMNS:
+                continue
+            # Float subclasses Numeric.
+            assert isinstance(col.type, (Integer, Numeric)), (
+                f"Day.{col.name} has non-numeric type {col.type!r}; "
+                "review for PII/dates before letting the demo scrub clone it"
+            )
+
+    @pytest.mark.asyncio
+    async def test_scrub_demo_statistics_clone_covers_all_columns(
+        self, async_db_session, patched_raw_backup_dir
+    ):
+        """Every Statistics column is carried into the demo clone.
+
+        Regression: a hand-maintained field list silently dropped 27 of the
+        74 metric columns (spo2_median, csr_pct, ie_ratio_median, ...).
+
+        The all-columns loop below is only meaningful for seeded columns
+        (unseeded ones are None on both sides); the explicit assertions on
+        previously-dropped columns are the real regression lock.
+        """
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.cli.groups.db import (  # noqa: PLC0415
+            _STATS_CLONE_EXCLUDED_COLUMNS,
+            _do_scrub_demo,
+        )
+
+        async with async_db_session.begin():
+            src_profile_id, meta = await _seed_source_profile(async_db_session)
+
+        async with async_db_session.begin():
+            await _do_scrub_demo(async_db_session, src_profile_id)
+
+        async with async_db_session.begin():
+            stmt = select(models.User).where(
+                models.User.canonical_email == "demo@snore.local"
+            )
+            demo_user = (await async_db_session.execute(stmt)).scalars().first()
+            stmt = select(models.Device).where(
+                models.Device.profile_id == demo_user.default_profile_id
+            )
+            demo_dev = (await async_db_session.execute(stmt)).scalars().first()
+            stmt = select(models.Session).where(models.Session.device_id == demo_dev.id)
+            demo_sess = (await async_db_session.execute(stmt)).scalars().first()
+
+            src_stats = await async_db_session.get(
+                models.Statistics, meta["src_session_id"]
+            )
+            demo_stats = await async_db_session.get(models.Statistics, demo_sess.id)
+            assert demo_stats is not None
+
+            # Previously-dropped columns must survive the clone.
+            assert demo_stats.spo2_median == 94.0
+            assert demo_stats.csr_pct == 1.5
+
+            for col in models.Statistics.__table__.columns:
+                if col.name in _STATS_CLONE_EXCLUDED_COLUMNS:
+                    continue
+                assert getattr(demo_stats, col.name) == getattr(src_stats, col.name), (
+                    f"Statistics.{col.name} not carried into demo clone"
+                )
 
     @pytest.mark.asyncio
     async def test_scrub_demo_missing_source_profile_raises(self, async_db_session):
