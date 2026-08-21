@@ -25,6 +25,7 @@ from snore.services.schemas import (
     SessionSetting,
     SessionStatistics,
 )
+from snore.utils.db_chunk import iter_id_chunks
 
 __all__ = ["SessionService"]
 
@@ -260,13 +261,14 @@ class SessionService(ProfileScopedService):
                 "--device, --session-id, --from, --to, or --all"
             )
 
+        if session_ids:
+            # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+            session_ids = list(dict.fromkeys(session_ids))
+
         filters: list[ColumnElement[bool]] = []
 
         if device:
             filters.append(models.Device.serial_number == device)
-
-        if session_ids:
-            filters.append(models.Session.id.in_(session_ids))
 
         if from_date:
             filters.append(models.Session.start_time >= from_date)
@@ -274,52 +276,68 @@ class SessionService(ProfileScopedService):
         if to_date:
             filters.append(models.Session.start_time <= to_date)
 
-        query = (
+        base_query = (
             session_device_join(select(models.Session, models.Device))
             .where(self._profile_filter(), *filters)
             .order_by(models.Session.start_time.desc())
         )
 
+        # An explicit ID list is the only unbounded bind; chunk it and re-sort
+        # after concatenation.  The filter-only branches stay a single execute.
+        queries = (
+            [
+                base_query.where(models.Session.id.in_(chunk))
+                for chunk in iter_id_chunks(session_ids)
+            ]
+            if session_ids
+            else [base_query]
+        )
+
         sessions = []
         session_ids_to_delete: list[int] = []
-        for session, dev in await self.db_session.execute(query):
-            sessions.append(
-                SessionListItem(
-                    id=session.id,
-                    therapy_day=DayManager.get_day_for_session(session.start_time),
-                    start_time=session.start_time,
-                    duration_hours=(session.duration_seconds or 0.0) / 3600,
-                    enabled=True,
-                    manufacturer=dev.manufacturer,
-                    model=dev.model,
-                    serial_number=dev.serial_number,
-                    ahi=None,
+        for query in queries:
+            for session, dev in await self.db_session.execute(query):
+                sessions.append(
+                    SessionListItem(
+                        id=session.id,
+                        therapy_day=DayManager.get_day_for_session(session.start_time),
+                        start_time=session.start_time,
+                        duration_hours=(session.duration_seconds or 0.0) / 3600,
+                        enabled=True,
+                        manufacturer=dev.manufacturer,
+                        model=dev.model,
+                        serial_number=dev.serial_number,
+                        ahi=None,
+                    )
                 )
-            )
-            session_ids_to_delete.append(session.id)
+                session_ids_to_delete.append(session.id)
+
+        if session_ids:
+            sessions.sort(key=lambda s: s.start_time, reverse=True)
 
         if not session_ids_to_delete:
             return DeletePreview(
                 sessions=[], event_count=0, waveform_count=0, stats_count=0
             )
 
-        def _count_subquery(model: type[Any]) -> Any:
-            return (
-                select(func.count())
-                .select_from(model)
-                .where(model.session_id.in_(session_ids_to_delete))
-                .scalar_subquery()
-            )
+        # Split into three single-IN COUNTs summed over chunks: packing all
+        # three IN-lists into one statement would bind 3x the chunk size and
+        # overrun SQLite's parameter cap.
+        async def _count_related(model: type[Any]) -> int:
+            total = 0
+            for chunk in iter_id_chunks(session_ids_to_delete):
+                total += (
+                    await self.db_session.execute(
+                        select(func.count())
+                        .select_from(model)
+                        .where(model.session_id.in_(chunk))
+                    )
+                ).scalar() or 0
+            return total
 
-        event_count, waveform_count, stats_count = (
-            await self.db_session.execute(
-                select(
-                    _count_subquery(models.Event),
-                    _count_subquery(models.Waveform),
-                    _count_subquery(models.Statistics),
-                )
-            )
-        ).one()
+        event_count = await _count_related(models.Event)
+        waveform_count = await _count_related(models.Waveform)
+        stats_count = await _count_related(models.Statistics)
 
         return DeletePreview(
             sessions=sessions,
@@ -340,43 +358,52 @@ class SessionService(ProfileScopedService):
         (mirrors ``set_session_enabled``), so a day left with fewer sessions is
         re-aggregated and a day left with none has its statistics reset.
         """
+        # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+        session_ids = list(dict.fromkeys(session_ids))
         if not session_ids:
             return 0
 
-        # Collect affected day IDs before the rows disappear.
-        day_ids = (
-            (
-                await self.db_session.execute(
-                    session_device_join(select(models.Session.day_id))
-                    .where(
-                        models.Session.id.in_(session_ids),
-                        models.Session.day_id.is_not(None),
-                        self._profile_filter(),
+        # Collect affected day IDs before the rows disappear.  Chunks are
+        # disjoint but a day can recur across them, so union into a set.
+        day_ids: set[int] = set()
+        for chunk in iter_id_chunks(session_ids):
+            rows = (
+                (
+                    await self.db_session.execute(
+                        session_device_join(select(models.Session.day_id))
+                        .where(
+                            models.Session.id.in_(chunk),
+                            models.Session.day_id.is_not(None),
+                            self._profile_filter(),
+                        )
+                        .distinct()
                     )
-                    .distinct()
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
+            day_ids.update(d for d in rows if d is not None)
 
         # Ownership predicate inside the DELETE — foreign IDs cannot be deleted
         # even if the caller skips the pre-validation.
-        cursor: CursorResult[Any] = await self.db_session.execute(  # type: ignore[assignment]
-            delete(models.Session)
-            .where(models.Session.id.in_(session_ids))
-            .where(
-                models.Session.device_id.in_(
-                    select(models.Device.id).where(self._profile_filter())
+        deleted = 0
+        for chunk in iter_id_chunks(session_ids):
+            cursor: CursorResult[Any] = await self.db_session.execute(  # type: ignore[assignment]
+                delete(models.Session)
+                .where(models.Session.id.in_(chunk))
+                .where(
+                    models.Session.device_id.in_(
+                        select(models.Device.id).where(self._profile_filter())
+                    )
                 )
             )
-        )
+            deleted += cursor.rowcount or 0
 
-        if day_ids:
+        for chunk in iter_id_chunks(list(day_ids)):
             days = (
                 (
                     await self.db_session.execute(
-                        select(models.Day).where(models.Day.id.in_(day_ids))
+                        select(models.Day).where(models.Day.id.in_(chunk))
                     )
                 )
                 .scalars()
@@ -385,7 +412,7 @@ class SessionService(ProfileScopedService):
             for day in days:
                 await DayManager.recalculate_day(day, self.db_session)
 
-        return cursor.rowcount or 0
+        return deleted
 
     async def get_owned_ids(self, session_ids: list[int]) -> set[int]:
         """Return the subset of session_ids that belong to this profile.

@@ -18,6 +18,7 @@ from snore.analysis.shared.versioning import (
     TimezoneStatus,
 )
 from snore.database import models
+from snore.utils.db_chunk import iter_id_chunks
 
 from .dtos import (
     DeviceAmbiguityError,
@@ -117,18 +118,23 @@ class _BreathServiceCore:
         ar_id_by_session = await latest_analysis_ids(self._db, session_ids)
         if not ar_id_by_session:
             return classification
-        rows = (
-            (
-                await self._db.execute(
-                    select(models.AnalysisResult).where(
-                        models.AnalysisResult.id.in_(list(ar_id_by_session.values()))
+        # Chunk the unbounded AnalysisResult-id IN-list (SQLite bound-param cap).
+        # Ids are disjoint across chunks, so the merged dict never collides.
+        ar_ids = list(ar_id_by_session.values())
+        row_by_id: dict[int, models.AnalysisResult] = {}
+        for chunk in iter_id_chunks(ar_ids):
+            chunk_rows = (
+                (
+                    await self._db.execute(
+                        select(models.AnalysisResult).where(
+                            models.AnalysisResult.id.in_(chunk)
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        row_by_id = {row.id: row for row in rows}
+            row_by_id.update({row.id: row for row in chunk_rows})
         for sid, ar_id in ar_id_by_session.items():
             row = row_by_id.get(ar_id)
             if row is not None:
@@ -316,34 +322,38 @@ class _BreathServiceCore:
         if not session_ids:
             return fl_by_sess, snore_by_sess
 
-        wf_rows = (
-            (
-                await db.execute(
-                    select(models.Waveform).where(
-                        models.Waveform.session_id.in_(session_ids),
-                        models.Waveform.waveform_type.in_(["fl", "snore"]),
+        # Chunk the unbounded session_id list (SQLite bound-param cap); the
+        # waveform_type IN-list is a constant kept in every chunk.  Each session
+        # falls in exactly one chunk, so the per-session dicts never collide.
+        for chunk in iter_id_chunks(session_ids):
+            wf_rows = (
+                (
+                    await db.execute(
+                        select(models.Waveform).where(
+                            models.Waveform.session_id.in_(chunk),
+                            models.Waveform.waveform_type.in_(["fl", "snore"]),
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
 
-        for wf in wf_rows:
-            if not wf.data_blob or not wf.sample_count:
-                continue
-            try:
-                _ts, vals = deserialize_waveform_blob(wf.data_blob, wf.sample_count)
-            except ValueError:
-                continue
-            sid = int(wf.session_id)
-            if wf.waveform_type == "fl":
-                # Retain raw values including any negative sentinels.
-                # The caller (_build_nightly_summary) applies the >= 0 filter.
-                fl_by_sess[sid] = [float(v) for v in vals]
-            elif wf.waveform_type == "snore":
-                # Zeros are legitimate snore data — retain all values.
-                snore_by_sess[sid] = [float(v) for v in vals]
+            for wf in wf_rows:
+                if not wf.data_blob or not wf.sample_count:
+                    continue
+                try:
+                    _ts, vals = deserialize_waveform_blob(wf.data_blob, wf.sample_count)
+                except ValueError:
+                    continue
+                sid = int(wf.session_id)
+                if wf.waveform_type == "fl":
+                    # Retain raw values including any negative sentinels.
+                    # The caller (_build_nightly_summary) applies the >= 0 filter.
+                    fl_by_sess[sid] = [float(v) for v in vals]
+                elif wf.waveform_type == "snore":
+                    # Zeros are legitimate snore data — retain all values.
+                    snore_by_sess[sid] = [float(v) for v in vals]
 
         return fl_by_sess, snore_by_sess
 

@@ -12,6 +12,7 @@ from snore.analysis.shared.versioning import NullReason
 from snore.database import models
 from snore.parsers.register_all import ensure_registered_parsers
 from snore.parsers.registry import parser_registry
+from snore.utils.db_chunk import iter_id_chunks
 
 from ._core import _BreathServiceCore
 from .algorithms import _extract_window_mean
@@ -95,14 +96,17 @@ class CapabilitiesMixin(_BreathServiceCore):
             nights_with_data = len(days)
             day_ids = [d.id for d in days]
 
-            sess_count_row = (
-                await self._db.execute(
-                    select(sqlfunc.count())
-                    .select_from(models.Session)
-                    .where(models.Session.day_id.in_(day_ids))
-                )
-            ).scalar()
-            session_count = sess_count_row or 0
+            # Chunk the unbounded day_id list (SQLite bound-param cap); each day
+            # falls in exactly one chunk, so per-chunk counts sum to the total.
+            for chunk in iter_id_chunks(day_ids):
+                chunk_count = (
+                    await self._db.execute(
+                        select(sqlfunc.count())
+                        .select_from(models.Session)
+                        .where(models.Session.day_id.in_(chunk))
+                    )
+                ).scalar()
+                session_count += chunk_count or 0
 
         # Session IDs for this device in range
         sess_stmt = (
@@ -121,64 +125,79 @@ class CapabilitiesMixin(_BreathServiceCore):
         all_setting_keys: list[str] = []
 
         if session_ids:
-            wf_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Waveform.waveform_type)
-                        .where(models.Waveform.session_id.in_(session_ids))
-                        .distinct()
+            # Chunk the unbounded session_id list (SQLite bound-param cap); each
+            # session falls in exactly one chunk, so the DISTINCT sets union
+            # cleanly across chunks with no double-counting.
+            channel_set: set[str] = set()
+            event_type_set: set[str] = set()
+            setting_key_set: set[str] = set()
+            for chunk in iter_id_chunks(session_ids):
+                wf_rows = (
+                    (
+                        await self._db.execute(
+                            select(models.Waveform.waveform_type)
+                            .where(models.Waveform.session_id.in_(chunk))
+                            .distinct()
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            channels_present = sorted(set(str(w) for w in wf_rows))
+                channel_set.update(str(w) for w in wf_rows)
 
-            ev_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Event.event_type)
-                        .where(models.Event.session_id.in_(session_ids))
-                        .distinct()
+                ev_rows = (
+                    (
+                        await self._db.execute(
+                            select(models.Event.event_type)
+                            .where(models.Event.session_id.in_(chunk))
+                            .distinct()
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            event_types_present = sorted(set(str(e) for e in ev_rows))
+                event_type_set.update(str(e) for e in ev_rows)
 
-            setting_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Setting.key)
-                        .where(models.Setting.session_id.in_(session_ids))
-                        .distinct()
+                setting_rows = (
+                    (
+                        await self._db.execute(
+                            select(models.Setting.key)
+                            .where(models.Setting.session_id.in_(chunk))
+                            .distinct()
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            all_setting_keys = sorted(set(str(k) for k in setting_rows))
+                setting_key_set.update(str(k) for k in setting_rows)
+            channels_present = sorted(channel_set)
+            event_types_present = sorted(event_type_set)
+            all_setting_keys = sorted(setting_key_set)
 
         # rx_keys_present: only keys that actually have non-null values
         rx_keys: list[str] = []
         if session_ids:
-            rx_key_rows = (
-                (
-                    await self._db.execute(
-                        select(models.Setting.key)
-                        .where(
-                            models.Setting.session_id.in_(session_ids),
-                            models.Setting.key.in_(list(_RX_KEYS)),
-                            models.Setting.value.is_not(None),
+            # Chunk only the unbounded session_id list; the _RX_KEYS filter is a
+            # small constant IN-list kept in every chunk (union across chunks).
+            rx_key_set: set[str] = set()
+            for chunk in iter_id_chunks(session_ids):
+                rx_key_rows = (
+                    (
+                        await self._db.execute(
+                            select(models.Setting.key)
+                            .where(
+                                models.Setting.session_id.in_(chunk),
+                                models.Setting.key.in_(list(_RX_KEYS)),
+                                models.Setting.value.is_not(None),
+                            )
+                            .distinct()
                         )
-                        .distinct()
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            rx_keys = sorted(set(str(k) for k in rx_key_rows))
+                rx_key_set.update(str(k) for k in rx_key_rows)
+            rx_keys = sorted(rx_key_set)
 
         # Supported vendor models from parsers registry — let real exceptions propagate
         supported_models: list[str] = list(parser_registry.list_supported_models())

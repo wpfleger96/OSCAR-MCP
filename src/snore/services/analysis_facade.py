@@ -26,6 +26,7 @@ from snore.services.schemas import (
     BatchAnalysisResult,
     BatchSessionResult,
 )
+from snore.utils.db_chunk import iter_id_chunks
 
 __all__ = ["AnalysisFacade", "BatchAnalysisCoordinator"]
 
@@ -244,7 +245,11 @@ class AnalysisFacade:
                 "session_ids, from_date, to_date, or delete_all"
             )
 
-        query = (
+        if session_ids:
+            # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+            session_ids = list(dict.fromkeys(session_ids))
+
+        base_query = (
             select(
                 models.Session.id,
                 models.Session.device_session_id,
@@ -261,18 +266,35 @@ class AnalysisFacade:
             .distinct()
         )
 
-        if session_ids:
-            query = query.where(models.Session.id.in_(session_ids))
-
         if from_date:
-            query = query.where(models.Session.start_time >= from_date)
+            base_query = base_query.where(models.Session.start_time >= from_date)
 
         if to_date:
-            query = query.where(models.Session.start_time <= to_date)
+            base_query = base_query.where(models.Session.start_time <= to_date)
 
-        query = query.order_by(models.Session.start_time.desc())
-
-        sessions_with_analysis = (await self._db.execute(query)).fetchall()
+        # session_ids is an unbounded caller list — chunk it under the bind cap.
+        # Chunks are disjoint so the per-chunk (already distinct) rows concat
+        # cleanly; re-sort start_time DESC to restore the single-query ordering.
+        sessions_with_analysis: list[Any]
+        if session_ids:
+            sessions_with_analysis = []
+            for chunk in iter_id_chunks(session_ids):
+                sessions_with_analysis.extend(
+                    (
+                        await self._db.execute(
+                            base_query.where(models.Session.id.in_(chunk))
+                        )
+                    ).fetchall()
+                )
+            sessions_with_analysis.sort(key=lambda s: s.start_time, reverse=True)
+        else:
+            sessions_with_analysis = list(
+                (
+                    await self._db.execute(
+                        base_query.order_by(models.Session.start_time.desc())
+                    )
+                ).fetchall()
+            )
 
         if not sessions_with_analysis:
             return AnalysisDeletePreview(
@@ -290,34 +312,41 @@ class AnalysisFacade:
                 sessions_with_analysis, session_ids_list
             )
 
-        analysis_counts = (
-            await self._db.execute(
-                select(models.AnalysisResult.session_id, func.count())
-                .where(models.AnalysisResult.session_id.in_(session_ids_list))
-                .group_by(models.AnalysisResult.session_id)
-            )
-        ).fetchall()
-
-        analysis_count_dict = {row[0]: int(row[1]) for row in analysis_counts}
+        # Chunk the id list; the grouped key IS the chunked column so per-chunk
+        # dicts have disjoint keys and merge without overwrite collisions.
+        analysis_count_dict: dict[int, int] = {}
+        for chunk in iter_id_chunks(session_ids_list):
+            rows = (
+                await self._db.execute(
+                    select(models.AnalysisResult.session_id, func.count())
+                    .where(models.AnalysisResult.session_id.in_(chunk))
+                    .group_by(models.AnalysisResult.session_id)
+                )
+            ).fetchall()
+            analysis_count_dict.update({row[0]: int(row[1]) for row in rows})
 
         total_analysis_records = sum(analysis_count_dict.values())
         records_to_delete = (
             total_analysis_records if all_versions else len(sessions_with_analysis)
         )
 
-        patterns_count = (
-            await self._db.execute(
-                select(func.count())
-                .select_from(models.DetectedPattern)
-                .where(
-                    models.DetectedPattern.analysis_result_id.in_(
-                        select(models.AnalysisResult.id).where(
-                            models.AnalysisResult.session_id.in_(session_ids_list)
+        # The outer .in_(select(...)) binds no params, but the inner
+        # session_id.in_(...) does — chunk it and sum the disjoint counts.
+        patterns_count = 0
+        for chunk in iter_id_chunks(session_ids_list):
+            patterns_count += (
+                await self._db.execute(
+                    select(func.count())
+                    .select_from(models.DetectedPattern)
+                    .where(
+                        models.DetectedPattern.analysis_result_id.in_(
+                            select(models.AnalysisResult.id).where(
+                                models.AnalysisResult.session_id.in_(chunk)
+                            )
                         )
                     )
                 )
-            )
-        ).scalar()
+            ).scalar() or 0
 
         session_details = [
             AnalysisSessionDetail(
@@ -349,15 +378,21 @@ class AnalysisFacade:
         as stale or current in Python (reusing AlgoVersions.from_stored), and
         returns counts scoped to stale rows only.
         """
-        all_rows = (
-            await self._db.execute(
-                select(
-                    models.AnalysisResult.id,
-                    models.AnalysisResult.session_id,
-                    models.AnalysisResult.engine_versions_json,
-                ).where(models.AnalysisResult.session_id.in_(session_ids_list))
+        # Chunk the id list; rows are classified in Python and the session_details
+        # ordering is restored below, so per-chunk concat order is irrelevant.
+        all_rows: list[Any] = []
+        for chunk in iter_id_chunks(session_ids_list):
+            all_rows.extend(
+                (
+                    await self._db.execute(
+                        select(
+                            models.AnalysisResult.id,
+                            models.AnalysisResult.session_id,
+                            models.AnalysisResult.engine_versions_json,
+                        ).where(models.AnalysisResult.session_id.in_(chunk))
+                    )
+                ).fetchall()
             )
-        ).fetchall()
 
         total_analysis_records = len(all_rows)
 
@@ -386,13 +421,15 @@ class AnalysisFacade:
         session_order = {s.id: i for i, s in enumerate(sessions_with_analysis)}
         session_details.sort(key=lambda d: session_order.get(d.id, 0))
 
+        # Chunk stale_ids (can exceed the bind cap) and sum the disjoint counts.
+        # Empty stale_ids yields no chunks, leaving patterns_count at 0.
         patterns_count = 0
-        if stale_ids:
-            patterns_count = (
+        for chunk in iter_id_chunks(stale_ids):
+            patterns_count += (
                 await self._db.execute(
                     select(func.count())
                     .select_from(models.DetectedPattern)
-                    .where(models.DetectedPattern.analysis_result_id.in_(stale_ids))
+                    .where(models.DetectedPattern.analysis_result_id.in_(chunk))
                 )
             ).scalar() or 0
 
@@ -427,74 +464,88 @@ class AnalysisFacade:
         Returns:
             Number of analysis records deleted
         """
+        # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
+        session_ids = list(dict.fromkeys(session_ids))
         if not session_ids:
             return 0
 
-        # Scope session_ids to this profile to prevent cross-profile deletion.
-        owned_sessions_subq = (
-            select(models.Session.id)
-            .join(models.Device, models.Session.device_id == models.Device.id)
-            .where(
-                models.Session.id.in_(session_ids),
-                self._profile_filter(),
+        # Chunk the whole operation by session_ids: session chunks are disjoint,
+        # so their AnalysisResult sets are disjoint and rowcounts sum cleanly.
+        # Stale classification and latest-per-session ranking are per-session
+        # independent, so chunking preserves each branch's result.
+        total = 0
+        for chunk in iter_id_chunks(session_ids):
+            # Scope this chunk to this profile to prevent cross-profile deletion.
+            owned_sessions_subq = (
+                select(models.Session.id)
+                .join(models.Device, models.Session.device_id == models.Device.id)
+                .where(
+                    models.Session.id.in_(chunk),
+                    self._profile_filter(),
+                )
+                .subquery()
             )
-            .subquery()
-        )
 
-        if stale_versions:
-            # Classify rows in Python to reuse the AlgoVersions parser.
-            rows = (
-                await self._db.execute(
-                    select(
-                        models.AnalysisResult.id,
-                        models.AnalysisResult.engine_versions_json,
-                    ).where(
+            if stale_versions:
+                # Classify rows in Python to reuse the AlgoVersions parser.
+                rows = (
+                    await self._db.execute(
+                        select(
+                            models.AnalysisResult.id,
+                            models.AnalysisResult.engine_versions_json,
+                        ).where(
+                            models.AnalysisResult.session_id.in_(
+                                select(owned_sessions_subq.c.id)
+                            )
+                        )
+                    )
+                ).fetchall()
+                stale_ids = [r.id for r in rows if _is_stale(r.engine_versions_json)]
+                # stale_ids can exceed the bind cap within a single session chunk
+                # (one session may carry many analysis versions) — chunk again.
+                for id_chunk in iter_id_chunks(stale_ids):
+                    result = await self._db.execute(
+                        delete(models.AnalysisResult).where(
+                            models.AnalysisResult.id.in_(id_chunk)
+                        )
+                    )
+                    total += result.rowcount or 0  # type: ignore[attr-defined]
+
+            elif all_versions:
+                # Delete all analysis results for owned sessions.
+                result = await self._db.execute(
+                    delete(models.AnalysisResult).where(
                         models.AnalysisResult.session_id.in_(
                             select(owned_sessions_subq.c.id)
                         )
                     )
                 )
-            ).fetchall()
-            stale_ids = [r.id for r in rows if _is_stale(r.engine_versions_json)]
-            if not stale_ids:
-                return 0
-            result = await self._db.execute(
-                delete(models.AnalysisResult).where(
-                    models.AnalysisResult.id.in_(stale_ids)
-                )
-            )
-            return result.rowcount or 0  # type: ignore[attr-defined]
+                total += result.rowcount or 0  # type: ignore[attr-defined]
 
-        if all_versions:
-            # Delete all analysis results for owned sessions.
-            result = await self._db.execute(
-                delete(models.AnalysisResult).where(
-                    models.AnalysisResult.session_id.in_(
-                        select(owned_sessions_subq.c.id)
+            else:
+                # Delete only the latest (highest created_at, then id) result per
+                # owned session — at most one id per session, so <= chunk size.
+                ranked = latest_analysis_ranked_subquery(
+                    select(owned_sessions_subq.c.id)
+                )
+                latest_ids = (
+                    (
+                        await self._db.execute(
+                            select(ranked.c.id).where(ranked.c.recency_rank == 1)
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-            )
-            return result.rowcount or 0  # type: ignore[attr-defined]
-        else:
-            # Delete only the latest (highest created_at, then id) result per owned session.
-            ranked = latest_analysis_ranked_subquery(select(owned_sessions_subq.c.id))
-            latest_ids = (
-                (
-                    await self._db.execute(
-                        select(ranked.c.id).where(ranked.c.recency_rank == 1)
+                if latest_ids:
+                    result = await self._db.execute(
+                        delete(models.AnalysisResult).where(
+                            models.AnalysisResult.id.in_(latest_ids)
+                        )
                     )
-                )
-                .scalars()
-                .all()
-            )
-            if not latest_ids:
-                return 0
-            result = await self._db.execute(
-                delete(models.AnalysisResult).where(
-                    models.AnalysisResult.id.in_(latest_ids)
-                )
-            )
-            return result.rowcount or 0  # type: ignore[attr-defined]
+                    total += result.rowcount or 0  # type: ignore[attr-defined]
+
+        return total
 
     async def get_owned_session_ids(self, session_ids: list[int]) -> set[int]:
         """Return the subset of session_ids that belong to this profile.
@@ -625,7 +676,7 @@ class AnalysisFacade:
         """
         from snore.database.session import session_scope  # noqa: PLC0415
 
-        stmt = (
+        base_stmt = (
             select(
                 models.Session.id.label("session_id"),
                 models.Day.date.label("day_date"),
@@ -634,21 +685,33 @@ class AnalysisFacade:
             .join(models.Day, models.Session.day_id == models.Day.id)
             .where(self._profile_filter())
         )
-        if session_ids is not None:
-            stmt = stmt.where(models.Session.id.in_(session_ids))
-        else:
-            if from_date:
-                stmt = stmt.where(models.Day.date >= from_date.date())
-            if to_date:
-                stmt = stmt.where(models.Day.date <= to_date.date())
-        stmt = stmt.order_by(models.Day.date)
 
         # Materialize the full list in a short-lived scope that closes before any
         # workers run.  No DB transaction may remain open across the batch loop —
         # a batch-long read snapshot pins the WAL and starves checkpoints.
         # Two scalars per row (session_id, day_date) stay tiny even at 10k sessions.
+        rows: list[Any]
         async with session_scope() as _db:
-            rows = (await _db.execute(stmt)).all()
+            if session_ids is not None:
+                # Unbounded caller list — chunk under the bind cap, then re-sort
+                # by day_date to restore the single-query ORDER BY.
+                rows = []
+                for chunk in iter_id_chunks(session_ids):
+                    rows.extend(
+                        (
+                            await _db.execute(
+                                base_stmt.where(models.Session.id.in_(chunk))
+                            )
+                        ).all()
+                    )
+                rows.sort(key=lambda r: r.day_date)
+            else:
+                stmt = base_stmt
+                if from_date:
+                    stmt = stmt.where(models.Day.date >= from_date.date())
+                if to_date:
+                    stmt = stmt.where(models.Day.date <= to_date.date())
+                rows = list((await _db.execute(stmt.order_by(models.Day.date))).all())
 
         matched_total = len(rows)  # COUNT from len(), no separate query needed
         if matched_total == 0:

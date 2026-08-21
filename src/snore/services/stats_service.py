@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import Row, func, select
 
 from snore.analysis.calculations import (
     PeriodType,
@@ -22,6 +22,7 @@ from snore.services.schemas import (
     PeriodStatistics,
     TherapySummary,
 )
+from snore.utils.db_chunk import iter_id_chunks
 from snore.utils.stats import usage_weighted_means
 
 # ---------------------------------------------------------------------------
@@ -166,14 +167,16 @@ class StatsService(ProfileScopedService):
         day_ids = [d.id for d in day_records]
         days_with_data = len(day_records)
 
-        total_duration = (
-            await self.db_session.execute(
-                select(func.sum(models.Session.duration_seconds))
-                .join(models.Day)
-                .where(models.Day.id.in_(day_ids))
-            )
-        ).scalar()
-        total_hours = (total_duration or 0) / 3600
+        total_duration = 0.0
+        for chunk in iter_id_chunks(day_ids):
+            total_duration += (
+                await self.db_session.execute(
+                    select(func.sum(models.Session.duration_seconds))
+                    .join(models.Day)
+                    .where(models.Day.id.in_(chunk))
+                )
+            ).scalar() or 0
+        total_hours = total_duration / 3600
         avg_hours = total_hours / days_with_data if days_with_data > 0 else 0
 
         avg_ahi = calculate_average_ahi(day_records)
@@ -202,20 +205,26 @@ class StatsService(ProfileScopedService):
         spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
 
-        event_counts = (
-            await self.db_session.execute(
-                select(
-                    models.Event.event_type,
-                    func.count(models.Event.id).label("count"),
+        # event_type is the GROUP BY key, not the chunked column, so the same
+        # type recurs across day-chunks: merge counts by addition, then re-sort.
+        merged_events: dict[str, int] = {}
+        for chunk in iter_id_chunks(day_ids):
+            rows = (
+                await self.db_session.execute(
+                    select(
+                        models.Event.event_type,
+                        func.count(models.Event.id).label("count"),
+                    )
+                    .join(models.Session)
+                    .join(models.Day)
+                    .where(models.Day.id.in_(chunk))
+                    .group_by(models.Event.event_type)
                 )
-                .join(models.Session)
-                .join(models.Day)
-                .where(models.Day.id.in_(day_ids))
-                .group_by(models.Event.event_type)
-                .order_by(func.count(models.Event.id).desc())
-            )
-        ).all()
+            ).all()
+            for event_type, count in rows:
+                merged_events[event_type] = merged_events.get(event_type, 0) + count
 
+        event_counts = sorted(merged_events.items(), key=lambda kv: kv[1], reverse=True)
         total_events = sum(count for _, count in event_counts)
         event_type_counts = [
             EventTypeCount(
@@ -226,18 +235,20 @@ class StatsService(ProfileScopedService):
             for event_type, count in event_counts
         ]
 
-        stats_records = (
-            (
-                await self.db_session.execute(
-                    select(models.Statistics)
-                    .join(models.Session)
-                    .join(models.Day)
-                    .where(models.Day.id.in_(day_ids))
+        stats_records: list[models.Statistics] = []
+        for chunk in iter_id_chunks(day_ids):
+            stats_records.extend(
+                (
+                    await self.db_session.execute(
+                        select(models.Statistics)
+                        .join(models.Session)
+                        .join(models.Day)
+                        .where(models.Day.id.in_(chunk))
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
 
         usage_means = usage_weighted_means(
             stats_records,
@@ -323,14 +334,21 @@ class StatsService(ProfileScopedService):
         }
 
         day_ids = [d.id for d in day_records]
-        rows = (
-            await self.db_session.execute(
-                select(models.Statistics, models.Day.date)
-                .join(models.Session, models.Statistics.session_id == models.Session.id)
-                .join(models.Day, models.Session.day_id == models.Day.id)
-                .where(models.Day.id.in_(day_ids))
+        rows: list[Row[tuple[models.Statistics, date]]] = []
+        for chunk in iter_id_chunks(day_ids):
+            rows.extend(
+                (
+                    await self.db_session.execute(
+                        select(models.Statistics, models.Day.date)
+                        .join(
+                            models.Session,
+                            models.Statistics.session_id == models.Session.id,
+                        )
+                        .join(models.Day, models.Session.day_id == models.Day.id)
+                        .where(models.Day.id.in_(chunk))
+                    )
+                ).all()
             )
-        ).all()
 
         field_map = {
             "epap": "epap_mean",

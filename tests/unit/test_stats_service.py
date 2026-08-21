@@ -324,6 +324,135 @@ class TestStatsService:
         assert summary.min_spo2 == 88
 
 
+class TestChunkedIdBinds:
+    """Bulk ``Day.id.in_(...)`` binds are chunked under SQLite's param cap (#280)."""
+
+    async def test_summary_total_duration_summed_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """total_hours sums Session durations across every ID chunk."""
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+        today = date.today()
+        for i, hours in enumerate((8.0, 7.0, 6.0)):
+            await _create_day_with_session(
+                async_db_session,
+                async_test_device,
+                today - timedelta(days=i),
+                duration_hours=hours,
+            )
+
+        service = StatsService(async_db_session, profile_id=1)
+        summary = await service.get_summary()
+
+        assert summary is not None
+        assert summary.days_with_data == 3
+        # 8 + 7 + 6 spans the two-day chunk boundary.
+        assert summary.total_hours == 21.0
+
+    async def test_summary_event_counts_added_and_resorted_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """Event counts are ADDED (not overwritten) across chunks, then re-sorted DESC."""
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+        today = date.today()
+        # The same event types recur on all three days, which span a chunk
+        # boundary, so an accidental per-chunk overwrite would drop the earlier
+        # chunk's counts and yield the wrong totals and ordering.
+        per_day = [
+            {"ObstructiveApnea": 5, "Hypopnea": 1},
+            {"ObstructiveApnea": 4, "Hypopnea": 2},
+            {"ObstructiveApnea": 1, "Hypopnea": 5},
+        ]
+        for i, counts in enumerate(per_day):
+            day_date = today - timedelta(days=i)
+            _, sess = await _create_day_with_session(
+                async_db_session, async_test_device, day_date
+            )
+            for event_type, n in counts.items():
+                for j in range(n):
+                    async_db_session.add(
+                        Event(
+                            session_id=sess.id,
+                            event_type=event_type,
+                            start_time=datetime.combine(day_date, datetime.min.time())
+                            + timedelta(minutes=j),
+                            duration_seconds=10.0,
+                        )
+                    )
+        await async_db_session.flush()
+
+        service = StatsService(async_db_session, profile_id=1)
+        summary = await service.get_summary()
+
+        assert summary is not None
+        # True totals: OA = 5+4+1 = 10, Hypopnea = 1+2+5 = 8 (18 total).
+        # The list order also asserts the re-sort by count DESC.
+        assert [(e.event_type, e.count) for e in summary.event_counts] == [
+            ("ObstructiveApnea", 10),
+            ("Hypopnea", 8),
+        ]
+        oa, hyp = summary.event_counts
+        assert oa.percentage == pytest.approx(10 / 18 * 100)
+        assert hyp.percentage == pytest.approx(8 / 18 * 100)
+
+    async def test_summary_stats_records_concat_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """Statistics rows are concatenated across chunks for summary aggregates."""
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+        today = date.today()
+        for i, below in enumerate((30, 45, 25)):
+            _, sess = await _create_day_with_session(
+                async_db_session, async_test_device, today - timedelta(days=i)
+            )
+            async_db_session.add(
+                Statistics(
+                    session_id=sess.id,
+                    usage_hours=6.0,
+                    spo2_time_below_90=below,
+                )
+            )
+        await async_db_session.flush()
+
+        service = StatsService(async_db_session, profile_id=1)
+        summary = await service.get_summary()
+
+        assert summary is not None
+        # Sum spans the chunk boundary: 30 + 45 + 25 = 100.
+        assert summary.total_spo2_time_below_90 == 100
+
+    async def test_aggregate_session_stats_concat_across_chunks(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """Per-period session stats use Statistics rows concatenated across chunks."""
+        monkeypatch.setattr("snore.utils.db_chunk.ID_CHUNK_SIZE", 2)
+        # Three days in one month → one period, spanning the chunk boundary.
+        specs = [
+            (date(2024, 1, 5), 8.0, 5.0),
+            (date(2024, 1, 15), 4.0, 7.0),
+            (date(2024, 1, 25), 2.0, 11.0),
+        ]
+        for day_date, usage, epap in specs:
+            _, sess = await _create_day_with_session(
+                async_db_session, async_test_device, day_date
+            )
+            async_db_session.add(
+                Statistics(session_id=sess.id, usage_hours=usage, epap_mean=epap)
+            )
+        await async_db_session.flush()
+
+        service = StatsService(async_db_session, profile_id=1)
+        day_records = await service._query_days()
+        period_stats = await service.get_period_statistics("month")
+        extras = await service._aggregate_session_stats_per_period(
+            day_records, period_stats
+        )
+
+        # Usage-weighted epap over ALL three sessions:
+        # (5*8 + 7*4 + 11*2) / (8+4+2) = 90/14.
+        assert extras[date(2024, 1, 1)]["epap"] == pytest.approx(90.0 / 14.0)
+
+
 class TestGetDataRange:
     """Tests for StatsService.get_data_range()."""
 
