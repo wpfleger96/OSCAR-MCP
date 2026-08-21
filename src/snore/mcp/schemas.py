@@ -163,7 +163,12 @@ class NightlyRow(BaseModel):
     cai: float | None = None
     hi: float | None = None
 
-    # Analysis-derived indices — null when analysis has not been run
+    # Analysis-derived indices — null when analysis has not been run.
+    # rera_index counts the query-time FL-run proxy (runs of flow_class >= 4
+    # ending in a recovery breath) over stored breath rows; rdi = day AHI +
+    # rera_index. This is a DIFFERENT RERA definition from the per-session
+    # analysis-time amplitude-crescendo detector (ModeResult.rdi); the two
+    # disagree by construction.
     rera_index: float | None = None
     rera_index_reason: str | None = None
     rdi: float | None = None
@@ -198,6 +203,9 @@ class NightlyRow(BaseModel):
     # Percent of leak-valid classified breaths with flow_class >= 4
     fl_class_ge4_pct: float | None = None
     fl_class_ge4_pct_reason: str | None = None
+    # Count from the query-time FL-run proxy: runs of flow_class >= 4 ending
+    # in a recovery breath, over stored breath rows. Distinct from the
+    # analysis-time amplitude-crescendo RERA detector (ModeResult.rdi).
     rera_proxy_count: int | None = None
     rera_proxy_reason: str | None = None
     # Version of the query-time RERA-proxy criterion (independent of the

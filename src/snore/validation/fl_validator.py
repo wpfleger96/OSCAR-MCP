@@ -30,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.data.waveform_loader import deserialize_waveform_blob
 from snore.analysis.shared.versioning import AnalysisStatus
+from snore.constants import FLOW_LIMITATION_CLASSES
+from snore.constants import FlowLimitationConstants as FLC
 from snore.database import models
 from snore.services.breath_service import BreathService
 from snore.validation.alignment import average_waveform_over_breaths
@@ -207,6 +209,28 @@ class FlowLimitationValidator:
         mid_insp = np.array([b.mid_insp_flattening for b in breaths], dtype=np.float64)
         flatness = np.array([b.flatness_index for b in breaths], dtype=np.float64)
 
+        # Per-breath 7-class severity weight (NaN where the class is unknown).
+        # flow_confidence == FL_DEFAULT_CONFIDENCE marks a fallback guess; only
+        # rule-matched breaths (above it) enter the class-weight correlation so
+        # fallback guesses do not pollute it.
+        class_weight = np.array(
+            [
+                FLOW_LIMITATION_CLASSES[b.flow_class]["weight"]
+                if b.flow_class in FLOW_LIMITATION_CLASSES
+                else np.nan
+                for b in breaths
+            ],
+            dtype=np.float64,
+        )
+        rule_matched = np.array(
+            [
+                b.flow_confidence is not None
+                and b.flow_confidence > FLC.FL_DEFAULT_CONFIDENCE
+                for b in breaths
+            ],
+            dtype=bool,
+        )
+
         breath_flg = average_waveform_over_breaths(
             starts,
             ends,
@@ -237,6 +261,15 @@ class FlowLimitationValidator:
         auc_t25 = _auc_mwu(flat_sev_valid, labels_t25)
         auc_t50 = _auc_mwu(flat_sev_valid, labels_t50)
 
+        # flow_class weight vs FLG — over rule-matched breaths with a known class.
+        class_mask = valid & rule_matched & ~np.isnan(class_weight)
+        n_class_compared = int(class_mask.sum())
+        weights_c = class_weight[class_mask]
+        flg_c = breath_flg[class_mask]
+        spr_cw_r, spr_cw_p = spearman_or_none(weights_c, flg_c)
+        auc_class_t25 = _auc_mwu(weights_c, flg_c >= 0.25)
+        auc_class_t50 = _auc_mwu(weights_c, flg_c >= 0.50)
+
         # device_flg_95th uses all session FLG samples (full-session population);
         # snore_fl_95th uses only the breath-aligned subset — intentionally asymmetric.
         snore_95th = _percentile95(flat_sev_valid)
@@ -251,12 +284,17 @@ class FlowLimitationValidator:
             skipped_reason=None,
             n_breaths_compared=n_compared,
             low_sample_warning=n_compared < 20,
+            n_class_breaths_compared=n_class_compared,
             spearman_flattening_r=spr_flat_r,
             spearman_flattening_p=spr_flat_p,
             spearman_flatness_r=spr_fi_r,
             spearman_flatness_p=spr_fi_p,
             auc_t25=auc_t25,
             auc_t50=auc_t50,
+            spearman_class_weight_r=spr_cw_r,
+            spearman_class_weight_p=spr_cw_p,
+            auc_class_t25=auc_class_t25,
+            auc_class_t50=auc_class_t50,
             snore_fl_95th=snore_95th,
             device_flg_95th=device_95th,
         )
@@ -287,6 +325,14 @@ class FlowLimitationValidator:
         auc25s = [s.auc_t25 for s in compared if s.auc_t25 is not None]
         auc50s = [s.auc_t50 for s in compared if s.auc_t50 is not None]
 
+        cw_rs = [
+            s.spearman_class_weight_r
+            for s in compared
+            if s.spearman_class_weight_r is not None
+        ]
+        cw_auc25s = [s.auc_class_t25 for s in compared if s.auc_class_t25 is not None]
+        cw_auc50s = [s.auc_class_t50 for s in compared if s.auc_class_t50 is not None]
+
         # Cross-night Spearman on (snore_fl_95th, device_flg_95th) pairs
         pairs = [
             (s.snore_fl_95th, s.device_flg_95th)
@@ -310,6 +356,9 @@ class FlowLimitationValidator:
             mean_spearman_flatness_r=mean_or_none(fi_rs),
             mean_auc_t25=mean_or_none(auc25s),
             mean_auc_t50=mean_or_none(auc50s),
+            mean_spearman_class_weight_r=mean_or_none(cw_rs),
+            mean_auc_class_t25=mean_or_none(cw_auc25s),
+            mean_auc_class_t50=mean_or_none(cw_auc50s),
             cross_night_spearman_r=cross_r,
             cross_night_spearman_p=cross_p,
         )

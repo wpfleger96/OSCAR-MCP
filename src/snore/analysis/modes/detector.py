@@ -17,6 +17,7 @@ from snore.analysis.modes.classification import (
 from snore.analysis.modes.config import DetectionModeConfig
 from snore.analysis.modes.postprocess import (
     EVENT_MATCH_TOLERANCE_SECONDS,
+    MatchableEvent,
     _deduplicate_events,
     _merge_adjacent_events,
     _validate_event,
@@ -33,6 +34,27 @@ from snore.analysis.shared.types import (
 from snore.constants import EventDetectionConstants as EDC
 
 logger = logging.getLogger(__name__)
+
+
+def _mark_breaths_in_events(
+    breaths: list[BreathMetrics],
+    events: list[ApneaEvent] | list[HypopneaEvent],
+) -> None:
+    """Flag breaths fully contained in any event as ``in_event``.
+
+    Contained breaths are dropped from the rolling baselines used by downstream
+    detection. Breaths are time-ordered, so each event's scan stops once a
+    breath starts after the event ends.
+    """
+    for event in events:
+        for breath in breaths:
+            if breath.start_time > event.end_time:
+                break  # breaths are time-ordered
+            if (
+                breath.start_time >= event.start_time
+                and breath.end_time <= event.end_time
+            ):
+                breath.in_event = True
 
 
 class EventDetector:
@@ -140,6 +162,15 @@ class EventDetector:
         Returns:
             ModeResult with detected events and metrics
         """
+        # Reset per-call breath state so each detect_events call is
+        # self-contained. detect_events runs once per mode over the SAME breaths
+        # list, and the apnea and hypopnea loops set in_event=True; without this
+        # reset a prior mode's flags would contaminate this mode's baselines and
+        # make results mode-order-dependent. in_event is the only breath field
+        # detect_events mutates.
+        for breath in breaths:
+            breath.in_event = False
+
         if self.config.name == "resmed":
             apneas = self._detect_events_resmed(breaths, flow_data, sample_rate)
         else:
@@ -311,13 +342,7 @@ class EventDetector:
             f"{self.config.name}: Detected {len(apneas)} apneas: {oa} OA, {ca} CA, {ma} MA, {ua} UA"
         )
 
-        for apnea in apneas:
-            for breath in breaths:
-                if (
-                    breath.start_time >= apnea.start_time
-                    and breath.end_time <= apnea.end_time
-                ):
-                    breath.in_event = True
+        _mark_breaths_in_events(breaths, apneas)
 
         return apneas
 
@@ -505,6 +530,12 @@ class EventDetector:
             _merge_adjacent_events(hypopneas, self.config.merge_gap),
         )
 
+        # Mark contained breaths as in-event so they are excluded from the
+        # baselines used by downstream detection (RERAs run after hypopneas).
+        # Applied after merging so it does not perturb the hypopneas computed in
+        # this same call.
+        _mark_breaths_in_events(breaths, hypopneas)
+
         logger.info(f"{self.config.name}: Detected {len(hypopneas)} hypopneas")
 
         return hypopneas
@@ -522,9 +553,17 @@ class EventDetector:
         without EEG arousal detection. Uses amplitude reduction as proxy for
         flow limitation.
 
-        Algorithm:
-        1. Find sequences of ≥2 breaths with moderate flow reduction (20-30%)
-        2. Look for recovery breath with ≥50% amplitude increase
+        This is the analysis-time amplitude-crescendo RERA detector and feeds
+        ModeResult.rdi. It is a DIFFERENT RERA definition from the query-time
+        FL-run proxy (breath_service.py::_count_fl_run_reras, versioned as
+        RERA_PROXY_ALGO_VERSION) that feeds the nightly rera_index/rdi; the two
+        disagree by construction.
+
+        Algorithm (thresholds from DetectionModeConfig):
+        1. Find sequences of ≥2 breaths with amplitude reduction in
+           [rera_reduction_min, rera_reduction_max)
+        2. Look for recovery breath with reduction < rera_recovery_reduction_max
+           and amplitude increase ≥ rera_recovery_increase_min over the run mean
         3. Ensure ≥2-breath separation from apneas/hypopneas
 
         Args:
@@ -556,11 +595,18 @@ class EventDetector:
         excluded = np.zeros(len(breaths), dtype=bool)
         for event in list(apneas) + list(hypopneas):
             for i, breath in enumerate(breaths):
+                if breath.start_time > event.end_time:
+                    break  # breaths are time-ordered
                 if (
                     breath.start_time >= event.start_time
                     and breath.end_time <= event.end_time
                 ):
                     excluded[i] = True
+
+        reduction_min = self.config.rera_reduction_min
+        reduction_max = self.config.rera_reduction_max
+        recovery_reduction_max = self.config.rera_recovery_reduction_max
+        recovery_increase_min = self.config.rera_recovery_increase_min
 
         reras = []
         i = 0
@@ -569,13 +615,13 @@ class EventDetector:
                 i += 1
                 continue
 
-            if 0.20 <= reductions[i] < 0.30:
+            if reduction_min <= reductions[i] < reduction_max:
                 seq_start = i
                 seq_count = 0
                 while (
                     i < len(breaths)
                     and not excluded[i]
-                    and 0.20 <= reductions[i] < 0.30
+                    and reduction_min <= reductions[i] < reduction_max
                 ):
                     seq_count += 1
                     i += 1
@@ -593,7 +639,7 @@ class EventDetector:
                         if excluded[j]:
                             continue
 
-                        if reductions[j] < 0.10:
+                        if reductions[j] < recovery_reduction_max:
                             seq_avg_amplitude = np.mean(
                                 [breaths[k].amplitude for k in range(seq_start, i)]
                             )
@@ -604,7 +650,7 @@ class EventDetector:
                                     recovery_amplitude - seq_avg_amplitude
                                 ) / seq_avg_amplitude
 
-                                if increase_pct >= 0.50:
+                                if increase_pct >= recovery_increase_min:
                                     recovery_found = True
                                     recovery_idx = j
                                     break
@@ -851,6 +897,8 @@ class EventDetector:
         machine_apneas: list[ApneaEvent],
         machine_hypopneas: list[HypopneaEvent],
         tolerance_seconds: float = EVENT_MATCH_TOLERANCE_SECONDS,
+        programmatic_reras: list[RERAEvent] | None = None,
+        machine_reras: list[RERAEvent] | None = None,
     ) -> dict[str, Any]:
         """
         Validate programmatic event detection against machine-detected events.
@@ -858,33 +906,56 @@ class EventDetector:
         Compares timing of detected events with machine events and calculates
         agreement statistics (sensitivity, precision, F1 score).
 
+        RERAs are validated only when the device flagged at least one machine RE
+        event: many ResMed configurations never emit RE, and their absence must
+        not read as an algorithm failure. When no machine RERAs are supplied the
+        RERA validation is excluded from the averaged agreement and from the
+        combined event lists, and reported via
+        ``rera_validation_status = "no_machine_re_events"`` so overall agreement
+        stays comparable to the apnea/hypopnea-only baseline.
+
         Args:
             programmatic_apneas: Apneas detected by our algorithm
             programmatic_hypopneas: Hypopneas detected by our algorithm
             machine_apneas: Apneas reported by the CPAP machine
             machine_hypopneas: Hypopneas reported by the CPAP machine
             tolerance_seconds: Max time difference for event matching (default 5s)
+            programmatic_reras: RERAs detected by our algorithm (optional)
+            machine_reras: RERAs reported by the CPAP machine (optional)
 
         Returns:
-            Dictionary with validation metrics for apneas and hypopneas, the
-            per-type matched/unmatched event lists ("apnea_matches",
-            "hypopnea_matches") and the combined cross-type
-            "false_negative_events" / "false_positive_events" lists.
+            Dictionary with validation metrics for apneas, hypopneas and RERAs,
+            the per-type matched/unmatched event lists ("apnea_matches",
+            "hypopnea_matches", "rera_matches"), the combined cross-type
+            "false_negative_events" / "false_positive_events" lists, and
+            "rera_validation_status" ("ok" or "no_machine_re_events").
         """
+        programmatic_reras = programmatic_reras or []
+        machine_reras = machine_reras or []
+        has_machine_reras = len(machine_reras) > 0
+
         apnea_validation, apnea_matches = validate_event_type(
             programmatic_apneas, machine_apneas, tolerance_seconds
         )
         hypopnea_validation, hypopnea_matches = validate_event_type(
             programmatic_hypopneas, machine_hypopneas, tolerance_seconds
         )
+        rera_validation, rera_matches = validate_event_type(
+            programmatic_reras, machine_reras, tolerance_seconds
+        )
 
-        all_programmatic: list[ApneaEvent | HypopneaEvent] = [
+        all_programmatic: list[MatchableEvent] = [
             *programmatic_apneas,
             *programmatic_hypopneas,
         ]
-        all_machine: list[ApneaEvent | HypopneaEvent] = sorted(
-            [*machine_apneas, *machine_hypopneas], key=lambda e: e.start_time
-        )
+        all_machine: list[MatchableEvent] = [*machine_apneas, *machine_hypopneas]
+        # Fold RERAs into the combined lists only when the device provides RERAs
+        # to match against; otherwise unmatched programmatic RERAs would inflate
+        # the cross-type false-positive list against absent ground truth.
+        if has_machine_reras:
+            all_programmatic.extend(programmatic_reras)
+            all_machine.extend(machine_reras)
+        all_machine.sort(key=lambda e: e.start_time)
 
         _, false_negative_events = split_by_tolerance_match(
             all_machine, all_programmatic, tolerance_seconds
@@ -893,27 +964,35 @@ class EventDetector:
             all_programmatic, all_machine, tolerance_seconds
         )
 
+        event_validations = [apnea_validation, hypopnea_validation]
+        total_machine = len(machine_apneas) + len(machine_hypopneas)
+        total_programmatic = len(programmatic_apneas) + len(programmatic_hypopneas)
+        if has_machine_reras:
+            event_validations.append(rera_validation)
+            total_machine += len(machine_reras)
+            total_programmatic += len(programmatic_reras)
+
+        n = len(event_validations)
+
         return {
             "apnea_validation": apnea_validation,
             "hypopnea_validation": hypopnea_validation,
+            "rera_validation": rera_validation,
+            "rera_validation_status": (
+                "ok" if has_machine_reras else "no_machine_re_events"
+            ),
             "apnea_matches": apnea_matches,
             "hypopnea_matches": hypopnea_matches,
+            "rera_matches": rera_matches,
             "matched_events": matched_events,
             "false_negative_events": false_negative_events,
             "false_positive_events": false_positive_events,
             "overall_agreement": {
-                "total_machine_events": len(machine_apneas) + len(machine_hypopneas),
-                "total_programmatic_events": len(programmatic_apneas)
-                + len(programmatic_hypopneas),
-                "average_sensitivity": (
-                    apnea_validation.sensitivity + hypopnea_validation.sensitivity
-                )
-                / 2,
-                "average_precision": (
-                    apnea_validation.precision + hypopnea_validation.precision
-                )
-                / 2,
-                "average_f1": (apnea_validation.f1_score + hypopnea_validation.f1_score)
-                / 2,
+                "total_machine_events": total_machine,
+                "total_programmatic_events": total_programmatic,
+                "average_sensitivity": sum(v.sensitivity for v in event_validations)
+                / n,
+                "average_precision": sum(v.precision for v in event_validations) / n,
+                "average_f1": sum(v.f1_score for v in event_validations) / n,
             },
         }

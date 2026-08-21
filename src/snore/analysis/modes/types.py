@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from snore.analysis.shared.types import ApneaEvent, HypopneaEvent, RERAEvent
 from snore.constants import EventDetectionConstants as EDC
@@ -94,6 +94,44 @@ class DetectionModeConfig(BaseModel):
     rera_detection_enabled: bool = Field(
         default=True, description="Enable RERA-like event detection"
     )
+    rera_reduction_min: float = Field(
+        default=EDC.RERA_REDUCTION_MIN,
+        ge=0,
+        le=1,
+        description="RERA sequence: minimum amplitude reduction (inclusive)",
+    )
+    rera_reduction_max: float = Field(
+        default=EDC.RERA_REDUCTION_MAX,
+        ge=0,
+        le=1,
+        description="RERA sequence: maximum amplitude reduction (exclusive)",
+    )
+    rera_recovery_reduction_max: float = Field(
+        default=EDC.RERA_RECOVERY_REDUCTION_MAX,
+        ge=0,
+        le=1,
+        description="RERA recovery breath: maximum amplitude reduction (exclusive)",
+    )
+    rera_recovery_increase_min: float = Field(
+        default=EDC.RERA_RECOVERY_INCREASE_MIN,
+        ge=0,
+        description="RERA recovery breath: minimum amplitude increase over sequence mean",
+    )
+
+    @model_validator(mode="after")
+    def _validate_threshold_bands(self) -> "DetectionModeConfig":
+        """Reject inverted [min, max) reduction bands at construction."""
+        if self.rera_reduction_min >= self.rera_reduction_max:
+            raise ValueError(
+                "rera_reduction_min must be < rera_reduction_max "
+                f"(got {self.rera_reduction_min} >= {self.rera_reduction_max})"
+            )
+        if self.hypopnea_min_threshold >= self.hypopnea_max_threshold:
+            raise ValueError(
+                "hypopnea_min_threshold must be < hypopnea_max_threshold "
+                f"(got {self.hypopnea_min_threshold} >= {self.hypopnea_max_threshold})"
+            )
+        return self
 
 
 class ModeResult(BaseModel):
@@ -107,7 +145,15 @@ class ModeResult(BaseModel):
     )
     ahi: float = Field(ge=0, description="Apnea-Hypopnea Index")
     rdi: float = Field(
-        ge=0, description="Respiratory Disturbance Index (AHI + RERAs/hour)"
+        ge=0,
+        description=(
+            "Respiratory Disturbance Index (AHI + RERAs/hour). RERAs here come "
+            "from the analysis-time amplitude-crescendo detector "
+            "(detector.py::_detect_reras). This is a DIFFERENT RERA definition "
+            "from the nightly rdi in NightlyAnalysisSummary, which uses the "
+            "query-time FL-run proxy over stored breath rows; the two indices "
+            "disagree by construction."
+        ),
     )
     metadata: dict[str, Any] = Field(
         default_factory=dict, description="Mode-specific debug info"

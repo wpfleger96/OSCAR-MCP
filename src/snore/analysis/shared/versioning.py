@@ -31,11 +31,18 @@ from snore.analysis.modes.config import AVAILABLE_CONFIGS
 # ---------------------------------------------------------------------------
 
 SEGMENTER_ALGO_VERSION: str = "v1"
-FL_CLASSIFIER_ALGO_VERSION: str = "v1"
-FLATTENING_ALGO_VERSION: str = "v1"  # mid-insp flattening (new)
+FL_CLASSIFIER_ALGO_VERSION: str = "v2"
+FLATTENING_ALGO_VERSION: str = "v2"  # mid-insp flattening
 TRIGGER_CYCLE_ALGO_VERSION: str = "v1"  # trigger/cycle heuristic (new, experimental)
 LEAK_VALID_ALGO: str = "v1"
-RECOVERY_DETECTOR_ALGO_VERSION: str = "v1"
+# v2: hypopnea-contained breaths are now excluded from downstream baselines, so
+# RERA/recovery outputs shift for sessions with hypopneas. No dedicated
+# apnea/hypopnea event-detector identity key exists; the in_event marking is
+# applied after hypopnea merging, and detect_events resets in_event at entry so
+# each mode's detection is self-contained. AHI and persisted apneas/hypopneas are
+# therefore unchanged regardless of mode order — only recovery/RERA outputs move,
+# which this key covers.
+RECOVERY_DETECTOR_ALGO_VERSION: str = "v2"
 # ramp_active / mask_off breath validity flags: settings-driven timed ramp
 # heuristic + persisted mask-on-segment gap overlap.
 VALIDITY_FLAGS_ALGO_VERSION: str = "v1"
