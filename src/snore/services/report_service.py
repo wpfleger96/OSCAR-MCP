@@ -6,11 +6,12 @@ from datetime import date
 from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.svg_charts import render_trend_line
 from snore.database import models
+from snore.services._base import ProfileScopedService
 from snore.services.schemas import DeviceInfo, TherapySummary
 from snore.services.stats_service import StatsService
 
@@ -116,7 +117,7 @@ def _build_deltas(
 # ---------------------------------------------------------------------------
 
 
-class ReportService:
+class ReportService(ProfileScopedService):
     """Generate self-contained HTML therapy reports.
 
     I/O–compute split (§7)
@@ -135,19 +136,14 @@ class ReportService:
     """
 
     def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self._db = db_session
-        self.profile_id = profile_id
+        super().__init__(db_session, profile_id)
         self._stats = StatsService(db_session, profile_id)
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: scope device/data queries to this profile."""
-        return models.Device.profile_id == self.profile_id
 
     async def _first_device(self) -> DeviceInfo | None:
         """Return the first device in this profile as a plain detached schema, or None."""
         device = (
             (
-                await self._db.execute(
+                await self.db_session.execute(
                     select(models.Device)
                     .where(self._profile_filter())
                     .order_by(models.Device.first_seen)

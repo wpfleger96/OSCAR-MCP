@@ -1,33 +1,49 @@
-"""BreathService — query layer over the breaths table.
+"""Breath service package — implementation behind ``snore.services.breath_service``.
 
-This module is the single home for the typed seam contract consumed by the MCP
-tool layer: every DTO, enum, and seam function the tool adapters depend on is
-defined (or re-exported) here, so adapters import one surface and never reach
-into ORM models or analysis internals.
-
-The implementation lives in the ``snore.services.breath`` package; this module
-is a pure re-export shim kept for import-path stability.
+The public import surface is the ``snore.services.breath_service`` shim; this
+package holds the split implementation (DTOs, pure algorithms, and the
+``BreathService`` method groups as mixins over ``_BreathServiceCore``).
 """
 
 from __future__ import annotations
 
-from snore.services.breath import (
+from snore.analysis.shared.versioning import (
     CROSS_VERSION_REFUSAL_KEYS,
     AlgorithmIdentity,
     AlgoVersions,
     AnalysisRunMetadata,
     AnalysisStatus,
+    DayAnalysisStatus,
+    NullReason,
+    TimezoneStatus,
+)
+
+from ._core import _resolve_timezone as _resolve_timezone
+from .algorithms import (
+    _count_fl_run_reras as _count_fl_run_reras,
+)
+from .algorithms import (
+    _extract_window_mean as _extract_window_mean,
+)
+from .algorithms import (
+    _iter_fl_run_recoveries as _iter_fl_run_recoveries,
+)
+from .algorithms import (
+    compute_ca_analysis,
+    compute_waveform_window,
+    derive_mv_from_flow,
+)
+from .capabilities import CapabilitiesMixin
+from .dtos import (
     BreathBin,
     BreathPage,
     BreathQueryRange,
     BreathRow,
-    BreathService,
     CaAnalysisResult,
     CaDetail,
     CompareEpochsResult,
     ContextualEvent,
     CycleType,
-    DayAnalysisStatus,
     DeviceAmbiguityError,
     DeviceCapabilities,
     DeviceNotOwnedError,
@@ -42,7 +58,6 @@ from snore.services.breath import (
     NightlyAnalysisSummary,
     NightlyRangeSummary,
     NoSessionsInRangeError,
-    NullReason,
     RawCaAnalysis,
     RawCaEvent,
     RawCaSessionData,
@@ -50,7 +65,6 @@ from snore.services.breath import (
     RawWaveformWindow,
     SessionCoverage,
     SessionSummary,
-    TimezoneStatus,
     TriggerCycleApplicability,
     TriggerType,
     WaveformChannel,
@@ -60,26 +74,18 @@ from snore.services.breath import (
     WindowCriterion,
     WindowCriterionOptions,
     WindowResult,
-    compute_ca_analysis,
-    compute_waveform_window,
-    derive_mv_from_flow,
+)
+from .epochs import EpochsMixin
+from .nightly import NightlyMixin
+from .table import TableMixin
+from .waveform_io import (
+    WaveformMixin,
     fetch_waveform_window_raw,
 )
-from snore.services.breath import (
-    _count_fl_run_reras as _count_fl_run_reras,
-)
-from snore.services.breath import (
-    _extract_window_mean as _extract_window_mean,
-)
-from snore.services.breath import (
+from .waveform_io import (
     _fetch_waveform_blobs as _fetch_waveform_blobs,
 )
-from snore.services.breath import (
-    _iter_fl_run_recoveries as _iter_fl_run_recoveries,
-)
-from snore.services.breath import (
-    _resolve_timezone as _resolve_timezone,
-)
+from .windows import WindowsMixin
 
 __all__ = [
     # Enums / shared types
@@ -139,3 +145,19 @@ __all__ = [
     # Service
     "BreathService",
 ]
+
+
+class BreathService(
+    TableMixin,
+    WindowsMixin,
+    EpochsMixin,
+    NightlyMixin,
+    CapabilitiesMixin,
+    WaveformMixin,
+):
+    """Query layer over the breaths table. All methods are async.
+
+    Every public method enforces profile ownership: all Session/Device/Day
+    queries join through ``Device.profile_id == self._profile_id`` so that
+    foreign-profile data is never returned.
+    """

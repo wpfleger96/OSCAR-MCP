@@ -4,13 +4,16 @@ import logging
 import os
 import shutil
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import ColumnElement, create_engine, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.database import models
+from snore.services._base import ProfileScopedService, session_device_join
 from snore.services.schemas import DatabaseStats, VacuumResult
 
 __all__ = ["DatabaseService", "_vacuum_background", "file_size_mb"]
@@ -66,23 +69,27 @@ def _vacuum_background(db_path: str) -> None:
             conn.close()
 
 
-class DatabaseService:
+class DatabaseService(ProfileScopedService):
     """Service for database statistics and metadata operations."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int):
-        """
-        Initialize database service.
+    async def _scoped_count(
+        self,
+        model: type[Any],
+        *joins: tuple[type[Any], ColumnElement[bool]],
+        where: Sequence[ColumnElement[bool]] = (),
+        expr: ColumnElement[int] | None = None,
+    ) -> int:
+        """Profile-scoped COUNT over *model*, joined through *joins* in order.
 
-        Args:
-            db_session: SQLAlchemy database session
-            profile_id: Active profile — CPAP data counts are scoped to this profile.
+        Every join chain must reach ``models.Device`` so ``_profile_filter()``
+        applies.  ``expr`` overrides the default ``COUNT(*)`` (e.g. for
+        ``COUNT(DISTINCT ...)``).
         """
-        self.db_session = db_session
-        self.profile_id = profile_id
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: limit CPAP data to this profile via device ownership."""
-        return models.Device.profile_id == self.profile_id
+        stmt = select(expr if expr is not None else func.count()).select_from(model)
+        for target, onclause in joins:
+            stmt = stmt.join(target, onclause)
+        stmt = stmt.where(self._profile_filter(), *where)
+        return (await self.db_session.execute(stmt)).scalar() or 0
 
     async def get_stats(self, db_path: str) -> DatabaseStats:
         """
@@ -94,150 +101,95 @@ class DatabaseService:
         Returns:
             DatabaseStats with all counts, percentages, and date range
         """
+        session_to_device = (
+            models.Device,
+            models.Session.device_id == models.Device.id,
+        )
+
+        # Profile table is the one count not scoped to this profile.
         profile_count = (
             await self.db_session.execute(
                 select(func.count()).select_from(models.Profile)
             )
         ).scalar() or 0
-        device_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Device)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
-        session_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Session)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
-        day_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Day)
-                .join(models.Device, models.Day.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
-        event_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Event)
-                .join(models.Session, models.Event.session_id == models.Session.id)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
-        waveform_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Waveform)
-                .join(models.Session, models.Waveform.session_id == models.Session.id)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
-        analysis_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.AnalysisResult)
-                .join(
-                    models.Session,
-                    models.AnalysisResult.session_id == models.Session.id,
-                )
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
-        pattern_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.DetectedPattern)
-                .join(
-                    models.AnalysisResult,
-                    models.DetectedPattern.analysis_result_id
-                    == models.AnalysisResult.id,
-                )
-                .join(
-                    models.Session,
-                    models.AnalysisResult.session_id == models.Session.id,
-                )
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
+        device_count = await self._scoped_count(models.Device)
+        session_count = await self._scoped_count(models.Session, session_to_device)
+        day_count = await self._scoped_count(
+            models.Day, (models.Device, models.Day.device_id == models.Device.id)
+        )
+        event_count = await self._scoped_count(
+            models.Event,
+            (models.Session, models.Event.session_id == models.Session.id),
+            session_to_device,
+        )
+        waveform_count = await self._scoped_count(
+            models.Waveform,
+            (models.Session, models.Waveform.session_id == models.Session.id),
+            session_to_device,
+        )
+        analysis_count = await self._scoped_count(
+            models.AnalysisResult,
+            (models.Session, models.AnalysisResult.session_id == models.Session.id),
+            session_to_device,
+        )
+        pattern_count = await self._scoped_count(
+            models.DetectedPattern,
+            (
+                models.AnalysisResult,
+                models.DetectedPattern.analysis_result_id == models.AnalysisResult.id,
+            ),
+            (models.Session, models.AnalysisResult.session_id == models.Session.id),
+            session_to_device,
+        )
 
-        sessions_with_waveforms = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Session)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(
-                    self._profile_filter(),
-                    models.Session.has_waveform_data.is_(True),
-                )
-            )
-        ).scalar() or 0
-        sessions_with_events = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Session)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(
-                    self._profile_filter(),
-                    models.Session.has_event_data.is_(True),
-                )
-            )
-        ).scalar() or 0
+        sessions_with_waveforms = await self._scoped_count(
+            models.Session,
+            session_to_device,
+            where=[models.Session.has_waveform_data.is_(True)],
+        )
+        sessions_with_events = await self._scoped_count(
+            models.Session,
+            session_to_device,
+            where=[models.Session.has_event_data.is_(True)],
+        )
         # Distinct sessions that have at least one analysis result (re-analysis of the
         # same session produces multiple rows; COUNT(DISTINCT) prevents over-counting).
-        sessions_with_analysis = (
-            await self.db_session.execute(
-                select(func.count(func.distinct(models.AnalysisResult.session_id)))
-                .select_from(models.AnalysisResult)
-                .join(
-                    models.Session,
-                    models.AnalysisResult.session_id == models.Session.id,
-                )
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
+        sessions_with_analysis = await self._scoped_count(
+            models.AnalysisResult,
+            (models.Session, models.AnalysisResult.session_id == models.Session.id),
+            session_to_device,
+            expr=func.count(func.distinct(models.AnalysisResult.session_id)),
+        )
         # Sessions that have a flow waveform — the only sessions analysis can run on.
         # Uses Session.has_waveform_data=True only flags *any* waveform type, so we
         # join Waveform directly and filter on waveform_type == "flow".
-        analyzable_session_count = (
-            await self.db_session.execute(
-                select(func.count())
-                .select_from(models.Session)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .join(
-                    models.Waveform,
-                    (models.Waveform.session_id == models.Session.id)
-                    & (models.Waveform.waveform_type == "flow"),
-                )
-                .where(self._profile_filter())
-            )
-        ).scalar() or 0
+        analyzable_session_count = await self._scoped_count(
+            models.Session,
+            session_to_device,
+            (
+                models.Waveform,
+                (models.Waveform.session_id == models.Session.id)
+                & (models.Waveform.waveform_type == "flow"),
+            ),
+        )
 
         first_session_raw = (
             await self.db_session.execute(
-                select(func.min(models.Session.start_time))
-                .select_from(models.Session)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
+                session_device_join(
+                    select(func.min(models.Session.start_time)).select_from(
+                        models.Session
+                    )
+                ).where(self._profile_filter())
             )
         ).scalar()
 
         last_session_raw = (
             await self.db_session.execute(
-                select(func.max(models.Session.start_time))
-                .select_from(models.Session)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(self._profile_filter())
+                session_device_join(
+                    select(func.max(models.Session.start_time)).select_from(
+                        models.Session
+                    )
+                ).where(self._profile_filter())
             )
         ).scalar()
 

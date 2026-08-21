@@ -10,6 +10,7 @@ column of the same name; these tests make that invariant executable.
 import pytest
 
 from snore.database import models
+from snore.metrics import DAY_METRIC_STAT_COLUMNS, EXPORT_STAT_KEYS, SESSION_METRICS
 from snore.parsers.unified import SessionStatistics as UnifiedSessionStatistics
 from snore.services.schemas import SessionStatistics as ServiceSessionStatistics
 
@@ -60,4 +61,78 @@ def test_orm_columns_sourced_from_unified_statistics() -> None:
     assert not unsourced, (
         f"models.Statistics columns not sourced from "
         f"parsers.unified.SessionStatistics (never imported): {sorted(unsourced)}"
+    )
+
+
+# Day-table columns that are not per-metric statistics: bookkeeping, counts,
+# indices, and hours are aggregated by dedicated logic in DayManager rather
+# than the DAY_METRIC_STAT_COLUMNS registry loop.
+_DAY_NON_METRIC_COLUMNS = {
+    "id",
+    "device_id",
+    "date",
+    "session_count",
+    "total_therapy_hours",
+    "obstructive_apneas",
+    "central_apneas",
+    "hypopneas",
+    "reras",
+    "ahi",
+    "oai",
+    "cai",
+    "hi",
+    "created_at",
+    "updated_at",
+}
+
+
+def _day_column_names() -> set[str]:
+    return {column.name for column in models.Day.__table__.columns}
+
+
+def test_session_metrics_registry_matches_orm_columns() -> None:
+    """SESSION_METRICS must equal the ORM metric columns exactly."""
+    registry = {m.name for m in SESSION_METRICS}
+    orm = _statistics_column_names() - _IMPORTER_SUPPLIED_COLUMNS
+    assert registry == orm, (
+        f"metrics.SESSION_METRICS out of sync with models.Statistics: "
+        f"missing={sorted(orm - registry)} extra={sorted(registry - orm)}"
+    )
+
+
+def test_day_metric_stat_columns_match_day_and_statistics() -> None:
+    """Every registry Day stat column exists on both Day and Statistics."""
+    registry = {m.name for m in DAY_METRIC_STAT_COLUMNS}
+    not_day = registry - _day_column_names()
+    assert not not_day, f"DAY_METRIC_STAT_COLUMNS not on models.Day: {sorted(not_day)}"
+    not_stats = registry - _statistics_column_names()
+    assert not not_stats, (
+        f"DAY_METRIC_STAT_COLUMNS not on models.Statistics: {sorted(not_stats)}"
+    )
+
+
+def test_day_stat_columns_all_registered() -> None:
+    """Every Day metric-stat column must be in DAY_METRIC_STAT_COLUMNS.
+
+    Reverse of the subset check: a Day stat column added without a registry
+    entry would never be aggregated by DayManager. Non-metric Day columns are
+    listed in ``_DAY_NON_METRIC_COLUMNS`` deliberately.
+    """
+    registry = {m.name for m in DAY_METRIC_STAT_COLUMNS}
+    unregistered = _day_column_names() - _DAY_NON_METRIC_COLUMNS - registry
+    assert not unregistered, (
+        f"models.Day stat columns missing from metrics.DAY_METRIC_STAT_COLUMNS "
+        f"(never aggregated): {sorted(unregistered)}"
+    )
+    stale = registry & _DAY_NON_METRIC_COLUMNS
+    assert not stale, (
+        f"DAY_METRIC_STAT_COLUMNS entries also listed as non-metric: {sorted(stale)}"
+    )
+
+
+def test_export_stat_keys_subset_of_session_metrics() -> None:
+    """Every export stat key must be a registered session metric."""
+    unknown = set(EXPORT_STAT_KEYS) - {m.name for m in SESSION_METRICS}
+    assert not unknown, (
+        f"metrics.EXPORT_STAT_KEYS not in SESSION_METRICS: {sorted(unknown)}"
     )

@@ -3,11 +3,11 @@
 from datetime import date
 from itertools import groupby
 
-from sqlalchemy import ColumnElement, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.services._base import ProfileScopedService
 from snore.services.schemas import (
     DeviceDetail,
     DeviceInfo,
@@ -19,16 +19,8 @@ from snore.services.schemas import (
 __all__ = ["DeviceService"]
 
 
-class DeviceService:
+class DeviceService(ProfileScopedService):
     """Service for device listing and per-device detail with usage and settings history."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: limit devices to this profile."""
-        return models.Device.profile_id == self.profile_id
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List all devices for this profile ordered by manufacturer and model."""

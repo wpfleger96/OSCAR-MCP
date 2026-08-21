@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.data.waveform_loader import (
@@ -15,6 +15,7 @@ from snore.analysis.data.waveform_loader import (
 )
 from snore.database import models
 from snore.exceptions import NotFoundError
+from snore.services._base import ProfileScopedService, require_owned_session
 from snore.services.lttb import lttb_downsample
 from snore.services.schemas import (
     EventComparisonDetail,
@@ -25,32 +26,16 @@ from snore.services.schemas import (
 __all__ = ["WaveformService"]
 
 
-class WaveformService:
+class WaveformService(ProfileScopedService):
     """Service for waveform listing and loading operations."""
 
     def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self.db_session = db_session
-        self.profile_id = profile_id
+        super().__init__(db_session, profile_id)
         self._loader = WaveformLoader(db_session)
-
-    def _profile_filter(self) -> ColumnElement[bool]:
-        """WHERE predicate: limit sessions to this profile via device ownership."""
-        return models.Device.profile_id == self.profile_id
 
     async def _assert_session_owned(self, session_id: int) -> None:
         """Raise NotFoundError if session_id doesn't belong to this profile."""
-        row = (
-            await self.db_session.execute(
-                select(models.Session.id)
-                .join(models.Device, models.Session.device_id == models.Device.id)
-                .where(
-                    models.Session.id == session_id,
-                    self._profile_filter(),
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            raise NotFoundError(f"Session {session_id} not found")
+        await require_owned_session(self.db_session, self.profile_id, session_id)
 
     async def list_waveforms(self, session_id: int) -> list[WaveformInfo]:
         """
