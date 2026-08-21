@@ -454,6 +454,60 @@ class TestSessionServiceDelete:
         assert day.leak_median is None
         assert day.spo2_mean is None
 
+    async def test_delete_spanning_multiple_days_recomputes_each(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """One delete call spanning two days recomputes every affected day."""
+        from snore.database.day_manager import DayManager
+
+        base = datetime(2025, 3, 1, 22, 0, 0)
+        # Day A: two sessions — deleting one leaves a recomputed partial day.
+        a1 = await async_test_session_factory(
+            async_test_device.id,
+            base,
+            duration_hours=4.0,
+            usage_hours=4.0,
+            ahi=8.0,
+        )
+        a2 = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(hours=5),
+            duration_hours=4.0,
+            usage_hours=4.0,
+            ahi=4.0,
+        )
+        # Day B: one session — deleting it empties and resets the day.
+        b1 = await async_test_session_factory(
+            async_test_device.id,
+            base + timedelta(days=2),
+            duration_hours=6.0,
+            usage_hours=6.0,
+            ahi=2.0,
+        )
+
+        await DayManager.link_session_to_day(a1, async_test_device.id, async_db_session)
+        day_a = await DayManager.link_session_to_day(
+            a2, async_test_device.id, async_db_session
+        )
+        day_b = await DayManager.link_session_to_day(
+            b1, async_test_device.id, async_db_session
+        )
+        assert day_a.id != day_b.id
+        assert day_a.session_count == 2
+        assert day_b.session_count == 1
+
+        service = SessionService(async_db_session, profile_id=1)
+        deleted = await service.delete_sessions([a1.id, b1.id])
+        assert deleted == 2
+
+        await async_db_session.flush()
+        await async_db_session.refresh(day_a)
+        await async_db_session.refresh(day_b)
+        assert day_a.session_count == 1
+        assert day_a.ahi == pytest.approx(4.0)
+        assert day_b.session_count == 0
+        assert day_b.ahi is None
+
 
 class TestSessionServiceEnable:
     """Tests for SessionService.set_session_enabled()."""

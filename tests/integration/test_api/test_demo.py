@@ -669,12 +669,34 @@ class TestScrubDemo:
         """
         from sqlalchemy import Integer, Numeric  # noqa: PLC0415
 
+        from snore.cli.groups.db import _STATS_CLONE_EXCLUDED_COLUMNS  # noqa: PLC0415
+
         for col in models.Statistics.__table__.columns:
-            if col.name in ("id", "session_id"):
+            if col.name in _STATS_CLONE_EXCLUDED_COLUMNS:
                 continue
             # Float subclasses Numeric.
             assert isinstance(col.type, (Integer, Numeric)), (
                 f"Statistics.{col.name} has non-numeric type {col.type!r}; "
+                "review for PII/dates before letting the demo scrub clone it"
+            )
+
+    def test_day_reflection_columns_all_numeric(self):
+        """Reflection-clone safety: every copied Day column must be numeric.
+
+        Same tripwire as the Statistics guard — a future date/string/PII
+        column on Day must fail here instead of being cloned verbatim
+        (and, for dates, unshifted) into the demo profile.
+        """
+        from sqlalchemy import Integer, Numeric  # noqa: PLC0415
+
+        from snore.cli.groups.db import _DAY_CLONE_EXCLUDED_COLUMNS  # noqa: PLC0415
+
+        for col in models.Day.__table__.columns:
+            if col.name in _DAY_CLONE_EXCLUDED_COLUMNS:
+                continue
+            # Float subclasses Numeric.
+            assert isinstance(col.type, (Integer, Numeric)), (
+                f"Day.{col.name} has non-numeric type {col.type!r}; "
                 "review for PII/dates before letting the demo scrub clone it"
             )
 
@@ -686,10 +708,17 @@ class TestScrubDemo:
 
         Regression: a hand-maintained field list silently dropped 27 of the
         74 metric columns (spo2_median, csr_pct, ie_ratio_median, ...).
+
+        The all-columns loop below is only meaningful for seeded columns
+        (unseeded ones are None on both sides); the explicit assertions on
+        previously-dropped columns are the real regression lock.
         """
         from sqlalchemy import select  # noqa: PLC0415
 
-        from snore.cli.groups.db import _do_scrub_demo  # noqa: PLC0415
+        from snore.cli.groups.db import (  # noqa: PLC0415
+            _STATS_CLONE_EXCLUDED_COLUMNS,
+            _do_scrub_demo,
+        )
 
         async with async_db_session.begin():
             src_profile_id, meta = await _seed_source_profile(async_db_session)
@@ -720,7 +749,7 @@ class TestScrubDemo:
             assert demo_stats.csr_pct == 1.5
 
             for col in models.Statistics.__table__.columns:
-                if col.name == "session_id":
+                if col.name in _STATS_CLONE_EXCLUDED_COLUMNS:
                     continue
                 assert getattr(demo_stats, col.name) == getattr(src_stats, col.name), (
                     f"Statistics.{col.name} not carried into demo clone"
