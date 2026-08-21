@@ -176,12 +176,27 @@ def create_mode_comparison_table(
     return table
 
 
+def _metric_row(val: Any) -> tuple[str, str, str]:
+    """Format one validation result as (sensitivity, precision, F1) cell strings."""
+    sens_str = (
+        f"{val.sensitivity * 100:.0f}% ({val.matched_events}/{val.machine_event_count})"
+    )
+    prec_str = (
+        f"{val.precision * 100:.0f}% "
+        f"({val.matched_events}/{val.programmatic_event_count})"
+    )
+    f1_str = f"{val.f1_score:.2f}"
+    return sens_str, prec_str, f1_str
+
+
 def create_validation_table(
     mode_name: str,
     apnea_val: Any,
     hypopnea_val: Any,
     machine_events: list[AnalysisEvent],
     plain: bool = False,
+    rera_val: Any = None,
+    rera_status: str | None = None,
 ) -> Table:
     table = Table(
         title=f"[bold]Validation: {mode_name}[/bold]"
@@ -198,31 +213,21 @@ def create_validation_table(
     table.add_column("F1 Score", justify="right")
 
     if apnea_val.machine_event_count > 0 or apnea_val.programmatic_event_count > 0:
-        sens_str = (
-            f"{apnea_val.sensitivity * 100:.0f}% "
-            f"({apnea_val.matched_events}/{apnea_val.machine_event_count})"
-        )
-        prec_str = (
-            f"{apnea_val.precision * 100:.0f}% "
-            f"({apnea_val.matched_events}/{apnea_val.programmatic_event_count})"
-        )
-        f1_str = f"{apnea_val.f1_score:.2f}"
-        table.add_row("Apneas", sens_str, prec_str, f1_str)
+        table.add_row("Apneas", *_metric_row(apnea_val))
 
     if (
         hypopnea_val.machine_event_count > 0
         or hypopnea_val.programmatic_event_count > 0
     ):
-        sens_str = (
-            f"{hypopnea_val.sensitivity * 100:.0f}% "
-            f"({hypopnea_val.matched_events}/{hypopnea_val.machine_event_count})"
-        )
-        prec_str = (
-            f"{hypopnea_val.precision * 100:.0f}% "
-            f"({hypopnea_val.matched_events}/{hypopnea_val.programmatic_event_count})"
-        )
-        f1_str = f"{hypopnea_val.f1_score:.2f}"
-        table.add_row("Hypopneas", sens_str, prec_str, f1_str)
+        table.add_row("Hypopneas", *_metric_row(hypopnea_val))
+
+    if rera_val is not None:
+        if rera_status == "ok" and (
+            rera_val.machine_event_count > 0 or rera_val.programmatic_event_count > 0
+        ):
+            table.add_row("RERAs", *_metric_row(rera_val))
+        elif rera_val.programmatic_event_count > 0:
+            table.add_row("RERAs", "no machine RE events", "—", "—")
 
     return table
 
@@ -232,8 +237,9 @@ def format_event_list(
     label: str,
     format_time_fn: Any,
 ) -> Text:
+    from snore.analysis.shared.types import RERAEvent
     from snore.analysis.types import AnalysisEvent
-    from snore.constants import abbreviate_event_type
+    from snore.constants import EVENT_TYPE_RERA, abbreviate_event_type
 
     if not events:
         return Text("")
@@ -243,6 +249,9 @@ def format_event_list(
         if isinstance(event, AnalysisEvent):
             time_offset = event.start_time
             event_abbr = abbreviate_event_type(event.event_type)
+        elif isinstance(event, RERAEvent):
+            time_offset = event.start_time
+            event_abbr = EVENT_TYPE_RERA
         elif hasattr(event, "event_type"):
             time_offset = event.start_time
             event_abbr = event.event_type
@@ -558,9 +567,10 @@ def _get_validation_metrics(
     from snore.analysis.modes import AVAILABLE_CONFIGS
     from snore.analysis.modes.config import AASM_CONFIG
     from snore.analysis.modes.detector import EventDetector
-    from snore.analysis.utils import convert_machine_events
+    from snore.analysis.utils import convert_machine_events, convert_machine_reras
 
     machine_apneas, machine_hypopneas = convert_machine_events(machine_events)
+    machine_reras = convert_machine_reras(machine_events)
 
     config = AVAILABLE_CONFIGS.get(mode, AASM_CONFIG)
     detector = EventDetector(config)
@@ -569,11 +579,15 @@ def _get_validation_metrics(
         mode_result.hypopneas,
         machine_apneas,
         machine_hypopneas,
+        programmatic_reras=mode_result.reras,
+        machine_reras=machine_reras,
     )
 
     return {
         "apnea_validation": validation["apnea_validation"],
         "hypopnea_validation": validation["hypopnea_validation"],
+        "rera_validation": validation["rera_validation"],
+        "rera_validation_status": validation["rera_validation_status"],
         "false_negatives": validation["false_negative_events"],
         "false_positives": validation["false_positive_events"],
     }
@@ -619,6 +633,8 @@ def display_analysis_result(
                 validation["hypopnea_validation"],
                 machine_events,
                 plain,
+                rera_val=validation["rera_validation"],
+                rera_status=validation["rera_validation_status"],
             )
             con.print(val_table)
 

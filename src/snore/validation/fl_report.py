@@ -61,6 +61,15 @@ class FlSessionValidation(BaseModel):
         default=False,
         description="True when n_breaths_compared < 20",
     )
+    n_class_breaths_compared: int = Field(
+        default=0,
+        description=(
+            "Number of breaths entering the flow_class-weight metrics "
+            "(spearman_class_weight_r, auc_class_t25/t50): the subset of "
+            "n_breaths_compared that is also rule-matched with a known class. "
+            "Can be far smaller than n_breaths_compared"
+        ),
+    )
     spearman_flattening_r: float | None = Field(
         default=None,
         description=(
@@ -95,6 +104,33 @@ class FlSessionValidation(BaseModel):
         description=(
             "AUC discriminating device FLG >= 0.50 using flattening_severity; "
             "None if either class empty"
+        ),
+    )
+    spearman_class_weight_r: float | None = Field(
+        default=None,
+        description=(
+            "Spearman r between 7-class flow_class severity weight and "
+            "breath-averaged device FLG, over rule-matched breaths only "
+            "(flow_confidence > 0.5; fallback-confidence guesses excluded); "
+            "None if fewer than 3 such breaths or either side constant"
+        ),
+    )
+    spearman_class_weight_p: float | None = Field(
+        default=None,
+        description="p-value for spearman_class_weight_r",
+    )
+    auc_class_t25: float | None = Field(
+        default=None,
+        description=(
+            "AUC discriminating device FLG >= 0.25 using flow_class severity "
+            "weight as score, over rule-matched breaths; None if either class empty"
+        ),
+    )
+    auc_class_t50: float | None = Field(
+        default=None,
+        description=(
+            "AUC discriminating device FLG >= 0.50 using flow_class severity "
+            "weight, over rule-matched breaths; None if either class empty"
         ),
     )
     snore_fl_95th: float | None = Field(
@@ -140,6 +176,16 @@ class FlAggregateMetrics(BaseModel):
     )
     mean_auc_t50: float | None = Field(
         default=None, description="Mean AUC at FLG threshold 0.50"
+    )
+    mean_spearman_class_weight_r: float | None = Field(
+        default=None,
+        description="Mean Spearman r (flow_class severity weight) over compared sessions",
+    )
+    mean_auc_class_t25: float | None = Field(
+        default=None, description="Mean class-weight AUC at FLG threshold 0.25"
+    )
+    mean_auc_class_t50: float | None = Field(
+        default=None, description="Mean class-weight AUC at FLG threshold 0.50"
     )
     cross_night_spearman_r: float | None = Field(
         default=None,
@@ -194,12 +240,17 @@ def export_fl_report_csv(report: FlValidationReport, output_path: Path) -> None:
         "skipped_reason",
         "n_breaths_compared",
         "low_sample_warning",
+        "n_class_breaths_compared",
         "spearman_flattening_r",
         "spearman_flattening_p",
         "spearman_flatness_r",
         "spearman_flatness_p",
         "auc_t25",
         "auc_t50",
+        "spearman_class_weight_r",
+        "spearman_class_weight_p",
+        "auc_class_t25",
+        "auc_class_t50",
         "snore_fl_95th",
         "device_flg_95th",
     ]
@@ -224,12 +275,17 @@ def export_fl_report_csv(report: FlValidationReport, output_path: Path) -> None:
                     "skipped_reason": s.skipped_reason or "",
                     "n_breaths_compared": s.n_breaths_compared,
                     "low_sample_warning": s.low_sample_warning,
+                    "n_class_breaths_compared": s.n_class_breaths_compared,
                     "spearman_flattening_r": _fmt(s.spearman_flattening_r),
                     "spearman_flattening_p": _fmt(s.spearman_flattening_p),
                     "spearman_flatness_r": _fmt(s.spearman_flatness_r),
                     "spearman_flatness_p": _fmt(s.spearman_flatness_p),
                     "auc_t25": _fmt(s.auc_t25),
                     "auc_t50": _fmt(s.auc_t50),
+                    "spearman_class_weight_r": _fmt(s.spearman_class_weight_r),
+                    "spearman_class_weight_p": _fmt(s.spearman_class_weight_p),
+                    "auc_class_t25": _fmt(s.auc_class_t25),
+                    "auc_class_t50": _fmt(s.auc_class_t50),
                     "snore_fl_95th": _fmt(s.snore_fl_95th),
                     "device_flg_95th": _fmt(s.device_flg_95th),
                 }

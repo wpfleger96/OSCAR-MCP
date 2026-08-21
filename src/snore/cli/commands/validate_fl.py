@@ -113,6 +113,15 @@ def validate_fl(
                     console.print(
                         f"  Mean AUC @ FLG >= 0.50:                {_fmt_r(agg.mean_auc_t50)}"
                     )
+                    console.print(
+                        f"  Mean Spearman r (flow_class weight):   {_fmt_r(agg.mean_spearman_class_weight_r)}"
+                    )
+                    console.print(
+                        f"  Mean class-weight AUC @ FLG >= 0.25:  {_fmt_r(agg.mean_auc_class_t25)}"
+                    )
+                    console.print(
+                        f"  Mean class-weight AUC @ FLG >= 0.50:  {_fmt_r(agg.mean_auc_class_t50)}"
+                    )
                     if agg.cross_night_spearman_r is not None:
                         console.print(
                             f"  Cross-night Spearman r (95th pct):     {agg.cross_night_spearman_r:.3f}"
@@ -129,7 +138,7 @@ def validate_fl(
                 if compared_sessions:
                     console.print("\nPer-Session Results:")
                     console.print(
-                        f"{'Date':<12} {'ID':<6} {'N':<6} {'Spear-flat':<12} {'Spear-fi':<10} {'AUC25':<8} {'AUC50':<8}"
+                        f"{'Date':<12} {'ID':<6} {'N':<6} {'Spear-flat':<12} {'Spear-fi':<10} {'AUC25':<8} {'AUC50':<8} {'Nc':<6} {'Spear-cw':<10} {'cwAUC25':<9} {'cwAUC50':<9}"
                     )
                     print_footer()
 
@@ -146,7 +155,11 @@ def validate_fl(
                             f"{_fv(s.spearman_flattening_r):<12} "
                             f"{_fv(s.spearman_flatness_r):<10} "
                             f"{_fv(s.auc_t25):<8} "
-                            f"{_fv(s.auc_t50):<8}"
+                            f"{_fv(s.auc_t50):<8} "
+                            f"{s.n_class_breaths_compared:<6} "
+                            f"{_fv(s.spearman_class_weight_r):<10} "
+                            f"{_fv(s.auc_class_t25):<9} "
+                            f"{_fv(s.auc_class_t50):<9}"
                         )
 
                     if len(compared_sessions) > 10:
