@@ -17,6 +17,13 @@ import pytest
 
 from snore.analysis.shared.versioning import AnalysisStatus
 from snore.analysis.types import AnalysisEvent
+from snore.cli.commands.validate_rera import _fmt_sig
+from snore.validation.rera_report import (
+    ReraAggregateMetrics,
+    ReraSessionValidation,
+    ReraValidationReport,
+    export_rera_report_csv,
+)
 from snore.validation.rera_validator import (
     ReraValidator,
     proxy_reras_from_breath_arrays,
@@ -312,6 +319,66 @@ async def test_fully_scored_session(mock_db_session):
     # Chance floor = (1 RE / 3600 s) * 2 * 5 s.
     assert agg.chance_precision_floor == pytest.approx((1 / 3600.0) * 10.0)
     assert agg.mean_amplitude_precision == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Display / export precision (tiny magnitudes must stay visible / lossless)
+# ---------------------------------------------------------------------------
+
+
+class TestFmtSig:
+    def test_tiny_value_uses_scientific_notation(self):
+        # The chance floor (~4e-5) collapses to 0.000 at fixed 3 decimals.
+        rendered = _fmt_sig(4.06e-5)
+        assert "e-" in rendered
+        assert rendered != "0.000"
+
+    def test_sub_tenth_keeps_four_decimals(self):
+        assert _fmt_sig(0.001234) == "0.0012"
+
+    def test_normal_value_three_decimals(self):
+        assert _fmt_sig(0.5) == "0.500"
+
+    def test_zero_and_none(self):
+        assert _fmt_sig(0.0) == "0"
+        assert _fmt_sig(None) == "N/A"
+        assert _fmt_sig(None, na=" N/A") == " N/A"
+
+
+def test_csv_export_preserves_full_precision(tmp_path):
+    """CSV export must not round tiny metrics (proxy precision ~1e-3) away."""
+    tiny = 0.0012345678901234
+    session = ReraSessionValidation(
+        session_id=1,
+        date="2025-06-01",
+        duration_hours=8.0,
+        machine_re_count=2,
+        proxy_rera_count=1,
+        proxy_precision=tiny,
+    )
+    agg = ReraAggregateMetrics(
+        total_sessions=1,
+        sessions_with_machine_re=1,
+        sessions_skipped_no_machine_re=0,
+        sessions_skipped_no_analysis=0,
+        sessions_skipped_no_valid_breaths=0,
+        sessions_skipped_error=0,
+        total_machine_re=2,
+        total_amplitude_reras=0,
+        total_proxy_reras=1,
+        match_tolerance_seconds=5.0,
+    )
+    report = ReraValidationReport(
+        report_date="2025-06-02 00:00:00",
+        date_range_start="2025-06-01",
+        date_range_end="2025-06-01",
+        aggregate=agg,
+        sessions=[session],
+    )
+    out = tmp_path / "rera.csv"
+    export_rera_report_csv(report, out)
+    text = out.read_text()
+    assert repr(tiny) in text  # exact round-trippable value, not "0.0012"
 
 
 @pytest.mark.asyncio
