@@ -5,6 +5,7 @@
  * `aggregate`), how to format them, and whether a higher value is "better". The
  * delta and identity-diff functions below are pure so they can be unit-tested. */
 import type { ValidatorType } from '@/types'
+import { formatPercent, formatPercentPointsDelta } from '@/utils/formatting'
 
 export const VALIDATOR_LABELS: Record<ValidatorType, string> = {
     events: 'Events',
@@ -243,7 +244,7 @@ export function formatMetric(value: number | null, kind: MetricKind): string {
     if (value == null) return '—'
     switch (kind) {
         case 'percent':
-            return `${(value * 100).toFixed(1)}%`
+            return formatPercent(value) ?? '—'
         case 'decimal':
             return value.toFixed(3)
         case 'rate':
@@ -285,8 +286,8 @@ export function computeDelta(
 
 export function formatDelta(delta: number | null, kind: MetricKind): string {
     if (delta == null) return '—'
+    if (kind === 'percent') return formatPercentPointsDelta(delta) ?? '—'
     const sign = delta > 0 ? '+' : ''
-    if (kind === 'percent') return `${sign}${(delta * 100).toFixed(1)} pp`
     if (kind === 'count') return `${sign}${delta}`
     return `${sign}${delta.toFixed(kind === 'rate' ? 2 : 3)}`
 }

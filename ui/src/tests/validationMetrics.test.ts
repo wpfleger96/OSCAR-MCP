@@ -140,6 +140,14 @@ describe('formatMetric / formatDelta', () => {
         expect(formatDelta(null, 'decimal')).toBe('—')
         expect(formatDelta(2, 'count')).toBe('+2')
     })
+
+    it('test_chance_floor_scale_percent_stays_visible', () => {
+        // The RERA comparison must represent movement at the chance-floor scale
+        // (~4e-5) instead of flooring both value and delta to 0.
+        expect(formatMetric(4e-5, 'percent')).toBe('0.0040%')
+        expect(formatDelta(4e-5, 'percent')).toBe('+0.0040 pp')
+        expect(formatDelta(-4e-5, 'percent')).toBe('-0.0040 pp')
+    })
 })
 
 describe('AGGREGATE_METRICS coverage', () => {
