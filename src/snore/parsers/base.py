@@ -10,8 +10,12 @@ and implement these methods - the rest of the system automatically works.
 
 from __future__ import annotations
 
+import logging
+
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
+from concurrent.futures import as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -19,6 +23,9 @@ from typing import Any
 
 from snore.parsers.types import DataRoot, ParserMetadata
 from snore.parsers.unified import DeviceInfo, UnifiedSession
+from snore.utils.parse_pool import cancel_pending, get_pool
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DeviceParser",
@@ -234,7 +241,6 @@ class DeviceParser(ABC):
         """
         pass
 
-    @abstractmethod
     def parse_sessions(
         self,
         path: Path,
@@ -249,11 +255,12 @@ class DeviceParser(ABC):
         """
         Parse all sessions from the given path and yield unified sessions.
 
-        This is the core parsing method. It should:
-        1. Locate all session data files
-        2. Parse each session's native format
-        3. Convert to UnifiedSession format
-        4. Yield one UnifiedSession at a time (memory efficient)
+        Template method shared by every parser: resolve the parse units, filter
+        them by date, then run each either across the process pool (parallel and
+        more than one unit) or sequentially.  The parallel path yields exactly
+        ``limit`` sessions when set, cancelling remaining futures, and maps a
+        crashed worker pool to a RuntimeError.  Subclasses supply the
+        manufacturer-specific behavior via the hooks below.
 
         Args:
             path: Path to data directory/file
@@ -273,15 +280,160 @@ class DeviceParser(ABC):
 
         Raises:
             ParserError: If parsing fails
-
-        Example:
-            for session_file in self._find_session_files(path):
-                native_data = self._parse_native_format(session_file)
-
-                unified = self._to_unified_session(native_data)
-
-                yield unified
         """
+        path = Path(path)
+
+        root, units = self._resolve_units(path, sort_by, timezone_name)
+        units = filter_units_by_date(
+            units, lambda u: self._unit_date(u, timezone_name), date_from, date_to
+        )
+        total = len(units)
+        ctx = self._build_context(path, root, units, timezone_name)
+
+        sessions_yielded = 0
+        completed = 0
+
+        def emit_progress() -> None:
+            nonlocal completed
+            completed += 1
+            if progress_callback:
+                progress_callback(f"Parsing session {completed}/{total}...")
+
+        if parallel and len(units) > 1:
+            logger.debug(f"Parsing {total} units in parallel")
+            futures: dict[Any, Any] = {}
+            try:
+                pool = get_pool()
+                for unit in units:
+                    fn, args = self._worker_dispatch(
+                        unit, ctx, root, date_from, date_to
+                    )
+                    futures[pool.submit(fn, *args)] = unit
+
+                for future in as_completed(futures):
+                    if limit is not None and sessions_yielded >= limit:
+                        cancel_pending(futures)
+                        break
+
+                    try:
+                        session = future.result()
+                    except BrokenProcessPool:
+                        raise
+                    except Exception as e:
+                        logger.error(f"Failed to parse session: {e}")
+                        emit_progress()
+                        continue
+
+                    emit_progress()
+                    if session is None:
+                        continue
+
+                    session = self._postprocess_unit(
+                        session, futures[future], date_from, date_to
+                    )
+                    if session is None:
+                        continue
+
+                    yield session
+                    sessions_yielded += 1
+            except BrokenProcessPool as exc:
+                raise RuntimeError(
+                    f"Parser worker process crashed: {exc}. "
+                    "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
+                ) from exc
+            finally:
+                cancel_pending(futures)
+        else:
+            for unit in units:
+                if limit is not None and sessions_yielded >= limit:
+                    break
+
+                try:
+                    session = self._parse_unit_sequential(
+                        unit, ctx, root, date_from, date_to
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to parse session: {e}")
+                    emit_progress()
+                    continue
+
+                emit_progress()
+                if session is None:
+                    continue
+
+                yield session
+                sessions_yielded += 1
+
+    # ------------------------------------------------------------------
+    # parse_sessions hooks — implemented by each parser
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def _resolve_units(
+        self, path: Path, sort_by: str | None, timezone_name: str | None
+    ) -> tuple[Any, list[Any]]:
+        """Resolve the data root and its ordered list of parse units.
+
+        Returns ``(root, units)``.  ``root`` is passed unchanged to the other
+        hooks; each element of ``units`` is one session (or session chain) to
+        parse.  ``sort_by`` orders the units; ``timezone_name`` lets parsers
+        that need it validate the zone before parsing.
+        """
+
+    @abstractmethod
+    def _unit_date(self, unit: Any, timezone_name: str | None) -> date | None:
+        """Return a unit's calendar date for range filtering, or None."""
+
+    @abstractmethod
+    def _build_context(
+        self, path: Path, root: Any, units: list[Any], timezone_name: str | None
+    ) -> Any:
+        """Build the shared per-parse context passed to the per-unit hooks.
+
+        Runs once after unit resolution and filtering; use it for work shared
+        across all units (device info, caches, the declared timezone).
+        """
+
+    @abstractmethod
+    def _worker_dispatch(
+        self,
+        unit: Any,
+        ctx: Any,
+        root: Any,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> tuple[Callable[..., UnifiedSession | None], tuple[Any, ...]]:
+        """Return ``(worker_fn, args)`` for parsing ``unit`` in a subprocess.
+
+        ``worker_fn`` MUST be a module-level function (picklable for the process
+        pool), never a bound method.
+        """
+
+    @abstractmethod
+    def _parse_unit_sequential(
+        self,
+        unit: Any,
+        ctx: Any,
+        root: Any,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """Parse ``unit`` in-process (sequential path); None drops the unit."""
+
+    def _postprocess_unit(
+        self,
+        session: UnifiedSession,
+        unit: Any,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """Post-process a parallel-path result so both paths agree.
+
+        Default passthrough; parsers whose sequential path applies an extra
+        guard override this to apply it to worker results too.  Returning None
+        drops the session.
+        """
+        return session
 
     def parse_single_session(
         self, path: Path, session_id: str

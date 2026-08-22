@@ -108,7 +108,7 @@ def test_resmed_broken_pool_raises_runtime_error():
         ),
         patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
-        patch("snore.parsers.resmed_edf.get_pool", return_value=broken_pool),
+        patch("snore.parsers.base.get_pool", return_value=broken_pool),
     ):
         with pytest.raises(RuntimeError, match="crashed"):
             list(parser.parse_sessions(Path("/data"), parallel=True))
@@ -124,23 +124,27 @@ def test_oscar_broken_pool_raises_runtime_error():
 
     parser = OscarDeviceParser()
     device_info = MagicMock()
-    session_files = [(1, Path("/data/1.000"), Path("/data/1.001"))]
+    session_files = [
+        (1, Path("/data/1.000"), Path("/data/1.001")),
+        (2, Path("/data/2.000"), Path("/data/2.001")),
+    ]
 
     broken_pool = MagicMock()
     broken_pool.submit.side_effect = BrokenProcessPool("simulated crash")
 
-    with patch("snore.parsers.oscar_device.get_pool", return_value=broken_pool):
+    with (
+        patch.object(
+            parser, "_resolve_units", return_value=(Path("/data"), session_files)
+        ),
+        patch.object(
+            parser,
+            "_build_context",
+            return_value={"device_info": device_info, "timezone_name": None},
+        ),
+        patch("snore.parsers.base.get_pool", return_value=broken_pool),
+    ):
         with pytest.raises(RuntimeError, match="crashed"):
-            list(
-                parser._parse_sessions_parallel(
-                    session_files,
-                    device_info,
-                    Path("/data"),
-                    None,
-                    None,
-                    None,
-                )
-            )
+            list(parser.parse_sessions(Path("/data"), parallel=True))
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +186,7 @@ def test_resmed_generator_close_cancels_pending():
         ),
         patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
-        patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
     ):
         gen = parser.parse_sessions(Path("/data"), parallel=True)
         next(gen)  # consume night1; generator suspends at yield
@@ -208,10 +212,18 @@ def test_oscar_generator_close_cancels_pending():
     mock_pool = MagicMock()
     mock_pool.submit.side_effect = [f0, f1, f2]
 
-    with patch("snore.parsers.oscar_device.get_pool", return_value=mock_pool):
-        gen = parser._parse_sessions_parallel(
-            session_files, device_info, Path("/data"), None, None, None
-        )
+    with (
+        patch.object(
+            parser, "_resolve_units", return_value=(Path("/data"), session_files)
+        ),
+        patch.object(
+            parser,
+            "_build_context",
+            return_value={"device_info": device_info, "timezone_name": None},
+        ),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
+    ):
+        gen = parser.parse_sessions(Path("/data"), parallel=True)
         next(gen)  # consume session1; generator suspends at yield
         gen.close()  # GeneratorExit → finally: cancel_pending(futures)
 
@@ -249,7 +261,7 @@ def test_resmed_broken_pool_from_future_result_raises_runtime_error():
         ),
         patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
-        patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
     ):
         with pytest.raises(RuntimeError, match="crashed"):
             list(parser.parse_sessions(Path("/data"), parallel=True))
@@ -263,7 +275,10 @@ def test_oscar_broken_pool_from_future_result_raises_runtime_error():
 
     parser = OscarDeviceParser()
     device_info = MagicMock()
-    session_files = [(1, Path("/data/1.000"), Path("/data/1.001"))]
+    session_files = [
+        (1, Path("/data/1.000"), Path("/data/1.001")),
+        (2, Path("/data/2.000"), Path("/data/2.001")),
+    ]
 
     crashed_future: Future = Future()
     crashed_future.set_exception(BrokenProcessPool("worker died mid-run"))
@@ -271,18 +286,19 @@ def test_oscar_broken_pool_from_future_result_raises_runtime_error():
     mock_pool = MagicMock()
     mock_pool.submit.return_value = crashed_future
 
-    with patch("snore.parsers.oscar_device.get_pool", return_value=mock_pool):
+    with (
+        patch.object(
+            parser, "_resolve_units", return_value=(Path("/data"), session_files)
+        ),
+        patch.object(
+            parser,
+            "_build_context",
+            return_value={"device_info": device_info, "timezone_name": None},
+        ),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
+    ):
         with pytest.raises(RuntimeError, match="crashed"):
-            list(
-                parser._parse_sessions_parallel(
-                    session_files,
-                    device_info,
-                    Path("/data"),
-                    None,
-                    None,
-                    None,
-                )
-            )
+            list(parser.parse_sessions(Path("/data"), parallel=True))
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +356,7 @@ def test_parallel_submits_per_night_str_cache_slices():
             parser, "_load_str_caches", return_value=(full_settings, full_summaries)
         ),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
-        patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
     ):
         list(parser.parse_sessions(Path("/data"), parallel=True))
 
@@ -409,7 +425,7 @@ def test_absent_str_entry_submits_none_cache():
         ),
         patch.object(parser, "_load_str_caches", return_value=(full_settings, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
-        patch("snore.parsers.resmed_edf.get_pool", return_value=mock_pool),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
     ):
         list(parser.parse_sessions(Path("/data"), parallel=True))
 

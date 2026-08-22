@@ -6,13 +6,10 @@ Supports importing data from OSCAR Profiles directory structure.
 """
 
 import logging
-import os
 import xml.etree.ElementTree as ET
 
-from collections.abc import Callable, Iterator
-from concurrent.futures import as_completed
-from concurrent.futures.process import BrokenProcessPool
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -68,7 +65,6 @@ from snore.parsers.unified import (
     WaveformData,
     extract_basic_stats,
 )
-from snore.utils.parse_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -267,27 +263,15 @@ class OscarDeviceParser(DeviceParser):
             firmware_version=root.findtext("version", None),
         )
 
-    def parse_sessions(
-        self,
-        path: Path,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        limit: int | None = None,
-        sort_by: str | None = None,
-        parallel: bool = True,
-        progress_callback: Callable[[str], None] | None = None,
-        timezone_name: str | None = None,
-    ) -> Iterator[UnifiedSession]:
-        """
-        Parse all sessions from OSCAR binary cache.
+    # ------------------------------------------------------------------
+    # parse_sessions hooks (driver lives in DeviceParser.parse_sessions).
+    # Each .000/.001 pair is one session; OSCAR already groups sessions.
+    # ------------------------------------------------------------------
 
-        Each .000/.001 pair is one session (OSCAR already groups sessions).
-
-        ``timezone_name`` is the profile's declared IANA timezone.  When set,
-        OSCAR's epoch-ms instants are converted to that zone's wall clock
-        (matching ResMed device-local semantics); when None, legacy naive UTC
-        wall-clock is kept.
-        """
+    def _resolve_units(
+        self, path: Path, sort_by: str | None, timezone_name: str | None
+    ) -> tuple[Path, list[tuple[int, Path | None, Path | None]]]:
+        """Resolve one OSCAR data root and its ordered session files."""
         path = Path(path)
 
         # Defense in depth: the name was validated at `snore profile
@@ -311,81 +295,73 @@ class OscarDeviceParser(DeviceParser):
                 raise ParserError("No OSCAR data found at path", self)
             roots_to_parse = self._data_roots
 
-        sessions_yielded = 0
+        root = roots_to_parse[0].path
+        session_files = self._find_session_files(root)
 
-        for data_root in roots_to_parse:
-            device_info = self.get_device_info(data_root.path)
+        if sort_by == "date-asc":
+            session_files = sorted(session_files, key=lambda x: x[0])
+        elif sort_by == "date-desc":
+            session_files = sorted(session_files, key=lambda x: x[0], reverse=True)
 
-            session_files = self._find_session_files(data_root.path)
+        return root, session_files
 
-            if sort_by == "date-asc":
-                session_files = sorted(session_files, key=lambda x: x[0])
-            elif sort_by == "date-desc":
-                session_files = sorted(session_files, key=lambda x: x[0], reverse=True)
+    def _unit_date(
+        self, unit: tuple[int, Path | None, Path | None], timezone_name: str | None
+    ) -> date | None:
+        """Session-start epoch drives filtering with the same clock as parsing."""
+        return _epoch_to_wall_clock(unit[0], timezone_name).date()
 
-            if parallel and len(session_files) > 1:
-                yield from self._parse_sessions_parallel(
-                    session_files,
-                    device_info,
-                    data_root.path,
-                    date_from,
-                    date_to,
-                    limit,
-                    progress_callback=progress_callback,
-                    timezone_name=timezone_name,
-                )
-                return
+    def _build_context(
+        self,
+        path: Path,
+        root: Path,
+        units: list[tuple[int, Path | None, Path | None]],
+        timezone_name: str | None,
+    ) -> dict[str, Any]:
+        """Device info plus the declared timezone, shared across all sessions."""
+        return {
+            "device_info": self.get_device_info(root),
+            "timezone_name": timezone_name,
+        }
 
-            total_sessions = len(session_files)
-            completed = 0
+    def _worker_dispatch(
+        self,
+        unit: tuple[int, Path | None, Path | None],
+        ctx: dict[str, Any],
+        root: Path,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> tuple[Callable[..., UnifiedSession | None], tuple[Any, ...]]:
+        """Submit one .000/.001 pair to the picklable module-level worker."""
+        session_id, summary_path, events_path = unit
+        args = (
+            session_id,
+            summary_path,
+            events_path,
+            ctx["device_info"],
+            root,
+            ctx["timezone_name"],
+        )
+        return _oscar_parse_session_worker, args
 
-            def emit_progress(*, _total: int = total_sessions) -> None:
-                nonlocal completed
-                completed += 1
-                if progress_callback:
-                    progress_callback(f"Parsing session {completed}/{_total}...")
-
-            for session_id, summary_path, events_path in session_files:
-                if limit is not None and sessions_yielded >= limit:
-                    return
-
-                if date_from or date_to:
-                    # Same clock as _parse_single_session so date filtering
-                    # agrees with therapy-day assignment.
-                    session_date = _epoch_to_wall_clock(
-                        session_id, timezone_name
-                    ).date()
-                    if (
-                        date_from
-                        and session_date < datetime.fromisoformat(date_from).date()
-                    ):
-                        emit_progress()
-                        continue
-                    if (
-                        date_to
-                        and session_date > datetime.fromisoformat(date_to).date()
-                    ):
-                        emit_progress()
-                        continue
-
-                try:
-                    session = self._parse_single_session(
-                        session_id,
-                        summary_path,
-                        events_path,
-                        device_info,
-                        data_root.path,
-                        timezone_name,
-                    )
-
-                    emit_progress()
-                    yield session
-                    sessions_yielded += 1
-
-                except Exception as e:
-                    logger.error(f"Failed to parse session {session_id}: {e}")
-                    emit_progress()
-                    continue
+    def _parse_unit_sequential(
+        self,
+        unit: tuple[int, Path | None, Path | None],
+        ctx: dict[str, Any],
+        root: Path,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """Parse one session in-process (it finalizes statistics itself)."""
+        session_id, summary_path, events_path = unit
+        return self._parse_single_session(
+            session_id,
+            summary_path,
+            events_path,
+            ctx["device_info"],
+            root,
+            ctx["timezone_name"],
+        )
 
     def _find_session_files(
         self, device_path: Path
@@ -432,92 +408,6 @@ class OscarDeviceParser(DeviceParser):
             )
 
         return result
-
-    def _parse_sessions_parallel(
-        self,
-        session_files: list[tuple[int, Path | None, Path | None]],
-        device_info: DeviceInfo,
-        base_path: Path,
-        date_from: str | None,
-        date_to: str | None,
-        limit: int | None,
-        progress_callback: Callable[[str], None] | None = None,
-        timezone_name: str | None = None,
-    ) -> Iterator[UnifiedSession]:
-        """Parse sessions in parallel using ThreadPoolExecutor."""
-        filtered_files = []
-        for session_id, summary_path, events_path in session_files:
-            if date_from or date_to:
-                # Same clock as _parse_single_session so date filtering
-                # agrees with therapy-day assignment.
-                session_date = _epoch_to_wall_clock(session_id, timezone_name).date()
-                if (
-                    date_from
-                    and session_date < datetime.fromisoformat(date_from).date()
-                ):
-                    continue
-                if date_to and session_date > datetime.fromisoformat(date_to).date():
-                    continue
-            filtered_files.append((session_id, summary_path, events_path))
-
-        total = len(filtered_files)
-        if limit and len(filtered_files) > limit:
-            filtered_files = filtered_files[:limit]
-
-        logger.info(
-            f"Parsing {len(filtered_files)} sessions in parallel with {os.cpu_count()} workers"
-        )
-
-        sessions_yielded = 0
-        completed = 0
-
-        def emit_progress() -> None:
-            nonlocal completed
-            completed += 1
-            if progress_callback:
-                progress_callback(f"Parsing session {completed}/{total}...")
-
-        futures: dict[Any, Any] = {}
-        try:
-            pool = get_pool()
-            futures = {
-                pool.submit(
-                    _oscar_parse_session_worker,
-                    session_id,
-                    summary_path,
-                    events_path,
-                    device_info,
-                    base_path,
-                    timezone_name,
-                ): session_id
-                for session_id, summary_path, events_path in filtered_files
-            }
-
-            for future in as_completed(futures):
-                session_id = futures[future]
-
-                if limit is not None and sessions_yielded >= limit:
-                    cancel_pending(futures)
-                    break
-
-                try:
-                    session = future.result()
-                    emit_progress()
-                    yield session
-                    sessions_yielded += 1
-                except BrokenProcessPool:
-                    raise
-                except Exception as e:
-                    logger.error(f"Failed to parse session {session_id}: {e}")
-                    emit_progress()
-                    continue
-        except BrokenProcessPool as exc:
-            raise RuntimeError(
-                f"Parser worker process crashed: {exc}. "
-                "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
-            ) from exc
-        finally:
-            cancel_pending(futures)
 
     def _parse_single_session(
         self,

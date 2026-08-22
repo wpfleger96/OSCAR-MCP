@@ -45,7 +45,7 @@ def test_limit_counts_yielded_sessions_not_nights_parallel():
         patch.object(parser, "_load_str_caches", return_value=({}, {})),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch(
-            "snore.parsers.resmed_edf.get_pool",
+            "snore.parsers.base.get_pool",
             return_value=ThreadPoolExecutor(max_workers=4),
         ),
         patch(

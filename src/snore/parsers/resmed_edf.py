@@ -20,9 +20,7 @@ import math
 import os
 import re
 
-from collections.abc import Callable, Iterator
-from concurrent.futures import as_completed
-from concurrent.futures.process import BrokenProcessPool
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -66,7 +64,6 @@ from snore.parsers.unified import (
     WaveformType,
     extract_basic_stats,
 )
-from snore.utils.parse_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -714,158 +711,95 @@ class ResmedEDFParser(DeviceParser):
             manufacturer="ResMed", model="Unknown", serial_number="Unknown"
         )
 
-    def parse_sessions(
+    # ------------------------------------------------------------------
+    # parse_sessions hooks (driver lives in DeviceParser.parse_sessions).
+    # timezone_name is ignored — ResMed EDF timestamps are already
+    # device-local wall-clock and need no conversion.
+    # ------------------------------------------------------------------
+
+    def _resolve_units(
+        self, path: Path, sort_by: str | None, timezone_name: str | None
+    ) -> tuple[Path, list[tuple[str, str, dict[str, dict[str, Path]]]]]:
+        """Resolve the data root and discover proximity-chained night items."""
+        return self._discover_session_files(path, sort_by)
+
+    def _unit_date(
+        self,
+        unit: tuple[str, str, dict[str, dict[str, Path]]],
+        timezone_name: str | None,
+    ) -> date | None:
+        """Chain night-date ID drives range filtering (device-local already)."""
+        return self._night_item_date(unit)
+
+    def _build_context(
         self,
         path: Path,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        limit: int | None = None,
-        sort_by: str | None = None,
-        parallel: bool = True,
-        progress_callback: Callable[[str], None] | None = None,
-        timezone_name: str | None = None,
-    ) -> Iterator[UnifiedSession]:
+        root: Path,
+        units: list[tuple[str, str, dict[str, dict[str, Path]]]],
+        timezone_name: str | None,
+    ) -> dict[str, Any]:
+        """Load per-parse device info, series-11 flag and STR caches once."""
+        # Instance flag is also read by the sequential decode path
+        # (_convert_str_to_therapy_settings), so set it here as before.
+        self._str_series11 = self._detect_series11(root)
+        settings_cache, summaries_cache = self._load_str_caches(root)
+        return {
+            "device_info": self.get_device_info(root),
+            "str_series11": self._str_series11,
+            "str_settings_cache": settings_cache,
+            "str_summaries_cache": summaries_cache,
+        }
+
+    def _worker_dispatch(
+        self,
+        unit: tuple[str, str, dict[str, dict[str, Path]]],
+        ctx: dict[str, Any],
+        root: Path,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> tuple[Callable[..., UnifiedSession | None], tuple[Any, ...]]:
+        """Submit one chain to the picklable module-level bundle worker.
+
+        Each future gets only its chain's STR cache slice to keep the pickled
+        payload O(1) per night rather than O(nights).
         """
-        Parse all ResMed sessions from the given path.
+        night_date, chain_id, segments = unit
+        therapy_days = _chain_therapy_days(segments)
+        args = (
+            night_date,
+            chain_id,
+            segments,
+            ctx["device_info"],
+            root,
+            _slice_str_cache(ctx["str_settings_cache"], therapy_days),
+            _slice_str_cache(ctx["str_summaries_cache"], therapy_days),
+            date_from,
+            date_to,
+            ctx["str_series11"],
+        )
+        return _resmed_parse_bundle_worker, args
 
-        Yields one UnifiedSession per therapy session.
-
-        Args:
-            path: Path to data directory
-            date_from: Filter sessions from this date
-            date_to: Filter sessions to this date
-            limit: Limit number of sessions
-            sort_by: Sort order (date-asc, date-desc, or None)
-            parallel: Enable parallel parsing (default: True)
-            progress_callback: Optional callback for progress messages
-            timezone_name: Ignored — ResMed EDF timestamps are already
-                device-local wall-clock; no conversion is needed.
-        """
-        path = Path(path)
-
-        path, night_items = self._discover_session_files(path, sort_by)
-        night_items = self._filter_night_items(night_items, date_from, date_to)
-        total_nights = len(night_items)
-
-        device_info = self.get_device_info(path)
-
-        self._str_series11 = self._detect_series11(path)
-        str_settings_cache, str_summaries_cache = self._load_str_caches(path)
-
-        sessions_yielded = 0
-
-        if parallel and len(night_items) > 1:
-            # limit counts yielded sessions, not nights: a night can be dropped
-            # by the per-session date filter or fail to parse, so truncating
-            # night_items up front would under-deliver. The as_completed loop
-            # below enforces the limit and cancels remaining futures instead.
-            logger.debug(
-                f"Parsing {len(night_items)} chains in parallel with {os.cpu_count()} workers"
-            )
-
-            futures: dict[Any, Any] = {}
-            try:
-                pool = get_pool()
-                futures = {}
-                for night_date, chain_id, segments in night_items:
-                    therapy_days = _chain_therapy_days(segments)
-                    futures[
-                        pool.submit(
-                            _resmed_parse_bundle_worker,
-                            night_date,
-                            chain_id,
-                            segments,
-                            device_info,
-                            path,
-                            _slice_str_cache(str_settings_cache, therapy_days),
-                            _slice_str_cache(str_summaries_cache, therapy_days),
-                            date_from,
-                            date_to,
-                            self._str_series11,
-                        )
-                    ] = chain_id
-
-                completed = 0
-
-                def emit_progress() -> None:
-                    nonlocal completed
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(
-                            f"Parsing session {completed}/{total_nights}..."
-                        )
-
-                for future in as_completed(futures):
-                    chain_id = futures[future]
-
-                    if limit is not None and sessions_yielded >= limit:
-                        logger.debug(
-                            f"Reached session limit of {limit}, cancelling remaining"
-                        )
-                        cancel_pending(futures)
-                        break
-
-                    try:
-                        session = future.result()
-                    except BrokenProcessPool:
-                        raise
-                    except Exception as e:
-                        logger.error(f"Failed to parse chain {chain_id}: {e}")
-                        emit_progress()
-                        continue
-
-                    emit_progress()
-
-                    if session is None:
-                        continue
-
-                    yield session
-                    sessions_yielded += 1
-            except BrokenProcessPool as exc:
-                raise RuntimeError(
-                    f"Parser worker process crashed: {exc}. "
-                    "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
-                ) from exc
-            finally:
-                cancel_pending(futures)
-        else:
-            completed = 0
-
-            def emit_progress() -> None:
-                nonlocal completed
-                completed += 1
-                if progress_callback:
-                    progress_callback(f"Parsing session {completed}/{total_nights}...")
-
-            for night_date, chain_id, segments in night_items:
-                if limit is not None and sessions_yielded >= limit:
-                    logger.debug(f"Reached session limit of {limit}, stopping")
-                    break
-
-                try:
-                    session = self._parse_single_session_bundle(
-                        night_date,
-                        chain_id,
-                        segments,
-                        device_info,
-                        path,
-                        str_settings_cache,
-                        str_summaries_cache,
-                        date_from,
-                        date_to,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to parse chain {chain_id}: {e}")
-                    emit_progress()
-                    continue
-
-                emit_progress()
-
-                if session is None:
-                    continue
-
-                yield session
-                sessions_yielded += 1
+    def _parse_unit_sequential(
+        self,
+        unit: tuple[str, str, dict[str, dict[str, Path]]],
+        ctx: dict[str, Any],
+        root: Path,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """Parse one chain in-process (bundle applies the date re-filter)."""
+        night_date, chain_id, segments = unit
+        return self._parse_single_session_bundle(
+            night_date,
+            chain_id,
+            segments,
+            ctx["device_info"],
+            root,
+            ctx["str_settings_cache"],
+            ctx["str_summaries_cache"],
+            date_from,
+            date_to,
+        )
 
     def _discover_session_files(
         self, path: Path, sort_by: str | None
