@@ -46,6 +46,7 @@ from snore.parsers.base import (
     ParserDetectionResult,
     ParserError,
     ParserMetadata,
+    build_root_metadata,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
 from snore.parsers.oscar_events import parse_events_file
@@ -179,21 +180,7 @@ class OscarDeviceParser(DeviceParser):
             detected=True,
             confidence=first_root.confidence,
             message=f"Found {device_count} OSCAR device(s) across {profile_count} profile(s)",
-            metadata={
-                "data_root": str(first_root.path),
-                "structure_type": first_root.structure_type,
-                "profile_name": first_root.profile_name,
-                "device_serial": first_root.device_serial,
-                "all_roots": [str(r.path) for r in roots],
-                "root_metadata": {
-                    str(r.path): {
-                        "profile_name": r.profile_name,
-                        "structure_type": r.structure_type,
-                        "device_serial": r.device_serial,
-                    }
-                    for r in roots
-                },
-            },
+            metadata=build_root_metadata(roots),
         )
 
     def _is_oscar_device_root(self, path: Path) -> bool:

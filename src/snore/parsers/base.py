@@ -13,11 +13,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from snore.parsers.types import ParserMetadata
+from snore.parsers.types import DataRoot, ParserMetadata
 from snore.parsers.unified import DeviceInfo, UnifiedSession
 
 __all__ = [
@@ -25,7 +25,65 @@ __all__ = [
     "ParserDetectionResult",
     "ParserMetadata",
     "RawFileManifest",
+    "build_root_metadata",
+    "filter_units_by_date",
 ]
+
+
+def build_root_metadata(roots: list[DataRoot]) -> dict[str, Any]:
+    """Build the shared ``detect`` metadata dict from discovered data roots.
+
+    The first root supplies the primary fields; ``all_roots`` and
+    ``root_metadata`` describe every discovered root.  Both the ResMed and
+    OSCAR ``detect`` methods return this identical structure.
+    """
+    first = roots[0]
+    return {
+        "data_root": str(first.path),
+        "structure_type": first.structure_type,
+        "profile_name": first.profile_name,
+        "device_serial": first.device_serial,
+        "all_roots": [str(r.path) for r in roots],
+        "root_metadata": {
+            str(r.path): {
+                "profile_name": r.profile_name,
+                "structure_type": r.structure_type,
+                "device_serial": r.device_serial,
+            }
+            for r in roots
+        },
+    }
+
+
+def filter_units_by_date[Unit](
+    units: list[Unit],
+    key_date_fn: Callable[[Unit], date | None],
+    date_from: str | None,
+    date_to: str | None,
+) -> list[Unit]:
+    """Filter parse units to those whose key date is within the range.
+
+    ``key_date_fn`` maps a unit to its calendar date, or None when the date is
+    unknown/unparseable — such units are always kept (the caller logs why).
+    ``date_from``/``date_to`` are inclusive ISO dates; when both are None the
+    input list is returned unchanged.
+    """
+    if not (date_from or date_to):
+        return units
+
+    from_date = datetime.fromisoformat(date_from).date() if date_from else None
+    to_date = datetime.fromisoformat(date_to).date() if date_to else None
+
+    kept: list[Unit] = []
+    for unit in units:
+        unit_date = key_date_fn(unit)
+        if unit_date is not None:
+            if from_date is not None and unit_date < from_date:
+                continue
+            if to_date is not None and unit_date > to_date:
+                continue
+        kept.append(unit)
+    return kept
 
 
 class ParserDetectionResult:

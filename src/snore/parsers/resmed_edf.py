@@ -44,6 +44,8 @@ from snore.parsers.base import (
     ParserError,
     ParserMetadata,
     RawFileManifest,
+    build_root_metadata,
+    filter_units_by_date,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
 from snore.parsers.event_labels import EVENT_TYPE_MAP, FILTERED_ANNOTATIONS
@@ -512,21 +514,7 @@ class ResmedEDFParser(DeviceParser):
         self._root_metadata = roots[0]
         self._all_roots = roots
 
-        metadata_dict = {
-            "data_root": str(self._data_root),
-            "structure_type": self._root_metadata.structure_type,
-            "profile_name": self._root_metadata.profile_name,
-            "device_serial": self._root_metadata.device_serial,
-            "all_roots": [str(r.path) for r in roots],
-            "root_metadata": {
-                str(r.path): {
-                    "profile_name": r.profile_name,
-                    "structure_type": r.structure_type,
-                    "device_serial": r.device_serial,
-                }
-                for r in roots
-            },
-        }
+        metadata_dict = build_root_metadata(roots)
 
         if self._data_root != path:
             location_desc = f"in {'parent' if self._data_root in path.parents else 'child'} directory"
@@ -932,35 +920,21 @@ class ResmedEDFParser(DeviceParser):
         date_to: str | None,
     ) -> list[tuple[str, str, dict[str, dict[str, Path]]]]:
         """Filter chain items by date range based on their night-date IDs."""
-        if not (date_from or date_to):
-            return night_items
+        return filter_units_by_date(
+            night_items, self._night_item_date, date_from, date_to
+        )
 
-        filtered_items = []
-        for night_date, chain_id, segments in night_items:
-            try:
-                night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
-
-                if date_from:
-                    filter_date_from = datetime.fromisoformat(date_from).date()
-                    if night_date_obj < filter_date_from:
-                        logger.debug(
-                            f"Skipping chain {chain_id}: before {filter_date_from}"
-                        )
-                        continue
-
-                if date_to:
-                    filter_date_to = datetime.fromisoformat(date_to).date()
-                    if night_date_obj > filter_date_to:
-                        logger.debug(
-                            f"Skipping chain {chain_id}: after {filter_date_to}"
-                        )
-                        continue
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Could not parse night date {night_date}: {e}")
-
-            filtered_items.append((night_date, chain_id, segments))
-
-        return filtered_items
+    @staticmethod
+    def _night_item_date(
+        item: tuple[str, str, dict[str, dict[str, Path]]],
+    ) -> date | None:
+        """Parse a chain item's night-date ID; None (kept) if unparseable."""
+        night_date = item[0]
+        try:
+            return datetime.strptime(night_date, "%Y%m%d").date()
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Could not parse night date {night_date}: {e}")
+            return None
 
     def _parse_single_session_bundle(
         self,
