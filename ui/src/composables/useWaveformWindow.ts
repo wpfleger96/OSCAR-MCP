@@ -1,7 +1,7 @@
 import { ref, shallowRef, type Ref, type ShallowRef } from 'vue'
 import { getWaveformData, type WaveformDataParams } from '@/api/waveforms'
-import { ZOOM_FETCH_DEBOUNCE_MS } from '@/constants/waveform'
 import type { WaveformCacheRegistry, FetchWindow, WaveformSlice } from '@/utils/waveformCache'
+import { prefetchAdjacentWindows } from '@/utils/waveformPrefetch'
 
 // Tolerance for treating a fetch window as spanning the full night (fractional bounds).
 const EPS = 1e-6
@@ -17,11 +17,12 @@ export interface WaveformWindowComposable {
 /**
  * Cache-aware waveform window loader for the session-detail charts.
  *
- * Every request first resolves against the per-type cache in the shared registry: a hit
- * renders synchronously with zero network, a miss renders the best available slice now and
- * schedules a debounced fetch of an expanded window. Successive calls coalesce on the
- * debounce timer and the last call wins — the prior in-flight fetch is aborted so a stale
- * response never overwrites fresher data. Failed fetches keep the last-good data.
+ * Every request first resolves against the per-type cache in the shared registry: a hit renders
+ * synchronously with zero network, a miss renders the best available slice now and fetches an
+ * expanded window immediately (drag coalescing already happens at WaveformChart's emit debounce).
+ * Successive calls abort the prior in-flight fetch so the last call wins and a stale response never
+ * overwrites fresher data. Failed fetches keep the last-good data. After each request settles the
+ * adjacent zoom windows are warmed in the background so the next zoom step resolves as a hit.
  */
 export function useWaveformWindow(
     sessionId: Ref<number>,
@@ -34,13 +35,21 @@ export function useWaveformWindow(
     const error = ref<string | null>(null)
 
     let abortController: AbortController | null = null
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null
+    let prefetchController: AbortController | null = null
 
-    function cancelPending(): void {
-        if (debounceTimer !== null) {
-            clearTimeout(debounceTimer)
-            debounceTimer = null
-        }
+    function kickPrefetch(startSec: number, endSec: number, type: string): void {
+        prefetchController?.abort()
+        const controller = new AbortController()
+        prefetchController = controller
+        prefetchAdjacentWindows({
+            cache: registry.getCache(type),
+            sessionId: sessionId.value,
+            waveformType: type,
+            startSec,
+            endSec,
+            durationSec: durationSec.value,
+            signal: controller.signal,
+        })
     }
 
     async function runFetch(
@@ -80,6 +89,7 @@ export function useWaveformWindow(
             if (resolved.slice) data.value = resolved.slice
             error.value = null
             loading.value = false
+            kickPrefetch(startSec, endSec, fetchedType)
         } catch (err: unknown) {
             // Aborted request (incl. CanceledError from supersession): a newer call owns state.
             if (abortController !== thisController) return
@@ -93,7 +103,9 @@ export function useWaveformWindow(
     function loadWindow(startSec?: number, endSec?: number): void {
         const s = startSec ?? 0
         const e = endSec ?? durationSec.value
-        cancelPending()
+        // A new request obsoletes any in-flight prefetch: cancel before deciding what to load.
+        prefetchController?.abort()
+        prefetchController = null
 
         const cache = registry.getCache(waveformType.value)
         const r = cache.resolve(s, e, durationSec.value)
@@ -105,21 +117,19 @@ export function useWaveformWindow(
             abortController = null
             error.value = null
             loading.value = false
+            kickPrefetch(s, e, waveformType.value)
             return
         }
 
         loading.value = true
-        const fetchWindow = r.fetchWindow
-        debounceTimer = setTimeout(() => {
-            debounceTimer = null
-            void runFetch(s, e, fetchWindow)
-        }, ZOOM_FETCH_DEBOUNCE_MS)
+        void runFetch(s, e, r.fetchWindow)
     }
 
     function reset(): void {
         abortController?.abort()
         abortController = null
-        cancelPending()
+        prefetchController?.abort()
+        prefetchController = null
         data.value = null
         error.value = null
         loading.value = false

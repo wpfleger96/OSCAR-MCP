@@ -50,6 +50,23 @@ def reset_auth_config():
 
 
 @pytest.fixture(autouse=True)
+def _reset_waveform_array_cache():
+    """Clear the process-global deserialized-waveform array cache between tests.
+
+    The cache in ``waveform_service`` is keyed by ``Waveform.id``.  Each test
+    uses its own database, but row ids restart per DB, so without this reset a
+    cached array from one test's row id would be served for a different test's
+    row that happens to reuse that id — an isolation artifact that never occurs
+    in production (one process serves one database).
+    """
+    from snore.services.waveform_service import _reset_waveform_array_cache as _reset
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _disable_background_vacuum(monkeypatch):
     """Disable background VACUUM in all tests.
 

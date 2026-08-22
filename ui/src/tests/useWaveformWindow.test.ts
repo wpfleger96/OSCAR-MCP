@@ -37,6 +37,21 @@ function makeDenseOverview(points = 2000, duration = 100): WaveformDataResponse 
     })
 }
 
+// A dense, exact windowed response (returned < requested) covering [start, end], so a chunk
+// stored from it wins the densest-cover selection and serves its sub-windows as hits.
+function makeWindow(start: number, end: number, points = 3000): WaveformDataResponse {
+    const timestamps = Array.from(
+        { length: points },
+        (_, i) => start + (i * (end - start)) / (points - 1),
+    )
+    return makeResponse({
+        timestamps,
+        values: timestamps.map(() => 1),
+        returned_samples: points,
+        total_samples: points,
+    })
+}
+
 function makeComposable({ type = 'flow', duration = 100 } = {}) {
     const sessionId = ref(1)
     const waveformType = ref(type)
@@ -102,19 +117,17 @@ describe('useWaveformWindow', () => {
     it('test_sparse_region_serves_slice_and_fetches_denser', async () => {
         mockGetWaveformData
             .mockResolvedValueOnce(makeDenseOverview())
-            .mockResolvedValueOnce(makeResponse())
+            .mockResolvedValueOnce(makeWindow(30, 60))
         const { composable } = makeComposable()
 
         composable.loadWindow()
         await tick()
         expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
 
-        // Covered by the inexact overview but too sparse: render the slice now, refetch denser.
+        // Covered by the inexact overview but too sparse: render the slice now and fetch a denser
+        // window immediately (no debounce) — the call fires synchronously within loadWindow.
         composable.loadWindow(40, 50)
         expect(composable.data.value?.timestamps.length).toBeGreaterThan(0)
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
-
-        await tick()
         expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
         // Expanded window (±1 width) at density-scaled max_points.
         expect(mockGetWaveformData).toHaveBeenNthCalledWith(
@@ -124,20 +137,24 @@ describe('useWaveformWindow', () => {
             { max_points: 6000, start_seconds: 30, end_seconds: 60 },
             expect.any(AbortSignal),
         )
+
+        await tick()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
     })
 
-    it('test_rapid_successive_calls_coalesce_to_last_window', async () => {
+    it('test_rapid_successive_calls_each_fetch_immediately_last_wins', async () => {
         mockGetWaveformData.mockResolvedValue(makeResponse())
         const { composable } = makeComposable()
 
-        // No timer advance between calls: earlier debounce timers are cancelled, last wins.
+        // No debounce: each miss fetches immediately, and each call aborts the prior in-flight
+        // fetch so only the last window's response is applied.
         composable.loadWindow(40, 50)
         composable.loadWindow(60, 70)
         composable.loadWindow(80, 90)
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(3)
         await tick()
 
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
-        expect(mockGetWaveformData).toHaveBeenCalledWith(
+        expect(mockGetWaveformData).toHaveBeenLastCalledWith(
             1,
             'flow',
             { max_points: 6000, start_seconds: 70, end_seconds: 100 },
@@ -273,6 +290,83 @@ describe('useWaveformWindow', () => {
         resolveSecond(makeResponse())
         await flushPromises()
         expect(composable.loading.value).toBe(false)
+    })
+
+    it('test_miss_fetches_immediately_without_debounce', () => {
+        mockGetWaveformData.mockResolvedValue(makeResponse())
+        const { composable } = makeComposable()
+
+        // Fetch fires synchronously inside loadWindow — no timer advance needed.
+        composable.loadWindow(40, 50)
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
+        expect(composable.loading.value).toBe(true)
+    })
+
+    it('test_hit_prefetches_adjacent_windows_so_next_zoom_in_is_a_hit', async () => {
+        // Full-night fetch returns a dense-but-inexact overview; windowed fetches return a dense,
+        // exact chunk over the requested window.
+        mockGetWaveformData.mockImplementation((_id, _type, params) => {
+            const p = (params ?? {}) as { start_seconds?: number; end_seconds?: number }
+            if (p.start_seconds === undefined) return Promise.resolve(makeDenseOverview())
+            return Promise.resolve(makeWindow(p.start_seconds, p.end_seconds ?? 100))
+        })
+        const { composable } = makeComposable()
+
+        composable.loadWindow()
+        await tick()
+
+        // A wide window resolves densely from the overview (a hit), which kicks prefetch of the
+        // narrower zoom-in target that the overview alone cannot serve densely.
+        composable.loadWindow(25, 75)
+        await flushPromises()
+        const callsAfterPrefetch = mockGetWaveformData.mock.calls.length
+        expect(callsAfterPrefetch).toBeGreaterThan(1)
+
+        // Zooming into the prefetched window now resolves with zero additional network.
+        composable.loadWindow(37.5, 62.5)
+        await flushPromises()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(callsAfterPrefetch)
+        expect(composable.loading.value).toBe(false)
+    })
+
+    it('test_prefetch_is_aborted_by_the_next_load', async () => {
+        const windowedSignals: AbortSignal[] = []
+        mockGetWaveformData.mockImplementation((_id, _type, params, signal) => {
+            const p = (params ?? {}) as { start_seconds?: number }
+            if (p.start_seconds === undefined) return Promise.resolve(makeDenseOverview())
+            windowedSignals.push(signal as AbortSignal)
+            return new Promise<WaveformDataResponse>(() => {})
+        })
+        const { composable } = makeComposable()
+
+        composable.loadWindow()
+        await tick()
+
+        // Hit path kicks a prefetch whose windowed fetch is now in flight.
+        composable.loadWindow(25, 75)
+        expect(windowedSignals).toHaveLength(1)
+
+        // The next load aborts the in-flight prefetch before doing its own work.
+        composable.loadWindow(10, 20)
+        expect(windowedSignals[0].aborted).toBe(true)
+    })
+
+    it('test_prefetch_failure_leaves_error_null', async () => {
+        mockGetWaveformData.mockImplementation((_id, _type, params) => {
+            const p = (params ?? {}) as { start_seconds?: number }
+            if (p.start_seconds === undefined) return Promise.resolve(makeDenseOverview())
+            return Promise.reject(new Error('prefetch failure'))
+        })
+        const { composable } = makeComposable()
+
+        composable.loadWindow()
+        await tick()
+
+        // Hit resolve kicks a prefetch whose fetch rejects — it must stay invisible.
+        composable.loadWindow(25, 75)
+        await flushPromises()
+
+        expect(composable.error.value).toBeNull()
     })
 
     it('test_reset_nulls_data_error_and_loading', async () => {

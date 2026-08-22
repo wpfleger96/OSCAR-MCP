@@ -75,6 +75,7 @@ import { getWaveformData } from '@/api/waveforms'
 import { Select } from '@/components/ui/select'
 import MultiWaveformView from '@/components/MultiWaveformView.vue'
 import { createWaveformCacheRegistry } from '@/utils/waveformCache'
+import { BASE_MAX_POINTS } from '@/constants/waveform'
 import type { WaveformDataResponse } from '@/types'
 
 const mockGetWaveformData = vi.mocked(getWaveformData)
@@ -180,10 +181,13 @@ describe('MultiWaveformView', () => {
     })
 
     it('test_zoom_refetch_reject_keeps_chart_mounted_and_shows_banner', async () => {
-        // Arrange: inexact initial load (so the zoom misses cache), zoom refetch rejects
-        mockGetWaveformData
-            .mockResolvedValueOnce(makeResponse({ returned_samples: 2000 }))
-            .mockRejectedValueOnce(new Error('timeout'))
+        // Arrange: full-night loads resolve inexact (so the zoom misses the cache and the
+        // background prefetch keeps the overview inexact); the windowed zoom fetch rejects.
+        mockGetWaveformData.mockImplementation((_s, _t, params) =>
+            params?.start_seconds !== undefined
+                ? Promise.reject(new Error('timeout'))
+                : Promise.resolve(makeResponse({ returned_samples: 10000 })),
+        )
 
         const wrapper = mount(MultiWaveformView, { props: makeProps() })
         await flushPromises()
@@ -232,21 +236,26 @@ describe('MultiWaveformView', () => {
     })
 
     it('test_first_zoom_into_new_region_fetches_once_per_chart', async () => {
-        // Arrange: inexact overview (returned == max_points) so a fresh region misses the cache.
-        mockGetWaveformData.mockResolvedValue(makeResponse({ returned_samples: 2000 }))
+        // Arrange: full-night loads resolve inexact (so a fresh region misses); windowed zoom
+        // fetches resolve exact (so the zoom's own background prefetch resolves as hits and adds
+        // no fetches). Post-zoom the only calls are the user-facing fetches, one per chart.
+        mockGetWaveformData.mockImplementation((_s, _t, params) =>
+            params?.start_seconds !== undefined
+                ? Promise.resolve(makeResponse())
+                : Promise.resolve(makeResponse({ returned_samples: 10000 })),
+        )
         const wrapper = mount(MultiWaveformView, {
             props: makeProps({ initialTypes: ['flow', 'pressure'] }),
         })
         await flushPromises()
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
-        mockGetWaveformData.mockClear()
+        mockGetWaveformData.mockClear() // discard initial loads and their background prefetch
 
-        // Act
+        // Act: zoom into a fresh region uncovered by any exact chunk.
         const vm = wrapper.vm as unknown as { zoomTo: (s: number, e: number) => void }
         vm.zoomTo(10, 20)
         await flushPromises()
 
-        // Assert: exactly one refetch per chart.
+        // Assert: exactly one user-facing refetch per chart; the zoom's prefetch stayed in cache.
         expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
     })
 
@@ -273,5 +282,66 @@ describe('MultiWaveformView', () => {
 
         // Assert
         expect(mockGetWaveformData).not.toHaveBeenCalled()
+    })
+
+    it('test_prefetch_after_initial_load_serves_the_next_zoom_from_cache', async () => {
+        // The initial full-night load is inexact (returned == BASE_MAX_POINTS), so the background
+        // prefetch of the next zoom step fires. The prefetch fetches a denser full-night window
+        // whose response is exact, upgrading the overview so the follow-up zoom is a cache hit.
+        mockGetWaveformData.mockImplementation((_s, _t, params) =>
+            Promise.resolve(
+                params?.max_points === BASE_MAX_POINTS
+                    ? makeResponse({ returned_samples: BASE_MAX_POINTS })
+                    : makeResponse(),
+            ),
+        )
+        const wrapper = mount(MultiWaveformView, { props: makeProps({ initialTypes: ['flow'] }) })
+        await flushPromises()
+
+        // A background prefetch fetch (denser than the initial load) must have been issued.
+        const prefetched = mockGetWaveformData.mock.calls.some(
+            (c) => (c[2]?.max_points ?? 0) > BASE_MAX_POINTS,
+        )
+        expect(prefetched).toBe(true)
+        mockGetWaveformData.mockClear()
+
+        // Act: take the zoom-in step the prefetch warmed (centered, half the full-night width).
+        const vm = wrapper.vm as unknown as { zoomTo: (s: number, e: number) => void }
+        vm.zoomTo(900, 2700)
+        await flushPromises()
+
+        // Assert: no user-facing fetch — the step resolves entirely from the prefetched cache.
+        expect(mockGetWaveformData).not.toHaveBeenCalled()
+    })
+
+    it('test_removing_a_chart_aborts_its_pending_prefetch', async () => {
+        // Capture the AbortSignal handed to each background prefetch fetch. The expanded prefetch
+        // window requests more than BASE_MAX_POINTS; the initial load requests exactly BASE.
+        const prefetchSignals = new Map<string, AbortSignal>()
+        mockGetWaveformData.mockImplementation((_s, type, params, signal) => {
+            if (signal && (params?.max_points ?? 0) > BASE_MAX_POINTS) {
+                prefetchSignals.set(type, signal)
+            }
+            // Inexact full-night overview so the initial-load prefetch fires.
+            return Promise.resolve(makeResponse({ returned_samples: BASE_MAX_POINTS }))
+        })
+
+        const wrapper = mount(MultiWaveformView, {
+            props: makeProps({ initialTypes: ['flow', 'pressure'] }),
+        })
+        await flushPromises()
+
+        const flowPrefetch = prefetchSignals.get('flow')
+        const pressurePrefetch = prefetchSignals.get('pressure')
+        expect(flowPrefetch).toBeDefined()
+        expect(pressurePrefetch).toBeDefined()
+        expect(flowPrefetch!.aborted).toBe(false)
+
+        // Act: remove the flow chart (its remove button is the first one).
+        await wrapper.findAll('.chart-remove')[0]!.trigger('click')
+
+        // Assert: flow's pending prefetch was aborted; the surviving chart's prefetch is untouched.
+        expect(flowPrefetch!.aborted).toBe(true)
+        expect(pressurePrefetch!.aborted).toBe(false)
     })
 })

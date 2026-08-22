@@ -90,6 +90,7 @@ import { Button } from '@/components/ui/button'
 import WaveformChart from './WaveformChart.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import { getWaveformData } from '@/api/waveforms'
+import { prefetchAdjacentWindows } from '@/utils/waveformPrefetch'
 import { WAVEFORM_LABELS, WAVEFORM_GLOSSARY_MAP } from '@/types'
 import type { EventItem, WaveformType } from '@/types'
 import type { WaveformCacheRegistry, WaveformSlice } from '@/utils/waveformCache'
@@ -121,6 +122,7 @@ const syncKey = uPlot.sync(`waveform-sync-${crypto.randomUUID()}`)
 const charts = ref<ChartState[]>([])
 const chartRefs = ref<(InstanceType<typeof WaveformChart> | null)[]>([])
 const chartAborts = new Map<number, AbortController>()
+const chartPrefetch = new Map<number, AbortController>()
 
 const typeOptions = computed(() =>
     props.availableTypes.map((t) => ({ value: t, label: WAVEFORM_LABELS[t] ?? t })),
@@ -130,9 +132,28 @@ function setChartRef(idx: number, el: unknown): void {
     chartRefs.value[idx] = el as InstanceType<typeof WaveformChart> | null
 }
 
+// Warm the adjacent zoom windows for this chart in the background so the next step is a cache hit.
+// Fire-and-forget: never touches chart.data/loading/error. Supersedes any prior prefetch.
+function kickChartPrefetch(chart: ChartState, startSec: number, endSec: number): void {
+    chartPrefetch.get(chart.id)?.abort()
+    const controller = new AbortController()
+    chartPrefetch.set(chart.id, controller)
+    prefetchAdjacentWindows({
+        cache: props.cacheRegistry.getCache(chart.type),
+        sessionId: props.sessionId,
+        waveformType: chart.type,
+        startSec,
+        endSec,
+        durationSec: props.durationSec,
+        signal: controller.signal,
+    })
+}
+
 async function loadChart(chart: ChartState, startSec?: number, endSec?: number): Promise<void> {
-    // A newer request (even a cache hit) supersedes any in-flight fetch for this chart.
+    // A newer request (even a cache hit) supersedes any in-flight fetch and pending prefetch.
     chartAborts.get(chart.id)?.abort()
+    chartPrefetch.get(chart.id)?.abort()
+    chartPrefetch.delete(chart.id)
     const start = startSec ?? 0
     const end = endSec ?? props.durationSec
     const cache = props.cacheRegistry.getCache(chart.type)
@@ -143,6 +164,7 @@ async function loadChart(chart: ChartState, startSec?: number, endSec?: number):
     if (resolved.hit || !resolved.fetchWindow) {
         chart.loading = false
         chartAborts.delete(chart.id)
+        kickChartPrefetch(chart, start, end)
         return
     }
 
@@ -167,6 +189,7 @@ async function loadChart(chart: ChartState, startSec?: number, endSec?: number):
         cache.store(fetchWindow, response, props.durationSec)
         if (chartAborts.get(chart.id) === thisController) {
             chart.data = cache.resolve(start, end, props.durationSec).slice
+            kickChartPrefetch(chart, start, end)
         }
     } catch (err: unknown) {
         if (err instanceof Error && err.name !== 'CanceledError') {
@@ -190,6 +213,8 @@ function removeChart(idx: number): void {
     if (chart) {
         chartAborts.get(chart.id)?.abort()
         chartAborts.delete(chart.id)
+        chartPrefetch.get(chart.id)?.abort()
+        chartPrefetch.delete(chart.id)
     }
     charts.value.splice(idx, 1)
     chartRefs.value.splice(idx, 1)
@@ -198,6 +223,9 @@ function removeChart(idx: number): void {
 function updateChartType(idx: number, newType: string): void {
     const chart = charts.value[idx]
     if (!chart) return
+    // The outgoing type's prefetch is now irrelevant; loadChart reloads for the new type.
+    chartPrefetch.get(chart.id)?.abort()
+    chartPrefetch.delete(chart.id)
     chart.type = newType
     chart.data = null
     chart.error = null

@@ -7,8 +7,11 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-from snore.database.models import Session, Waveform
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from snore.database.models import Device, Session, Waveform
 from snore.exceptions import NotFoundError
+from snore.services import waveform_service as waveform_service_module
 from snore.services.waveform_service import WaveformService
 
 
@@ -629,3 +632,170 @@ class TestCompareEvents:
         assert row is not None, (
             "Session was closed after get_waveform_data — subsequent query failed"
         )
+
+
+async def _seed_session(
+    async_db_session: AsyncSession, device: Device, tag: str
+) -> Session:
+    now = datetime(2025, 1, 1, 0, 0, 0)
+    session = Session(
+        device_id=device.id,
+        device_session_id=tag,
+        start_time=now,
+        end_time=now + timedelta(hours=8),
+        duration_seconds=28800,
+    )
+    async_db_session.add(session)
+    await async_db_session.flush()
+    return session
+
+
+async def _seed_waveform(
+    async_db_session: AsyncSession,
+    session_id: int,
+    *,
+    waveform_type: str = "flow",
+    sample_count: int = 1000,
+    blob: bytes | None = None,
+) -> Waveform:
+    wf = Waveform(
+        session_id=session_id,
+        waveform_type=waveform_type,
+        sample_rate=25.0,
+        unit="L/min",
+        sample_count=sample_count,
+        data_blob=blob if blob is not None else _make_waveform_blob(sample_count, 25.0),
+    )
+    async_db_session.add(wf)
+    await async_db_session.flush()
+    return wf
+
+
+def _constant_blob(sample_count: int, value: float) -> bytes:
+    timestamps = np.arange(sample_count, dtype=np.float32) / 25.0
+    values = np.full(sample_count, value, dtype=np.float32)
+    return np.column_stack([timestamps, values]).astype(np.float32).tobytes()
+
+
+class TestWaveformArrayCache:
+    """The module-level deserialized-array cache in get_waveform_data.
+
+    The cache is reset between tests by the autouse ``_reset_waveform_array_cache``
+    fixture in the root conftest.
+    """
+
+    async def test_warm_request_identical_to_cold(
+        self, async_db_session, async_test_device
+    ):
+        """A cache-warm request returns byte-identical arrays and metadata."""
+        session = await _seed_session(async_db_session, async_test_device, "warm")
+        await _seed_waveform(async_db_session, session.id)
+        service = WaveformService(async_db_session, profile_id=1)
+
+        cold_ts, cold_vals, cold_meta = await service.get_waveform_data(
+            session.id, "flow", start_seconds=5.0, end_seconds=20.0
+        )
+        warm_ts, warm_vals, warm_meta = await service.get_waveform_data(
+            session.id, "flow", start_seconds=5.0, end_seconds=20.0
+        )
+
+        np.testing.assert_array_equal(cold_ts, warm_ts)
+        np.testing.assert_array_equal(cold_vals, warm_vals)
+        assert cold_meta == warm_meta
+
+    async def test_warm_request_skips_blob_fetch(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """Second request for the same row does not re-read the blob."""
+        session = await _seed_session(async_db_session, async_test_device, "skip")
+        await _seed_waveform(async_db_session, session.id)
+        service = WaveformService(async_db_session, profile_id=1)
+
+        calls = 0
+        real_fetch = waveform_service_module.fetch_waveform_blob
+
+        async def counting_fetch(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return await real_fetch(*args, **kwargs)
+
+        monkeypatch.setattr(
+            waveform_service_module, "fetch_waveform_blob", counting_fetch
+        )
+
+        await service.get_waveform_data(session.id, "flow")
+        assert calls == 1  # cold miss reads the blob once
+        await service.get_waveform_data(session.id, "flow")
+        assert calls == 1  # warm hit does not touch the blob
+
+    async def test_replaced_row_served_fresh(self, async_db_session, async_test_device):
+        """A deleted+reinserted waveform (new row id) is served fresh, not stale."""
+        session = await _seed_session(async_db_session, async_test_device, "replace")
+        # Seed flow first, then a decoy row that becomes the max rowid, so
+        # deleting flow never frees the top rowid: SQLite reuses a rowid only for
+        # the deleted max, so the reinserted flow row is guaranteed a NEW id.
+        old_wf = await _seed_waveform(async_db_session, session.id)
+        await _seed_waveform(async_db_session, session.id, waveform_type="pressure")
+        service = WaveformService(async_db_session, profile_id=1)
+
+        _, cold_vals, _ = await service.get_waveform_data(session.id, "flow")
+        assert not np.allclose(cold_vals, 42.0)  # sin data, not the sentinel
+
+        await async_db_session.delete(old_wf)
+        await async_db_session.flush()
+        new_wf = await _seed_waveform(
+            async_db_session,
+            session.id,
+            blob=_constant_blob(1000, 42.0),
+        )
+        assert new_wf.id != old_wf.id
+
+        _, fresh_vals, _ = await service.get_waveform_data(session.id, "flow")
+        np.testing.assert_allclose(fresh_vals, 42.0)
+
+    async def test_byte_cap_evicts_least_recently_used(
+        self, async_db_session, async_test_device, monkeypatch
+    ):
+        """Exceeding the byte cap evicts the LRU entry; re-reading it re-fetches."""
+        # 1000 float32 timestamps + 1000 values = 8000 bytes per waveform, so a
+        # cap of 8000 holds exactly one deserialized channel.
+        monkeypatch.setattr(
+            waveform_service_module, "WAVEFORM_ARRAY_CACHE_MAX_BYTES", 8000
+        )
+        session_a = await _seed_session(async_db_session, async_test_device, "cap_a")
+        session_b = await _seed_session(async_db_session, async_test_device, "cap_b")
+        await _seed_waveform(async_db_session, session_a.id)
+        await _seed_waveform(async_db_session, session_b.id)
+        service = WaveformService(async_db_session, profile_id=1)
+
+        calls = 0
+        real_fetch = waveform_service_module.fetch_waveform_blob
+
+        async def counting_fetch(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return await real_fetch(*args, **kwargs)
+
+        monkeypatch.setattr(
+            waveform_service_module, "fetch_waveform_blob", counting_fetch
+        )
+
+        await service.get_waveform_data(session_a.id, "flow")  # cache A
+        await service.get_waveform_data(session_b.id, "flow")  # cache B, evict A
+        assert calls == 2
+        await service.get_waveform_data(session_a.id, "flow")  # A evicted → refetch
+        assert calls == 3
+
+    async def test_ownership_enforced_on_warm_hit(
+        self, async_db_session, async_test_device
+    ):
+        """A foreign profile gets 404 even when the row's arrays are cached."""
+        session = await _seed_session(async_db_session, async_test_device, "owned")
+        await _seed_waveform(async_db_session, session.id)
+
+        owner = WaveformService(async_db_session, profile_id=1)
+        await owner.get_waveform_data(session.id, "flow")  # warm the cache
+
+        intruder = WaveformService(async_db_session, profile_id=999)
+        with pytest.raises(NotFoundError):
+            await intruder.get_waveform_data(session.id, "flow")

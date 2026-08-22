@@ -6,7 +6,7 @@ import {
     WaveformWindowCache,
     type FetchWindow,
 } from '@/utils/waveformCache'
-import { BASE_MAX_POINTS, MIN_INVIEW_POINTS } from '@/constants/waveform'
+import { BASE_MAX_POINTS, MAX_CACHED_CHUNKS, MIN_INVIEW_POINTS } from '@/constants/waveform'
 
 function fw(startSec: number, endSec: number, maxPoints: number): FetchWindow {
     return { startSec, endSec, maxPoints }
@@ -201,7 +201,7 @@ describe('WaveformWindowCache LRU + overview', () => {
 
     it('test_oldest_chunk_evicts_past_max_cached_chunks', () => {
         const cache = new WaveformWindowCache()
-        for (let i = 0; i < 9; i++) storeWindow(cache, i) // 9 > MAX_CACHED_CHUNKS (8)
+        for (let i = 0; i < MAX_CACHED_CHUNKS + 1; i++) storeWindow(cache, i)
 
         // Chunk 0 (oldest) is evicted; chunk 1 survives.
         expect(cache.resolve(10, 40, 100000).hit).toBe(false)
@@ -210,11 +210,11 @@ describe('WaveformWindowCache LRU + overview', () => {
 
     it('test_hit_touches_lru_so_touched_chunk_survives_eviction', () => {
         const cache = new WaveformWindowCache()
-        for (let i = 0; i < 8; i++) storeWindow(cache, i) // fill the LRU exactly
+        for (let i = 0; i < MAX_CACHED_CHUNKS; i++) storeWindow(cache, i) // fill the LRU exactly
 
-        // Touch chunk 0 via a hit, then push a 9th chunk to force one eviction.
+        // Touch chunk 0 via a hit, then push one more chunk to force one eviction.
         expect(cache.resolve(10, 40, 100000).hit).toBe(true)
-        storeWindow(cache, 8)
+        storeWindow(cache, MAX_CACHED_CHUNKS)
 
         // Chunk 0 was refreshed, so chunk 1 becomes the eviction victim instead.
         expect(cache.resolve(10, 40, 100000).hit).toBe(true)
