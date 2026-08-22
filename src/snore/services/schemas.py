@@ -582,7 +582,13 @@ class DayListItem(BaseModel):
 
 
 class DayDetail(DayListItem):
-    """Full detail of a therapy day including per-metric stats."""
+    """Full detail of a therapy day including per-metric stats.
+
+    The FL/RERA proxy fields below carry ``*_reason`` companions (unlike the
+    older nullable stats) because null here is ambiguous — "analysis not run"
+    versus a genuine zero — so a companion code disambiguates, mirroring the
+    MCP nightly-summary null-with-reason convention.
+    """
 
     oai: float | None = None
     cai: float | None = None
@@ -613,16 +619,39 @@ class DayDetail(DayListItem):
     obstructive_apneas: int = 0
     central_apneas: int = 0
     hypopneas: int = 0
-    reras: int = 0
+    reras: int = Field(
+        default=0,
+        description="Device-reported RERA count for the night (from the machine).",
+    )
     # Nightly breath-analysis proxy metrics, sourced read-time from
-    # BreathService (same path as the MCP nightly summary).  Null with a
-    # *_reason code (e.g. "analysis_not_run") when breath analysis is absent or
-    # the nightly lookup fails — day detail never fails on missing analysis.
-    fl_class_ge4_pct: float | None = None
+    # BreathService (same path as the MCP nightly summary).  Reason semantics:
+    # an ordinary un-analyzed night (sessions present, none with an OK analysis)
+    # is null with "not_available"; a lookup failure (no sessions for the
+    # device, breath-table DB error, device resolution declining) is null with
+    # "analysis_not_run".  Day detail never fails on missing breath analysis.
+    fl_class_ge4_pct: float | None = Field(
+        default=None,
+        description=(
+            "Percent of rule-classified breaths flagged flow-class >= 4 "
+            "(experimental SNORE flow-limitation proxy)."
+        ),
+    )
     fl_class_ge4_pct_reason: str | None = None
-    rera_index: float | None = None
+    rera_index: float | None = Field(
+        default=None,
+        description=(
+            "Experimental SNORE RERA-proxy events per therapy hour "
+            "(FL-run proxy, not device-reported)."
+        ),
+    )
     rera_index_reason: str | None = None
-    rera_count: int | None = None
+    rera_count: int | None = Field(
+        default=None,
+        description=(
+            "Experimental SNORE RERA-proxy count from flow-limitation runs "
+            "ending in a recovery breath — distinct from device-reported `reras`."
+        ),
+    )
     rera_count_reason: str | None = None
     session_ids: list[int] = Field(default_factory=list)
     health_sleep: HealthNightSummaryRead | None = None
