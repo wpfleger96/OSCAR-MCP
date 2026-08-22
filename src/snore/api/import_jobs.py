@@ -193,7 +193,6 @@ class ImportJob(JobRecordBase[JobState]):
     """Represents a single import operation with full lifecycle management."""
 
     _TERMINAL_STATES = TERMINAL_STATES
-    _ACTIVE_STATES = ACTIVE_STATES
 
     job_type: JobType
     target_profile_id: int | None = None  # The profile data lands in.
@@ -578,9 +577,10 @@ class ImportJob(JobRecordBase[JobState]):
 
 # _jobs and _lock are the store's live objects: app.py startup-resume and tests
 # mutate _jobs directly, so both names must alias the store-visible dict/lock.
+# Alias in place only — never rebind store.jobs/store.lock (see JobStore docstring).
 _store: JobStore[ImportJob] = JobStore()
-_jobs = _store._jobs
-_lock = _store._lock
+_jobs = _store.jobs
+_lock = _store.lock
 
 # Admission counters: per-user active count and global active count.
 # "Active" = PENDING_UPLOAD + PENDING + RUNNING (capacity_held=True).
@@ -716,11 +716,14 @@ def get_live_spool_dirs() -> frozenset[Path]:
 
 
 def cancel_job(job_id: str) -> bool:
-    """Cancel a job. Returns True if the job existed and was not already terminal."""
-    job = get_job(job_id)
-    if job is None:
-        return False
-    return job.try_cancel()
+    """Cancel a job. Returns True if the job existed and was not already terminal.
+
+    Flipping job state via the store is sufficient — no queue eviction needed.
+    ImportJob.try_cancel eagerly terminalizes a still-queued job, and the worker
+    loop's try_start gate skips (and cleans up) any terminal entry when it is
+    later dequeued, so leaving the queued reference in the FIFO is harmless.
+    """
+    return _store.cancel(job_id)
 
 
 def shutdown(timeout: float = 10.0) -> list[str]:

@@ -10,7 +10,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from snore.api.import_jobs import ImportJob, JobState, JobType, create_job
-from snore.api.import_worker import _run_health_import, _run_import, _run_rescan
+from snore.api.import_worker import (
+    _run_health_import,
+    _run_import,
+    _run_rescan,
+)
 from snore.services.schemas import ImportResult
 
 _PATCH_UPSERT = patch(
@@ -123,3 +127,101 @@ class TestTerminalExtraShape:
         assert "analysis_job_id" not in data
         assert "analysis_queued" not in data
         assert "result" in data
+
+
+class TestRunJobCancelAndErrorBranches:
+    """The three non-happy-path branches _run_job routes cancellation and
+    failure through, verified end-to-end (payload + terminal state)."""
+
+    def test_early_cancel_yields_cancel_payload_not_error(self, tmp_path):
+        """Cancellation detected during acquire raises _CancelledEarly, which
+        _finish turns into the CANCELLED payload — never an _client_safe_error
+        "error" message."""
+        (tmp_path / "data.bin").write_bytes(b"x")
+        job = create_job(JobType.UPLOAD, owner_user_id=1, temp_dir=tmp_path)
+        job.target_profile_id = 42
+        job._cancel_flag = True  # cancellation requested before import commits
+
+        with (
+            _PATCH_UPSERT,
+            _PATCH_RELEASE,
+            _PATCH_SHUTDOWN,
+            patch(
+                "snore.api.import_worker.ImportService.detect_sources"
+            ) as mock_detect,
+            patch(
+                "snore.api.import_worker.ImportService.import_sources",
+                new_callable=AsyncMock,
+            ) as mock_import,
+        ):
+            _run_import(job, tmp_path)
+
+        assert job.state == JobState.CANCELLED
+        # Early cancel fires before any source detection or import work.
+        mock_detect.assert_not_called()
+        mock_import.assert_not_called()
+        data = _terminal_data(job)
+        assert data["message"] == "Cancelled"
+        # Import never committed, so no import_result is embedded.
+        assert "import_committed" not in data
+
+    def test_post_import_cancel_marks_cancelled_with_committed_result(self, tmp_path):
+        """Cancellation that lands after the import commits still yields CANCELLED,
+        and the payload carries the committed import result."""
+        (tmp_path / "data.bin").write_bytes(b"x")
+        job = create_job(JobType.UPLOAD, owner_user_id=1, temp_dir=tmp_path)
+        job.target_profile_id = 42
+
+        async def _import_then_cancel(*_args, **_kwargs):
+            job._cancel_flag = True  # cancelled after the heavy import returns
+            return _fake_import_result()
+
+        with (
+            _PATCH_UPSERT,
+            _PATCH_RELEASE,
+            _PATCH_SHUTDOWN,
+            patch(
+                "snore.api.import_worker.ImportService.detect_sources",
+                return_value=[MagicMock()],
+            ),
+            patch(
+                "snore.api.import_worker.ImportService.import_sources",
+                side_effect=_import_then_cancel,
+            ),
+            patch("snore.api.analysis_jobs.enqueue") as mock_enqueue,
+        ):
+            _run_import(job, tmp_path)
+
+        assert job.state == JobState.CANCELLED
+        mock_enqueue.assert_not_called()  # cancel short-circuits before analysis
+        data = _terminal_data(job)
+        assert data["message"] == "Cancelled"
+        assert data["import_committed"] is True
+
+    def test_exception_yields_error_terminal_with_redacted_path(self, tmp_path):
+        """A failure during import ends FAILED with a client-safe message that
+        strips filesystem paths."""
+        (tmp_path / "data.bin").write_bytes(b"x")
+        job = create_job(JobType.UPLOAD, owner_user_id=1, temp_dir=tmp_path)
+        job.target_profile_id = 42
+
+        with (
+            _PATCH_UPSERT,
+            _PATCH_RELEASE,
+            _PATCH_SHUTDOWN,
+            patch(
+                "snore.api.import_worker.ImportService.detect_sources",
+                return_value=[MagicMock()],
+            ),
+            patch(
+                "snore.api.import_worker.ImportService.import_sources",
+                new_callable=AsyncMock,
+                side_effect=ValueError("parse failed at /var/spool/secret/file.edf"),
+            ),
+        ):
+            _run_import(job, tmp_path)
+
+        assert job.state == JobState.FAILED
+        data = _terminal_data(job)
+        assert "/var/spool/secret" not in data["message"]
+        assert "[path redacted]" in data["message"]

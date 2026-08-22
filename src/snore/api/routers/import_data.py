@@ -22,6 +22,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from snore.api.deps import ActorDep, get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
+    TERMINAL_STATES,
     ImportJob,
     JobState,
     JobType,
@@ -869,7 +870,9 @@ async def list_pipeline_jobs(
         )
 
     stmt = terminal_records_query(
-        models.ImportJobRecord, actor.user_id, ["succeeded", "failed", "cancelled"]
+        models.ImportJobRecord,
+        actor.user_id,
+        [s.value for s in TERMINAL_STATES],
     )
     db_records = (await db.execute(stmt)).scalars().all()
 

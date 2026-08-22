@@ -234,9 +234,10 @@ class AnalysisJob(JobRecordBase[AnalysisJobState]):
 _queue: collections.deque[AnalysisJob] = collections.deque()
 # _all_jobs and _lock are the store's live objects: tests clear _all_jobs
 # directly and the module fuses its condition onto the store lock.
+# Alias in place only — never rebind store.jobs/store.lock (see JobStore docstring).
 _store: JobStore[AnalysisJob] = JobStore()
-_all_jobs = _store._jobs
-_lock = _store._lock
+_all_jobs = _store.jobs
+_lock = _store.lock
 _condition = threading.Condition(_lock)
 
 _worker_threads: list[threading.Thread] = []

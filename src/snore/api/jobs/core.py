@@ -30,6 +30,7 @@ import logging
 import threading
 import time
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,18 +50,17 @@ class JobRecordBase[StateT: Enum]:
     """Lock/state/cancel/timestamp core shared by every in-memory job.
 
     Subclasses declare their own ``_state`` field (with the concrete enum type
-    and initial value) plus the ``_TERMINAL_STATES`` / ``_ACTIVE_STATES`` class
-    attributes the state properties read.  ``_state`` stays a plain, settable
-    dataclass field — tests assign it directly and startup-resume rewrites it.
+    and initial value) plus the ``_TERMINAL_STATES`` class attribute the state
+    properties read.  ``_state`` stays a plain, settable dataclass field — tests
+    assign it directly and startup-resume rewrites it.
 
     Every accessor snapshots under ``_lock``.  Subclasses that notify observers
     MUST snapshot the observer list under the lock and deliver outside it; no
     method here calls out while holding the lock.
     """
 
-    # Overridden by each subclass with its concrete enum frozensets.
+    # Overridden by each subclass with its concrete terminal-state frozenset.
     _TERMINAL_STATES: ClassVar[frozenset[Any]] = frozenset()
-    _ACTIVE_STATES: ClassVar[frozenset[Any]] = frozenset()
 
     if TYPE_CHECKING:
         # Declared as a real dataclass field by each subclass (differing enum
@@ -159,31 +159,34 @@ class JobRecordBase[StateT: Enum]:
 class JobStore[J: JobRecordBase[Any]]:
     """The ``{job_id: job}`` dict + guarding lock shared by both pipelines.
 
-    ``_jobs`` and ``_lock`` are exposed as attributes so each module can bind
-    its historical module-level ``_jobs``/``_all_jobs`` and ``_lock`` names to
-    the SAME live objects — callers that mutate those globals directly (startup
-    resume, tests) keep working against the store-visible dict.
+    ``jobs`` and ``lock`` are public on purpose: each module binds its historical
+    module-level ``_jobs``/``_all_jobs`` and ``_lock`` names to these SAME live
+    objects, and callers that mutate them directly (startup resume, test reset
+    fixtures) depend on that identity.  Those callers may only mutate the dict
+    IN PLACE (``[...]=``, ``.pop()``, ``.clear()``) — never rebind
+    ``store.jobs`` or ``store.lock``, or the module aliases would silently point
+    at a dead object.
     """
 
     def __init__(self) -> None:
-        self._jobs: dict[str, J] = {}
-        self._lock = threading.Lock()
+        self.jobs: dict[str, J] = {}
+        self.lock = threading.Lock()
 
     def get(self, job_id: str) -> J | None:
-        with self._lock:
-            return self._jobs.get(job_id)
+        with self.lock:
+            return self.jobs.get(job_id)
 
     def add(self, job: J) -> None:
-        with self._lock:
-            self._jobs[job.job_id] = job
+        with self.lock:
+            self.jobs[job.job_id] = job
 
     def remove(self, job_id: str) -> J | None:
-        with self._lock:
-            return self._jobs.pop(job_id, None)
+        with self.lock:
+            return self.jobs.pop(job_id, None)
 
     def snapshot(self) -> list[J]:
-        with self._lock:
-            return list(self._jobs.values())
+        with self.lock:
+            return list(self.jobs.values())
 
     def list_visible_to(self, owner_user_id: int | None) -> list[J]:
         """Return jobs visible to *owner_user_id*.
@@ -204,8 +207,10 @@ class JobStore[J: JobRecordBase[Any]]:
     def cancel(self, job_id: str) -> bool:
         """Cancel a job. Returns True if it existed and was not already terminal.
 
-        Callers whose queue holds a separate reference (analysis) evict it
-        themselves under their own condition; this only flips the job state.
+        This only flips the job state via ``try_cancel``.  Pipelines that hold a
+        separate reference to the job in a work queue (analysis) MUST NOT use
+        this — they have to evict the queued reference under their own condition
+        first, so those modules keep their own ``cancel_job`` instead.
         """
         job = self.get(job_id)
         if job is None:
@@ -227,10 +232,10 @@ class JobStore[J: JobRecordBase[Any]]:
         Returns the ids removed so callers can log them.
         """
         now = time.monotonic()
-        with self._lock:
+        with self.lock:
             to_remove = [
                 jid
-                for jid, job in self._jobs.items()
+                for jid, job in self.jobs.items()
                 if job.is_terminal
                 and (reapable is None or reapable(job))
                 and (ta := terminal_at(job)) is not None
@@ -238,22 +243,22 @@ class JobStore[J: JobRecordBase[Any]]:
             ]
         removed: list[str] = []
         for jid in to_remove:
-            with self._lock:
-                if self._jobs.pop(jid, None) is not None:
+            with self.lock:
+                if self.jobs.pop(jid, None) is not None:
                     removed.append(jid)
         return removed
 
 
-def run_worker_loop(
+def run_worker_loop[T](
     stop_event: threading.Event,
     condition: threading.Condition,
-    queue: Any,
-    execute: Callable[[Any], None],
+    queue: deque[T],
+    execute: Callable[[T], None],
     *,
     is_deposed: Callable[[], bool] | None = None,
     on_idle: Callable[[], None] | None = None,
     after_execute: Callable[[], None] | None = None,
-    on_execute_error: Callable[[Any, BaseException], None] | None = None,
+    on_execute_error: Callable[[T, BaseException], None] | None = None,
 ) -> None:
     """Drive a persistent worker thread over *queue* until *stop_event* is set.
 
@@ -276,7 +281,7 @@ def run_worker_loop(
     while not stop_event.is_set():
         if is_deposed is not None and is_deposed():
             return
-        item: Any = None
+        item: T | None = None
         with condition:
             if not queue and not stop_event.is_set():
                 condition.wait(timeout=1.0)
