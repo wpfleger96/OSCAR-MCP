@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import warnings
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
@@ -65,6 +66,117 @@ def _percentile95(arr: np.ndarray) -> float | None:
         return None
     idx = min(int(len(arr) * 0.95), len(arr) - 1)
     return float(np.sort(arr)[idx])
+
+
+# Default FLG breakpoints for the AUC labels — the query-time tunables the
+# offline sweep harness re-scores around.  They live here (not the sweep module)
+# because ``score_fl_arrays`` is the single implementation of FL array scoring.
+FLG_AUC_LOW_THRESHOLD_DEFAULT = 0.25
+FLG_AUC_HIGH_THRESHOLD_DEFAULT = 0.50
+
+
+@dataclass(frozen=True)
+class FlArrayScores:
+    """Per-session FL scoring outputs from the pure ``score_fl_arrays`` core."""
+
+    n_breaths_compared: int
+    n_class_breaths_compared: int
+    spearman_flattening_r: float | None
+    spearman_flattening_p: float | None
+    spearman_flatness_r: float | None
+    spearman_flatness_p: float | None
+    auc_t25: float | None
+    auc_t50: float | None
+    spearman_class_weight_r: float | None
+    spearman_class_weight_p: float | None
+    auc_class_t25: float | None
+    auc_class_t50: float | None
+    snore_fl_95th: float | None
+    device_flg_95th: float | None
+
+
+def score_fl_arrays(
+    mid_insp_flattening: np.ndarray,
+    flatness_index: np.ndarray,
+    class_weight: np.ndarray,
+    rule_matched: np.ndarray,
+    breath_flg: np.ndarray,
+    session_flg_values: np.ndarray,
+    *,
+    flg_low_threshold: float = FLG_AUC_LOW_THRESHOLD_DEFAULT,
+    flg_high_threshold: float = FLG_AUC_HIGH_THRESHOLD_DEFAULT,
+) -> FlArrayScores | None:
+    """Score aligned per-breath FL arrays against the device FLG signal.
+
+    The pure scoring core shared by ``FlowLimitationValidator`` (via a thin
+    wrapper) and the offline threshold-sweep harness.  No DB or session
+    dependency: all inputs are parallel per-breath arrays.
+
+    Args:
+        mid_insp_flattening: per-breath ``mid_insp_flattening`` (inverse severity;
+            ~1.0 = unimpeded).  ``flattening_severity = 1 − mid_insp`` internally.
+        flatness_index: per-breath ``flatness_index`` (direct severity).
+        class_weight: per-breath 7-class severity weight, ``NaN`` where unknown.
+        rule_matched: per-breath bool; only rule-matched breaths enter the
+            class-weight correlation (fallback guesses are excluded).
+        breath_flg: per-breath FLG averaged over the breath window, ``NaN`` where
+            no FLG samples fell in the window.
+        session_flg_values: full-session clipped FLG samples, for the device 95th
+            percentile (intentionally asymmetric with the breath-aligned subset).
+        flg_low_threshold: FLG breakpoint for the low-threshold AUC labels.
+        flg_high_threshold: FLG breakpoint for the high-threshold AUC labels.
+
+    Returns:
+        ``FlArrayScores``, or ``None`` when no breath has an aligned FLG value
+        (the caller renders this as ``no_aligned_pairs``).
+    """
+    flattening_severity = 1.0 - mid_insp_flattening
+
+    valid = ~np.isnan(breath_flg)
+    if valid.sum() == 0:
+        return None
+
+    flg_valid = breath_flg[valid]
+    flat_sev_valid = flattening_severity[valid]
+    flatness_valid = flatness_index[valid]
+    n_compared = int(valid.sum())
+
+    spr_flat_r, spr_flat_p = spearman_or_none(flat_sev_valid, flg_valid)
+    spr_fi_r, spr_fi_p = spearman_or_none(flatness_valid, flg_valid)
+
+    auc_t25 = _auc_mwu(flat_sev_valid, flg_valid >= flg_low_threshold)
+    auc_t50 = _auc_mwu(flat_sev_valid, flg_valid >= flg_high_threshold)
+
+    # flow_class weight vs FLG — over rule-matched breaths with a known class.
+    class_mask = valid & rule_matched & ~np.isnan(class_weight)
+    n_class_compared = int(class_mask.sum())
+    weights_c = class_weight[class_mask]
+    flg_c = breath_flg[class_mask]
+    spr_cw_r, spr_cw_p = spearman_or_none(weights_c, flg_c)
+    auc_class_t25 = _auc_mwu(weights_c, flg_c >= flg_low_threshold)
+    auc_class_t50 = _auc_mwu(weights_c, flg_c >= flg_high_threshold)
+
+    # device_flg_95th uses all session FLG samples (full-session population);
+    # snore_fl_95th uses only the breath-aligned subset — intentionally asymmetric.
+    snore_95th = _percentile95(flat_sev_valid)
+    device_95th = _percentile95(session_flg_values)
+
+    return FlArrayScores(
+        n_breaths_compared=n_compared,
+        n_class_breaths_compared=n_class_compared,
+        spearman_flattening_r=spr_flat_r,
+        spearman_flattening_p=spr_flat_p,
+        spearman_flatness_r=spr_fi_r,
+        spearman_flatness_p=spr_fi_p,
+        auc_t25=auc_t25,
+        auc_t50=auc_t50,
+        spearman_class_weight_r=spr_cw_r,
+        spearman_class_weight_p=spr_cw_p,
+        auc_class_t25=auc_class_t25,
+        auc_class_t50=auc_class_t50,
+        snore_fl_95th=snore_95th,
+        device_flg_95th=device_95th,
+    )
 
 
 class FlowLimitationValidator:
@@ -238,42 +350,17 @@ class FlowLimitationValidator:
             flg_values.astype(np.float64),
         )
 
-        # Direct severity: 1 − mid_insp_flattening
-        flattening_severity = 1.0 - mid_insp
-
-        # Drop NaN (no FLG samples in window)
-        valid = ~np.isnan(breath_flg)
-        if valid.sum() == 0:
+        # 7. Metrics — delegate to the pure array-in scoring core.
+        scores = score_fl_arrays(
+            mid_insp,
+            flatness,
+            class_weight,
+            rule_matched,
+            breath_flg,
+            flg_values,
+        )
+        if scores is None:
             return _skip("no_aligned_pairs", has_flg=True)
-
-        flg_valid = breath_flg[valid]
-        flat_sev_valid = flattening_severity[valid]
-        flatness_valid = flatness[valid]
-
-        n_compared = int(valid.sum())
-
-        # 7. Metrics
-        spr_flat_r, spr_flat_p = spearman_or_none(flat_sev_valid, flg_valid)
-        spr_fi_r, spr_fi_p = spearman_or_none(flatness_valid, flg_valid)
-
-        labels_t25 = flg_valid >= 0.25
-        labels_t50 = flg_valid >= 0.50
-        auc_t25 = _auc_mwu(flat_sev_valid, labels_t25)
-        auc_t50 = _auc_mwu(flat_sev_valid, labels_t50)
-
-        # flow_class weight vs FLG — over rule-matched breaths with a known class.
-        class_mask = valid & rule_matched & ~np.isnan(class_weight)
-        n_class_compared = int(class_mask.sum())
-        weights_c = class_weight[class_mask]
-        flg_c = breath_flg[class_mask]
-        spr_cw_r, spr_cw_p = spearman_or_none(weights_c, flg_c)
-        auc_class_t25 = _auc_mwu(weights_c, flg_c >= 0.25)
-        auc_class_t50 = _auc_mwu(weights_c, flg_c >= 0.50)
-
-        # device_flg_95th uses all session FLG samples (full-session population);
-        # snore_fl_95th uses only the breath-aligned subset — intentionally asymmetric.
-        snore_95th = _percentile95(flat_sev_valid)
-        device_95th = _percentile95(flg_values)
 
         return FlSessionValidation(
             session_id=session.id,
@@ -282,21 +369,21 @@ class FlowLimitationValidator:
             parser_version=parser_version,
             has_flg_waveform=True,
             skipped_reason=None,
-            n_breaths_compared=n_compared,
-            low_sample_warning=n_compared < 20,
-            n_class_breaths_compared=n_class_compared,
-            spearman_flattening_r=spr_flat_r,
-            spearman_flattening_p=spr_flat_p,
-            spearman_flatness_r=spr_fi_r,
-            spearman_flatness_p=spr_fi_p,
-            auc_t25=auc_t25,
-            auc_t50=auc_t50,
-            spearman_class_weight_r=spr_cw_r,
-            spearman_class_weight_p=spr_cw_p,
-            auc_class_t25=auc_class_t25,
-            auc_class_t50=auc_class_t50,
-            snore_fl_95th=snore_95th,
-            device_flg_95th=device_95th,
+            n_breaths_compared=scores.n_breaths_compared,
+            low_sample_warning=scores.n_breaths_compared < 20,
+            n_class_breaths_compared=scores.n_class_breaths_compared,
+            spearman_flattening_r=scores.spearman_flattening_r,
+            spearman_flattening_p=scores.spearman_flattening_p,
+            spearman_flatness_r=scores.spearman_flatness_r,
+            spearman_flatness_p=scores.spearman_flatness_p,
+            auc_t25=scores.auc_t25,
+            auc_t50=scores.auc_t50,
+            spearman_class_weight_r=scores.spearman_class_weight_r,
+            spearman_class_weight_p=scores.spearman_class_weight_p,
+            auc_class_t25=scores.auc_class_t25,
+            auc_class_t50=scores.auc_class_t50,
+            snore_fl_95th=scores.snore_fl_95th,
+            device_flg_95th=scores.device_flg_95th,
         )
 
     @staticmethod
