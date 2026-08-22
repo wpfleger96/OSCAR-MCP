@@ -223,7 +223,9 @@ def export_rera_report_csv(report: ReraValidationReport, output_path: Path) -> N
     ]
 
     def _fmt(v: float | None) -> str:
-        return "" if v is None else f"{v:.4f}"
+        # Full round-trippable precision — tiny magnitudes (proxy precision ~1e-3)
+        # must not be rounded away in the data export.
+        return "" if v is None else repr(v)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="") as f:

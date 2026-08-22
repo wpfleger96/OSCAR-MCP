@@ -21,6 +21,27 @@ from snore.cli.decorators import (
 from snore.cli.display import console, err_console, print_footer, print_header
 
 
+def _fmt_sig(v: float | None, *, na: str = "N/A") -> str:
+    """Adaptive formatting so tiny magnitudes stay visible.
+
+    The chance-precision floor (~4e-5) and proxy precision (~1e-3) collapse to
+    ``0.000`` at fixed 3 decimals — comparing floor vs precision is the whole
+    point of the field, so render small values with more decimals or in
+    scientific notation.  The report model and JSON/CSV exports keep the full
+    float; this only affects the terminal display.
+    """
+    if v is None:
+        return na
+    if v == 0.0:
+        return "0"
+    a = abs(v)
+    if a >= 0.1:
+        return f"{v:.3f}"
+    if a >= 1e-3:
+        return f"{v:.4f}"
+    return f"{v:.2e}"
+
+
 @click.command()
 @date_range_options_required
 @click.option(
@@ -81,8 +102,7 @@ def validate_rera(
 
                 agg = report.aggregate
 
-                def _fmt_r(v: float | None) -> str:
-                    return f"{v:.3f}" if v is not None else "N/A"
+                _fmt_r = _fmt_sig
 
                 print_footer()
                 print_header("RERA VALIDATION REPORT")
@@ -140,30 +160,45 @@ def validate_rera(
                         f"{_fmt_r(agg.mean_proxy_f1)}"
                     )
 
-                scored = [s for s in report.sessions if s.skipped_reason is None]
+                # Most-informative rows lead: most machine RE first.
+                scored = sorted(
+                    (s for s in report.sessions if s.skipped_reason is None),
+                    key=lambda s: s.machine_re_count,
+                    reverse=True,
+                )
+                _table_cap = 20
                 if scored:
-                    console.print("\nScored sessions (amplitude / proxy):")
+                    shown = scored[:_table_cap]
+                    if len(scored) > _table_cap:
+                        header = (
+                            f"\nScored sessions (top {_table_cap} of {len(scored)} "
+                            "by machine RE; amplitude / proxy):"
+                        )
+                    else:
+                        header = (
+                            f"\nScored sessions ({len(scored)}; amplitude / proxy):"
+                        )
+                    console.print(header)
                     console.print(
                         f"{'Date':<12} {'ID':<6} {'RE':<4} "
-                        f"{'aSens':<7} {'aPrec':<7} {'pSens':<7} {'pPrec':<7}"
+                        f"{'aSens':<9} {'aPrec':<9} {'pSens':<9} {'pPrec':<9}"
                     )
                     print_footer()
-                    for s in scored[:10]:
-
-                        def _fv(v: float | None) -> str:
-                            return f"{v:.3f}" if v is not None else " N/A"
-
+                    for s in shown:
                         console.print(
                             f"{s.date:<12} "
                             f"{s.session_id:<6} "
                             f"{s.machine_re_count:<4} "
-                            f"{_fv(s.amplitude_sensitivity):<7} "
-                            f"{_fv(s.amplitude_precision):<7} "
-                            f"{_fv(s.proxy_sensitivity):<7} "
-                            f"{_fv(s.proxy_precision):<7}"
+                            f"{_fmt_sig(s.amplitude_sensitivity, na='N/A'):<9} "
+                            f"{_fmt_sig(s.amplitude_precision, na='N/A'):<9} "
+                            f"{_fmt_sig(s.proxy_sensitivity, na='N/A'):<9} "
+                            f"{_fmt_sig(s.proxy_precision, na='N/A'):<9}"
                         )
-                    if len(scored) > 10:
-                        console.print(f"... and {len(scored) - 10} more sessions")
+                    if len(scored) > _table_cap:
+                        console.print(
+                            f"... {len(scored) - _table_cap} more scored sessions "
+                            "not shown (use --export for the full set)"
+                        )
 
                 if export:
                     export_path = Path(export)

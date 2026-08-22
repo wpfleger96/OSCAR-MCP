@@ -225,8 +225,11 @@ async def _run_apple(
 ) -> BaseModel:
     from snore.validation import AppleCrossValidator  # noqa: PLC0415
 
+    device_id = params.get("device_id")
     return await AppleCrossValidator(db, profile_id).validate_date_range(
-        date_from=date_from, date_to=date_to
+        date_from=date_from,
+        date_to=date_to,
+        device_id=device_id if device_id is None else int(device_id),
     )
 
 
@@ -236,7 +239,15 @@ def _params_apple(request_params: dict[str, Any] | None) -> dict[str, Any]:
     # Night-level correlation over already-computed nightly summaries; the only
     # query-time knob is the minimum paired-night count below which the Spearman
     # correlation is reported as insufficient rather than computed.
-    return {"min_pairs": _MIN_PAIRS}
+    params: dict[str, Any] = {"min_pairs": _MIN_PAIRS}
+    # Pinning the SNORE device changes which nights are resolved (and which
+    # degrade to device_ambiguous), so a pinned run must not dedup onto an
+    # unpinned one.  Include device_id only when supplied — omitting it keeps
+    # the key identical to the pre-pinning behavior for the common case.
+    device_id = (request_params or {}).get("device_id")
+    if device_id is not None:
+        params["device_id"] = int(device_id)
+    return params
 
 
 register(
