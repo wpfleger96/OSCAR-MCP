@@ -132,7 +132,7 @@ def _render_table(result: SweepResult, top: int) -> None:
 )
 @click.option(
     "--top",
-    type=int,
+    type=click.IntRange(min=1),
     default=15,
     show_default=True,
     help="Number of top-ranked rows to display (export always writes all)",
@@ -195,6 +195,13 @@ def sweep_thresholds(
             knob = _OPTION_TO_KNOB[opt_name]
             if knob in grid:
                 grid[knob] = values
+
+        empty_knobs = [knob for knob, vals in grid.items() if not vals]
+        if empty_knobs:
+            raise click.ClickException(
+                f"Empty parameter grid: no values for {', '.join(empty_knobs)}. "
+                "Provide at least one value per swept knob."
+            )
 
         async with open_db_session(db) as async_db:
             try:
