@@ -18,7 +18,7 @@ from snore.analysis.shared.versioning import (
 from snore.database import models
 
 from ._core import _BreathServiceCore
-from .algorithms import _iter_fl_run_recoveries
+from .algorithms import iter_fl_run_recoveries
 from .dtos import (
     FindWindowsResult,
     SessionCoverage,
@@ -490,7 +490,7 @@ class WindowsMixin(_BreathServiceCore):
         ) in self._iter_session_breaths(
             session_ids, session_starts, ar_by_session, ar_status_by_session
         ):
-            for run_start, run_last, recovery_idx in _iter_fl_run_recoveries(
+            for run_start, run_last, recovery_idx in iter_fl_run_recoveries(
                 breath_rows,
                 fl_class_threshold=opts.fl_class_threshold,
                 min_fl_run_length=opts.min_fl_run_length,
@@ -539,7 +539,7 @@ class WindowsMixin(_BreathServiceCore):
     ) -> list[WindowResult]:
         """Build FL_RUN_ENDING_IN_RECOVERY windows — RERA-proxy: runs of ≥N consecutive
         FL breaths ending in a recovery breath (analysis-time flag OR the
-        self-contained v2 criterion; see _iter_fl_run_recoveries)."""
+        self-contained v2 criterion; see iter_fl_run_recoveries)."""
 
         def window_for(
             breath_rows: Sequence[Any], run_start: int, run_last: int, recovery_idx: int
