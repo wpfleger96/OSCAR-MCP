@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import csv
 
-from datetime import date
+from datetime import date, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
 
+from snore.services.analysis_facade import AnalysisFacade
+from snore.services.health_service import HealthService
 from snore.validation.fl_validator import auc_severity_vs_flg, score_fl_arrays
 from snore.validation.rera_validator import (
     build_proxy_breath_rows,
@@ -30,6 +33,7 @@ from snore.validation.sweep import (
     enumerate_grid,
     evaluate_grid,
     export_sweep_csv,
+    load_sweep_data,
 )
 
 # ---------------------------------------------------------------------------
@@ -442,3 +446,206 @@ class TestExportSweepCsv:
         # The cell round-trips back to the exact float — full precision preserved.
         assert float(rows[0]["objective"]) == result.rows[0].objective
         assert rows[0]["objective"] == repr(result.rows[0].objective)
+
+
+# ---------------------------------------------------------------------------
+# Load-once loaders (mock DB) — the only DB-touching code in the harness
+# ---------------------------------------------------------------------------
+
+
+def _algo_versions_json() -> dict:
+    from snore.analysis.shared.versioning import (
+        AlgorithmIdentity,
+        AlgoVersions,
+        AnalysisRunMetadata,
+    )
+
+    return AlgoVersions(
+        identity=AlgorithmIdentity.current(),
+        run=AnalysisRunMetadata(primary_mode="aasm", modes=["aasm"]),
+    ).model_dump()
+
+
+def _analysis_row(ar_id: int = 99) -> MagicMock:
+    """AnalysisResult mock BreathService classifies as OK (current identity)."""
+    row = MagicMock()
+    row.engine_versions_json = _algo_versions_json()
+    row.id = ar_id
+    return row
+
+
+def _session_row(session_id: int = 1, duration_seconds: float = 28800.0) -> MagicMock:
+    row = MagicMock()
+    row.id = session_id
+    row.start_time = datetime(2025, 1, 1, 22, 0, 0)
+    row.duration_seconds = duration_seconds
+    return row
+
+
+def _waveform_blob(ts: list[float], vs: list[float]) -> bytes:
+    return (
+        np.column_stack([np.array(ts, np.float32), np.array(vs, np.float32)])
+        .astype(np.float32)
+        .tobytes()
+    )
+
+
+def _flg_breath(start: float, end: float, mid_insp: float) -> MagicMock:
+    b = MagicMock()
+    b.start_offset_s = start
+    b.end_offset_s = end
+    b.mid_insp_flattening = mid_insp
+    return b
+
+
+def _proxy_breath_row(
+    flow_class: int | None,
+    is_recovery: bool | None,
+    peak: float | None,
+    start: float,
+) -> MagicMock:
+    b = MagicMock()
+    b.flow_class = flow_class
+    b.is_recovery_breath = is_recovery
+    b.peak_flow_lpm = peak
+    b.start_offset_s = start
+    return b
+
+
+def _result_scalars_all(rows: list) -> MagicMock:
+    res = MagicMock()
+    res.scalars.return_value.all.return_value = rows
+    return res
+
+
+def _result_scalars_first(row: object) -> MagicMock:
+    res = MagicMock()
+    res.scalars.return_value.first.return_value = row
+    return res
+
+
+def _result_all(rows: list) -> MagicMock:
+    res = MagicMock()
+    res.all.return_value = rows
+    return res
+
+
+class TestLoadSweepData:
+    """Drive the DB loaders through the public load_sweep_data entry point."""
+
+    @pytest.mark.asyncio
+    async def test_flg_assembles_valid_arrays(self, mock_db_session):
+        # Two breath windows over a covering FLG waveform.
+        ts = [0.0, 2.0, 4.0, 6.0]
+        vs = [0.1, 0.3, 0.5, 0.7]
+        waveform = MagicMock()
+        waveform.data_blob = _waveform_blob(ts, vs)
+        waveform.sample_count = 4
+        breaths = [_flg_breath(0.0, 4.0, 0.9), _flg_breath(4.0, 8.0, 0.5)]
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                _result_scalars_all([_session_row(1)]),
+                _result_scalars_first(waveform),
+                _result_scalars_first(_analysis_row(99)),
+                _result_scalars_all(breaths),
+            ]
+        )
+        data = await load_sweep_data(
+            mock_db_session, 1, "2025-01-01", "2025-01-31", "flg"
+        )
+        assert len(data.flg_sessions) == 1
+        s = data.flg_sessions[0]
+        assert s.session_id == 1
+        # Breath 0 [0,4): mean(0.1,0.3)=0.2; breath 1 [4,8): mean(0.5,0.7)=0.6.
+        np.testing.assert_allclose(s.flg_valid, [0.2, 0.6], atol=1e-6)
+        # severity = 1 - mid_insp = [0.1, 0.5].
+        np.testing.assert_allclose(s.flattening_severity_valid, [0.1, 0.5], atol=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_flg_silently_drops_unscoreable_session(self, mock_db_session):
+        # Session 1 scoreable; session 2 has no FLG waveform → walrus-dropped.
+        ts = [0.0, 2.0, 4.0, 6.0]
+        vs = [0.1, 0.3, 0.5, 0.7]
+        waveform = MagicMock()
+        waveform.data_blob = _waveform_blob(ts, vs)
+        waveform.sample_count = 4
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                _result_scalars_all([_session_row(1), _session_row(2)]),
+                _result_scalars_first(waveform),
+                _result_scalars_first(_analysis_row(99)),
+                _result_scalars_all([_flg_breath(0.0, 4.0, 0.8)]),
+                _result_scalars_first(None),  # session 2: no waveform row
+            ]
+        )
+        data = await load_sweep_data(
+            mock_db_session, 1, "2025-01-01", "2025-01-31", "flg"
+        )
+        assert [s.session_id for s in data.flg_sessions] == [1]
+
+    @pytest.mark.asyncio
+    async def test_apple_assembles_rows_and_loads_breathing_disturbance(
+        self, mock_db_session
+    ):
+        rows = [
+            _proxy_breath_row(4, False, 20.0, 0.0),
+            _proxy_breath_row(4, False, 20.0, 2.0),
+            _proxy_breath_row(1, True, 40.0, 4.0),
+        ]
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                _result_scalars_all([_session_row(1, duration_seconds=28800.0)]),
+                _result_scalars_first(_analysis_row(99)),
+                _result_all(rows),
+            ]
+        )
+        with patch.object(
+            HealthService,
+            "get_breathing_disturbance_by_night",
+            AsyncMock(return_value={date(2025, 1, 1): 3.0}),
+        ):
+            data = await load_sweep_data(
+                mock_db_session, 1, "2025-01-01", "2025-01-31", "apple"
+            )
+        assert len(data.proxy_sessions) == 1
+        s = data.proxy_sessions[0]
+        assert [b.flow_class for b in s.proxy_rows] == [4, 4, 1]
+        assert s.start_offset_s == [0.0, 2.0, 4.0]
+        assert s.duration_hours == pytest.approx(8.0)
+        assert s.machine_starts == []  # apple target loads no machine RE
+        assert data.apple_bd_by_night == {date(2025, 1, 1): 3.0}
+
+    @pytest.mark.asyncio
+    async def test_re_target_extracts_machine_starts(self, mock_db_session):
+        rows = [_proxy_breath_row(4, False, 20.0, 0.0)]
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                _result_scalars_all([_session_row(1)]),
+                _result_scalars_first(_analysis_row(99)),
+                _result_all(rows),
+            ]
+        )
+        with (
+            patch.object(
+                AnalysisFacade,
+                "get_analysis_result",
+                AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "snore.validation.sweep.convert_machine_reras",
+                return_value=[MagicMock(start_time=12.5), MagicMock(start_time=30.0)],
+            ),
+        ):
+            data = await load_sweep_data(
+                mock_db_session, 1, "2025-01-01", "2025-01-31", "re"
+            )
+        assert len(data.proxy_sessions) == 1
+        assert data.proxy_sessions[0].machine_starts == [12.5, 30.0]
+        assert data.apple_bd_by_night == {}  # RE target loads no Apple data
+
+    @pytest.mark.asyncio
+    async def test_unknown_target_raises(self, mock_db_session):
+        with pytest.raises(ValueError, match="unknown sweep target"):
+            await load_sweep_data(
+                mock_db_session, 1, "2025-01-01", "2025-01-31", "bogus"
+            )
