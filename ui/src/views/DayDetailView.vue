@@ -71,12 +71,12 @@
                 glossary-key="rera_index"
             />
             <StatCard
-                v-if="data.rera_count != null || data.rera_reason != null"
+                v-if="data.rera_count != null || data.rera_count_reason != null"
                 label="RERA Proxy Count"
                 :value="data.rera_count ?? null"
-                :reason="data.rera_reason"
+                :reason="data.rera_count_reason"
                 :decimals="0"
-                glossary-key="rera_index"
+                glossary-key="rera_count"
             />
         </div>
 

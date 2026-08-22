@@ -94,6 +94,11 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         short: "Estimated respiratory effort-related arousals per hour, from SNORE's flow-limitation-run RERA proxy.",
         long: "SNORE's experimental breath analysis; useful for night-to-night trends, not a clinically validated measurement. Distinct from the device RERA count and the analysis-time RERA detector.",
     },
+    rera_count: {
+        label: 'RERA Proxy Count',
+        short: "Total respiratory effort-related arousals detected across the night by SNORE's flow-limitation-run RERA proxy (a count, not a per-hour rate).",
+        long: "SNORE's experimental breath analysis; useful for night-to-night trends, not a clinically validated measurement. Distinct from the device RERA count and the analysis-time RERA detector.",
+    },
     event_type_oa: {
         label: 'OA — Obstructive Apnea',
         short: 'Airway blocked by soft-tissue collapse; airflow drops ≥90% for ≥10 s while breathing effort continues.',

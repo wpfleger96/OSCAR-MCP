@@ -61,7 +61,7 @@ export type DayDetail = Schemas['DayDetail'] & {
     rera_index?: number | null
     rera_index_reason?: string | null
     rera_count?: number | null
-    rera_reason?: string | null
+    rera_count_reason?: string | null
 }
 export type DateListResponse = Schemas['DateListResponse']
 

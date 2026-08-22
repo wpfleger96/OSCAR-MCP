@@ -149,6 +149,15 @@ const NULL_REASON_LABELS: Record<string, string> = {
     table_missing: 'Breath-level data has not been stored for this night.',
     duration_zero: 'Therapy duration was zero, so a per-hour rate is undefined.',
     no_sessions: 'No therapy sessions were recorded for this night.',
+    primary_mode_mismatch:
+        "This night's therapy mode did not match the primary mode for this period.",
+    smart_ramp_indeterminate:
+        'The smart-ramp period could not be determined, so sleep onset could not be excluded.',
+    segments_unknown: 'The breath segments for this night could not be determined.',
+    multi_session_ambiguity:
+        'Multiple overlapping sessions made this metric ambiguous for the night.',
+    unvalidated_device: 'This device model has not been validated for this metric.',
+    rx_changed_within_epoch: 'The prescription changed partway through this period.',
 }
 
 /** Humanize a NullReason code into a sentence for tooltips; null when absent. */
