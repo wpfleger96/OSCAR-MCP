@@ -183,66 +183,58 @@ async def list_analysis_jobs(
     actor: RequireAuth,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AnalysisJobsListResponse:
-    from sqlalchemy import or_, select  # noqa: PLC0415
-
+    from snore.api.jobs import merge_job_lists, terminal_records_query  # noqa: PLC0415
     from snore.api.schemas import AnalysisJobStatus  # noqa: PLC0415
     from snore.database import models  # noqa: PLC0415
 
-    result: list[AnalysisJobStatus] = []
+    in_memory: list[AnalysisJobStatus] = []
     in_memory_ids: set[str] = set()
 
     for aj in analysis_jobs.list_jobs(owner_user_id=actor.user_id):
         in_memory_ids.add(aj.job_id)
-        result.append(AnalysisJobStatus.model_validate(aj.to_dict()))
+        in_memory.append(AnalysisJobStatus.model_validate(aj.to_dict()))
 
-    # Historical terminal records from the database.
-    stmt = (
-        select(models.AnalysisJobRecord)
-        .where(
-            or_(
-                models.AnalysisJobRecord.owner_user_id == actor.user_id,
-                models.AnalysisJobRecord.owner_user_id.is_(None),
-            ),
-            models.AnalysisJobRecord.state.in_(
-                [s.value for s in analysis_jobs.TERMINAL_STATES]
-            ),
+    def _db_row_to_status(rec: models.AnalysisJobRecord) -> AnalysisJobStatus:
+        return AnalysisJobStatus(
+            job_id=rec.job_id,
+            state=rec.state,
+            source=rec.source,
+            session_count=len(rec.session_ids_json) if rec.session_ids_json else 0,
+            progress_completed=rec.progress_completed,
+            progress_total=rec.progress_total,
+            error_message=rec.error_message,
+            created_at=rec.created_at.timestamp(),
+            started_at=rec.started_at.timestamp() if rec.started_at else None,
+            finished_at=rec.finished_at.timestamp() if rec.finished_at else None,
+            owner_user_id=rec.owner_user_id,
         )
-        .order_by(models.AnalysisJobRecord.created_at.desc())
-        .limit(50)
+
+    stmt = terminal_records_query(
+        models.AnalysisJobRecord,
+        actor.user_id,
+        [s.value for s in analysis_jobs.TERMINAL_STATES],
     )
-    for rec in (await db.execute(stmt)).scalars():
-        if rec.job_id in in_memory_ids:
-            continue
-        result.append(
-            AnalysisJobStatus(
-                job_id=rec.job_id,
-                state=rec.state,
-                source=rec.source,
-                session_count=len(rec.session_ids_json) if rec.session_ids_json else 0,
-                progress_completed=rec.progress_completed,
-                progress_total=rec.progress_total,
-                error_message=rec.error_message,
-                created_at=rec.created_at.timestamp(),
-                started_at=rec.started_at.timestamp() if rec.started_at else None,
-                finished_at=rec.finished_at.timestamp() if rec.finished_at else None,
-                owner_user_id=rec.owner_user_id,
-            )
-        )
+    db_rows = (await db.execute(stmt)).scalars().all()
 
-    result.sort(key=lambda j: j.created_at, reverse=True)
-    return AnalysisJobsListResponse(jobs=result)
+    merged = merge_job_lists(
+        in_memory,
+        in_memory_ids,
+        db_rows,
+        to_status=_db_row_to_status,
+        sort_key=lambda j: j.created_at,
+    )
+    return AnalysisJobsListResponse(jobs=merged)
 
 
 @router.delete("/analysis/jobs/{job_id}", status_code=204)
 async def cancel_analysis_job(job_id: str, actor: RequireWritable) -> None:
-    job = analysis_jobs.get_job(job_id)
-    if job is None or (
-        job.owner_user_id is not None and job.owner_user_id != actor.user_id
-    ):
-        # 404 instead of 403 — no information leak about other users' job IDs.
-        raise HTTPException(status_code=404, detail="Job not found")
-    if not analysis_jobs.cancel_job(job_id):
-        raise HTTPException(
-            status_code=409,
-            detail="Analysis job is already finished and cannot be cancelled",
-        )
+    from snore.api.jobs import cancel_or_409, owned_or_404  # noqa: PLC0415
+
+    owned_or_404(
+        analysis_jobs.get_job(job_id), actor.user_id, not_found_detail="Job not found"
+    )
+    cancel_or_409(
+        analysis_jobs.cancel_job,
+        job_id,
+        already_detail="Analysis job is already finished and cannot be cancelled",
+    )

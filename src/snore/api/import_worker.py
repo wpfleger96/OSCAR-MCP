@@ -76,54 +76,47 @@ async def _upsert_job_record(job: ImportJob) -> None:
 
     Called at each state transition (PENDING → RUNNING → terminal) so a server
     restart can detect orphaned in-progress rows and mark them failed.  Uses
-    SQLite's ``ON CONFLICT DO UPDATE`` so the same job_id is never double-inserted
-    regardless of how many times this function is called.
+    SQLite's ``ON CONFLICT DO UPDATE`` (via ``jobs.durability``) so the same
+    job_id is never double-inserted regardless of how many times this is called.
     """
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # noqa: PLC0415
-
+    from snore.api.jobs.durability import upsert_job_record  # noqa: PLC0415
     from snore.database.models import ImportJobRecord  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
 
     now = datetime.now(UTC)
     finished = job.finished_at_wall if job.is_terminal else None
+    spool_dir_path = str(job.temp_dir) if job.temp_dir is not None else None
 
-    stmt = (
-        sqlite_insert(ImportJobRecord)
-        .values(
-            job_id=job.job_id,
-            job_type=job.job_type.value,
-            owner_user_id=job.owner_user_id,
-            target_profile_id=job.target_profile_id,
-            state=job.state.value,
-            file_count=job.file_count,
-            sessions_imported=job.sessions_imported,
-            import_result_json=job.import_result_snapshot,
-            error_message=job.error_message,
-            analysis_queued=job.analysis_queued,
-            spool_dir_path=str(job.temp_dir) if job.temp_dir is not None else None,
-            created_at=job.created_at_wall,
-            finished_at=finished,
-            updated_at=now,
-        )
-        .on_conflict_do_update(
-            index_elements=["job_id"],
-            set_={
-                "state": job.state.value,
-                "file_count": job.file_count,
-                "sessions_imported": job.sessions_imported,
-                "import_result_json": job.import_result_snapshot,
-                "error_message": job.error_message,
-                "analysis_queued": job.analysis_queued,
-                "spool_dir_path": str(job.temp_dir)
-                if job.temp_dir is not None
-                else None,
-                "finished_at": finished,
-                "updated_at": now,
-            },
-        )
+    values = {
+        "job_id": job.job_id,
+        "job_type": job.job_type.value,
+        "owner_user_id": job.owner_user_id,
+        "target_profile_id": job.target_profile_id,
+        "state": job.state.value,
+        "file_count": job.file_count,
+        "sessions_imported": job.sessions_imported,
+        "import_result_json": job.import_result_snapshot,
+        "error_message": job.error_message,
+        "analysis_queued": job.analysis_queued,
+        "spool_dir_path": spool_dir_path,
+        "created_at": job.created_at_wall,
+        "finished_at": finished,
+        "updated_at": now,
+    }
+    await upsert_job_record(
+        ImportJobRecord,
+        values=values,
+        update_fields=[
+            "state",
+            "file_count",
+            "sessions_imported",
+            "import_result_json",
+            "error_message",
+            "analysis_queued",
+            "spool_dir_path",
+            "finished_at",
+            "updated_at",
+        ],
     )
-    async with session_scope(immediate=True) as db:
-        await db.execute(stmt)
 
 
 # ---------------------------------------------------------------------------

@@ -346,49 +346,43 @@ def _reap_terminal() -> None:
 
 async def _upsert_analysis_record(job: AnalysisJob) -> None:
     """Upsert the current job state to the database for crash-recovery durability."""
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # noqa: PLC0415
-
+    from snore.api.jobs.durability import upsert_job_record  # noqa: PLC0415
     from snore.database.models import AnalysisJobRecord  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
 
     now = datetime.now(UTC)
     finished = job.finished_at_wall if job.is_terminal else None
 
-    stmt = (
-        sqlite_insert(AnalysisJobRecord)
-        .values(
-            job_id=job.job_id,
-            source=job.source.value,
-            profile_id=job.profile_id,
-            owner_user_id=job.owner_user_id,
-            session_ids_json=job.session_ids,
-            modes=job.modes,
-            primary_mode=job.primary_mode,
-            store_results=job.store_results,
-            state=job.state.value,
-            progress_completed=job.progress_completed,
-            progress_total=job.progress_total,
-            error_message=job.error_message,
-            created_at=job.created_at_wall,
-            started_at=job.started_at_wall,
-            finished_at=finished,
-            updated_at=now,
-        )
-        .on_conflict_do_update(
-            index_elements=["job_id"],
-            set_={
-                "state": job.state.value,
-                "progress_completed": job.progress_completed,
-                "progress_total": job.progress_total,
-                "error_message": job.error_message,
-                "started_at": job.started_at_wall,
-                "finished_at": finished,
-                "updated_at": now,
-            },
-        )
+    values = {
+        "job_id": job.job_id,
+        "source": job.source.value,
+        "profile_id": job.profile_id,
+        "owner_user_id": job.owner_user_id,
+        "session_ids_json": job.session_ids,
+        "modes": job.modes,
+        "primary_mode": job.primary_mode,
+        "store_results": job.store_results,
+        "state": job.state.value,
+        "progress_completed": job.progress_completed,
+        "progress_total": job.progress_total,
+        "error_message": job.error_message,
+        "created_at": job.created_at_wall,
+        "started_at": job.started_at_wall,
+        "finished_at": finished,
+        "updated_at": now,
+    }
+    await upsert_job_record(
+        AnalysisJobRecord,
+        values=values,
+        update_fields=[
+            "state",
+            "progress_completed",
+            "progress_total",
+            "error_message",
+            "started_at",
+            "finished_at",
+            "updated_at",
+        ],
     )
-    async with session_scope(immediate=True) as db:
-        await db.execute(stmt)
 
 
 async def _run_analysis(job: AnalysisJob) -> None:
