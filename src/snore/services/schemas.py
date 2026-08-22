@@ -239,6 +239,10 @@ class SessionStatistics(BaseModel):
     oai: float | None = None
     cai: float | None = None
     hi: float | None = None
+    ahi_device: float | None = None
+    oai_device: float | None = None
+    cai_device: float | None = None
+    hi_device: float | None = None
     obstructive_apneas: int | None = None
     central_apneas: int | None = None
     mixed_apneas: int | None = None

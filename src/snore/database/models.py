@@ -815,6 +815,13 @@ class Statistics(Base):
     hi: Mapped[float | None] = mapped_column(Float)
     rei: Mapped[float | None] = mapped_column(Float)
 
+    # Device-reported (ResMed STR) indices, preserved alongside the computed
+    # ahi/oai/cai/hi above (which finalize_statistics recomputes from events).
+    ahi_device: Mapped[float | None] = mapped_column(Float)
+    oai_device: Mapped[float | None] = mapped_column(Float)
+    cai_device: Mapped[float | None] = mapped_column(Float)
+    hi_device: Mapped[float | None] = mapped_column(Float)
+
     pressure_min: Mapped[float | None] = mapped_column(Float)
     pressure_max: Mapped[float | None] = mapped_column(Float)
     pressure_median: Mapped[float | None] = mapped_column(Float)

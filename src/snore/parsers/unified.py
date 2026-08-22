@@ -162,6 +162,21 @@ class SessionStatistics(BaseModel):
     hi: float | None = Field(default=None, ge=0, description="Hypopnea Index")
     rei: float | None = Field(default=None, ge=0, description="Respiratory Event Index")
 
+    # Device-reported (ResMed STR) indices, preserved alongside the computed
+    # ahi/oai/cai/hi above (which finalize_statistics recomputes from events).
+    ahi_device: float | None = Field(
+        default=None, ge=0, description="Device-reported AHI (from STR)"
+    )
+    oai_device: float | None = Field(
+        default=None, ge=0, description="Device-reported OAI (from STR)"
+    )
+    cai_device: float | None = Field(
+        default=None, ge=0, description="Device-reported CAI (from STR)"
+    )
+    hi_device: float | None = Field(
+        default=None, ge=0, description="Device-reported HI (from STR)"
+    )
+
     pressure_min: float | None = Field(default=None, description="Minimum pressure")
     pressure_max: float | None = Field(default=None, description="Maximum pressure")
     pressure_median: float | None = Field(default=None, description="Median pressure")
