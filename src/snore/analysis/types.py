@@ -8,6 +8,25 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from snore.analysis.modes.types import ModeResult
+from snore.constants import (
+    EVENT_TYPE_CENTRAL_APNEA,
+    EVENT_TYPE_CLEAR_AIRWAY,
+    EVENT_TYPE_HYPOPNEA,
+    EVENT_TYPE_MIXED_APNEA,
+    EVENT_TYPE_OBSTRUCTIVE_APNEA,
+)
+
+# Machine event types counted toward the machine-reported AHI (apneas +
+# hypopneas).  RERAs are excluded — for CPAP data RDI equals AHI.
+_MACHINE_AHI_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        EVENT_TYPE_OBSTRUCTIVE_APNEA,
+        EVENT_TYPE_CENTRAL_APNEA,
+        EVENT_TYPE_CLEAR_AIRWAY,
+        EVENT_TYPE_MIXED_APNEA,
+        EVENT_TYPE_HYPOPNEA,
+    }
+)
 
 
 class AnalysisEvent(BaseModel):
@@ -35,6 +54,21 @@ class AnalysisEvent(BaseModel):
     baseline_flow: float | None = Field(
         default=None, description="Baseline flow (L/min)"
     )
+
+
+def _machine_ahi_rdi(
+    machine_events: list[AnalysisEvent], session_duration_hours: float
+) -> tuple[float | None, float | None]:
+    """Compute the machine-reported AHI/RDI over waveform-coverage hours.
+
+    Returns ``(None, None)`` when there are no machine events.  RDI equals AHI
+    for CPAP data because RERA scoring requires EEG.
+    """
+    if not machine_events:
+        return None, None
+    count = sum(1 for e in machine_events if e.event_type in _MACHINE_AHI_EVENT_TYPES)
+    ahi = count / session_duration_hours if session_duration_hours > 0 else 0.0
+    return ahi, ahi
 
 
 class AnalysisResult(BaseModel):
@@ -74,6 +108,24 @@ class AnalysisResult(BaseModel):
     )
     timestamp_start: float = Field(default=0.0, description="Session start timestamp")
     timestamp_end: float = Field(default=0.0, description="Session end timestamp")
+
+    @classmethod
+    def from_stored_json(cls, data: dict[str, Any]) -> AnalysisResult:
+        """Deserialize a stored ``programmatic_result_json`` payload.
+
+        Analyses persisted before ``machine_ahi``/``machine_rdi`` were added to
+        this DTO have no such keys, so ``model_validate`` defaults them to
+        ``None`` even when the run had machine events.  Backfill them here from
+        the still-present machine events and session duration so stored analyses
+        render the same index a fresh run would.  Freshly computed payloads
+        already carry the fields and are left untouched.
+        """
+        result = cls.model_validate(data)
+        if result.machine_ahi is None and result.machine_events:
+            result.machine_ahi, result.machine_rdi = _machine_ahi_rdi(
+                result.machine_events, result.session_duration_hours
+            )
+        return result
 
 
 # ---------------------------------------------------------------------------

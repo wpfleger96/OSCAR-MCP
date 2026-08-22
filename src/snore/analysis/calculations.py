@@ -182,10 +182,21 @@ def _get_period_boundaries(
     return periods
 
 
-def _field_avg(days: list[models.Day], field: str) -> float | None:
-    """Extract field average helper for period statistics."""
-    values = [getattr(day, field) for day in days if getattr(day, field) is not None]
-    return sum(values) / len(values) if values else None
+def _usage_weighted_avg(days: list[models.Day], field: str) -> float | None:
+    """Usage-weighted average of a Day field, weighted by ``total_therapy_hours``.
+
+    Mirrors ``calculate_average_ahi`` and day aggregation: nights with more
+    mask-on time count proportionally more, and days without the value or
+    without positive therapy hours are excluded.  Returns None when no day
+    qualifies.
+    """
+    return weighted_mean(
+        (getattr(day, field), day.total_therapy_hours)
+        for day in days
+        if getattr(day, field) is not None
+        and day.total_therapy_hours is not None
+        and day.total_therapy_hours > 0
+    )
 
 
 def calculate_period_statistics(
@@ -239,22 +250,16 @@ def calculate_period_statistics(
         avg_ahi = calculate_average_ahi(days_in_period)
         median_ahi = calculate_median_ahi(days_in_period)
 
-        avg_pressure = weighted_mean(
-            (day.pressure_median, day.total_therapy_hours)
-            for day in days_in_period
-            if day.pressure_median is not None
-            and day.total_therapy_hours is not None
-            and day.total_therapy_hours > 0
-        )
-        avg_leak = _field_avg(days_in_period, "leak_median")
-        avg_spo2 = _field_avg(days_in_period, "spo2_mean")
+        avg_pressure = _usage_weighted_avg(days_in_period, "pressure_median")
+        avg_leak = _usage_weighted_avg(days_in_period, "leak_median")
+        avg_spo2 = _usage_weighted_avg(days_in_period, "spo2_mean")
 
         spo2_mins = [day.spo2_min for day in days_in_period if day.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
 
-        avg_oai = _field_avg(days_in_period, "oai")
-        avg_cai = _field_avg(days_in_period, "cai")
-        avg_hi = _field_avg(days_in_period, "hi")
+        avg_oai = _usage_weighted_avg(days_in_period, "oai")
+        avg_cai = _usage_weighted_avg(days_in_period, "cai")
+        avg_hi = _usage_weighted_avg(days_in_period, "hi")
 
         rera_rates = [
             day.reras / day.total_therapy_hours

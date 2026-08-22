@@ -63,13 +63,7 @@ from snore.analysis.types import (
     AnalysisEvent,
     AnalysisResult,
     ComputedBreath,
-)
-from snore.constants import (
-    EVENT_TYPE_CENTRAL_APNEA,
-    EVENT_TYPE_CLEAR_AIRWAY,
-    EVENT_TYPE_HYPOPNEA,
-    EVENT_TYPE_MIXED_APNEA,
-    EVENT_TYPE_OBSTRUCTIVE_APNEA,
+    _machine_ahi_rdi,
 )
 from snore.constants import BreathSegmentationConstants as BSC
 from snore.constants import FlowLimitationConstants as FLC
@@ -89,33 +83,6 @@ __all__ = [
 ]
 
 _RAMP_KEYS: frozenset[str] = frozenset({"ramp_enabled", "ramp_time", "smart_ramp"})
-
-# Machine event types counted toward the machine-reported AHI (apneas +
-# hypopneas).  RERAs are excluded — for CPAP data RDI equals AHI.
-_MACHINE_AHI_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        EVENT_TYPE_OBSTRUCTIVE_APNEA,
-        EVENT_TYPE_CENTRAL_APNEA,
-        EVENT_TYPE_CLEAR_AIRWAY,
-        EVENT_TYPE_MIXED_APNEA,
-        EVENT_TYPE_HYPOPNEA,
-    }
-)
-
-
-def _machine_ahi_rdi(
-    machine_events: list[AnalysisEvent], session_duration_hours: float
-) -> tuple[float | None, float | None]:
-    """Compute the machine-reported AHI/RDI over waveform-coverage hours.
-
-    Returns ``(None, None)`` when there are no machine events.  RDI equals AHI
-    for CPAP data because RERA scoring requires EEG.
-    """
-    if not machine_events:
-        return None, None
-    count = sum(1 for e in machine_events if e.event_type in _MACHINE_AHI_EVENT_TYPES)
-    ahi = count / session_duration_hours if session_duration_hours > 0 else 0.0
-    return ahi, ahi
 
 
 # Optional waveform channels fetched by ``load_session_inputs_raw``:
@@ -885,7 +852,7 @@ class AnalysisService:
         if not analysis:
             return None
 
-        return AnalysisResult.model_validate(analysis.programmatic_result_json)
+        return AnalysisResult.from_stored_json(analysis.programmatic_result_json)
 
     async def store_result(
         self, computation: AnalysisComputation, processing_time_ms: int

@@ -1,11 +1,15 @@
 """Unit tests for cli/display/analysis rendering helpers."""
 
 from io import StringIO
+from typing import Any
+
+import pytest
 
 from rich.console import Console
 from rich.table import Table
 
 from snore.analysis.shared.types import ApneaEvent, HypopneaEvent, RERAEvent
+from snore.analysis.types import AnalysisResult
 from snore.cli.display.analysis import create_validation_table, format_event_list
 from snore.services.schemas import EventValidationResult
 
@@ -70,6 +74,65 @@ def _rera(start: float) -> RERAEvent:
         confidence=0.7,
         baseline_flow=50.0,
     )
+
+
+class TestAnalysisResultFromStoredJson:
+    """Backfill of machine_ahi/machine_rdi for analyses stored before the fields existed."""
+
+    @staticmethod
+    def _stored(machine_events: list[dict[str, Any]]) -> dict[str, Any]:
+        """A stored programmatic_result_json WITHOUT the machine_ahi/rdi keys."""
+        return {
+            "session_id": 1,
+            "session_duration_hours": 8.0,
+            "total_breaths": 100,
+            "machine_events": machine_events,
+            "mode_results": {},
+        }
+
+    def test_backfills_when_events_present_and_keys_absent(self):
+        """Old payload with events → AHI/RDI computed from events over duration."""
+        events = [
+            {
+                "event_type": t,
+                "start_time": float(i),
+                "duration": 10.0,
+                "source": "machine",
+            }
+            for i, t in enumerate(["OA", "OA", "OA", "H", "RE"])
+        ]
+        result = AnalysisResult.from_stored_json(self._stored(events))
+
+        # 4 counting events (RERA "RE" excluded) over 8.0 h → 0.5; RDI == AHI.
+        assert result.machine_ahi == pytest.approx(0.5)
+        assert result.machine_rdi == pytest.approx(0.5)
+
+    def test_stays_none_when_no_events(self):
+        """Old payload with no machine events → machine_ahi/rdi remain None."""
+        result = AnalysisResult.from_stored_json(self._stored([]))
+
+        assert result.machine_ahi is None
+        assert result.machine_rdi is None
+
+    def test_does_not_overwrite_present_value(self):
+        """Fresh payload already carrying machine_ahi is left untouched."""
+        payload = self._stored(
+            [
+                {
+                    "event_type": "OA",
+                    "start_time": 0.0,
+                    "duration": 10.0,
+                    "source": "machine",
+                }
+            ]
+        )
+        payload["machine_ahi"] = 42.0
+        payload["machine_rdi"] = 42.0
+
+        result = AnalysisResult.from_stored_json(payload)
+
+        assert result.machine_ahi == pytest.approx(42.0)
+        assert result.machine_rdi == pytest.approx(42.0)
 
 
 class TestFormatEventList:

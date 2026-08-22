@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 from snore.database.models import Day, Statistics
 from snore.database.models import Session as SessionModel
 from snore.metrics import DAY_METRIC_STAT_COLUMNS, DayAgg
+from snore.therapy_hours import TherapyHoursBasis, therapy_hours
 from snore.utils.stats import weighted_mean
 
 
@@ -110,7 +111,12 @@ class DayManager:
         """
         if stats is not None and stats.usage_hours is not None:
             return stats.usage_hours
-        return (session.duration_seconds or 0) / 3600
+        return (
+            therapy_hours(
+                TherapyHoursBasis.SESSION_SPAN, span_seconds=session.duration_seconds
+            )
+            or 0.0
+        )
 
     @classmethod
     def _weighted_average(

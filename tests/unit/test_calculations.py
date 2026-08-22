@@ -571,6 +571,75 @@ class TestNewPeriodFields:
         assert len(result2) == 1
         assert result2[0].avg_rera == pytest.approx(0.0, abs=0.01)
 
+    def test_oai_cai_hi_usage_weighted(self, db_session, test_device):
+        """avg_oai/cai/hi weight each day by total_therapy_hours, not equally."""
+        days = [
+            self._make_day(
+                db_session,
+                test_device,
+                date(2024, 7, 1),
+                oai=10.0,
+                cai=20.0,
+                hi=30.0,
+                total_therapy_hours=8.0,
+            ),
+            self._make_day(
+                db_session,
+                test_device,
+                date(2024, 7, 2),
+                oai=40.0,
+                cai=60.0,
+                hi=80.0,
+                total_therapy_hours=2.0,
+            ),
+        ]
+
+        result = calculate_period_statistics(days, "month")
+
+        assert len(result) == 1
+        p = result[0]
+        # Usage-weighted, not the unweighted means of 25/40/55.
+        assert p.avg_oai == pytest.approx((10 * 8 + 40 * 2) / 10.0)  # 16.0
+        assert p.avg_cai == pytest.approx((20 * 8 + 60 * 2) / 10.0)  # 28.0
+        assert p.avg_hi == pytest.approx((30 * 8 + 80 * 2) / 10.0)  # 40.0
+
+    def test_pressure_leak_spo2_usage_weighted(self):
+        """avg_pressure/leak/spo2 weight each day by total_therapy_hours."""
+
+        def _day(
+            day_date: date,
+            hours: float,
+            pressure: float,
+            leak: float,
+            spo2: float,
+        ) -> Day:
+            day = Day()
+            day.date = day_date
+            day.total_therapy_hours = hours
+            day.pressure_median = pressure
+            day.leak_median = leak
+            day.spo2_mean = spo2
+            day.spo2_min = None
+            day.ahi = None
+            day.oai = None
+            day.cai = None
+            day.hi = None
+            day.reras = None
+            return day
+
+        days = [
+            _day(date(2024, 7, 1), 8.0, 10.0, 5.0, 95.0),
+            _day(date(2024, 7, 2), 2.0, 15.0, 25.0, 90.0),
+        ]
+
+        result = calculate_period_statistics(days, "month")
+
+        assert len(result) == 1
+        p = result[0]
+        assert p.avg_pressure == pytest.approx((10 * 8 + 15 * 2) / 10.0)  # 11.0
+        assert p.avg_leak == pytest.approx((5 * 8 + 25 * 2) / 10.0)  # 9.0
+        assert p.avg_spo2 == pytest.approx((95 * 8 + 90 * 2) / 10.0)  # 94.0
+
     def test_new_fields_none_when_no_oai_cai_hi(self, db_session, test_device):
         """avg_oai/cai/hi are None when the underlying Day fields are all None."""
         day = self._make_day(
