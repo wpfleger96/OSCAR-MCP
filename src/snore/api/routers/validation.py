@@ -12,6 +12,7 @@ from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import (
     BreathTrendsValidationRequest,
     FlValidationRequest,
+    ReraValidationRequest,
     ValidationRequest,
     ValidationRunDetail,
     ValidationRunRequest,
@@ -26,6 +27,8 @@ from snore.validation import (
     BreathTrendsValidator,
     FlowLimitationValidator,
     FlValidationReport,
+    ReraValidationReport,
+    ReraValidator,
     ValidationReport,
 )
 
@@ -53,6 +56,19 @@ async def run_fl_validation(
     db: AsyncSession = Depends(get_db),
 ) -> FlValidationReport:
     validator = FlowLimitationValidator(db, actor.profile_id)
+    return await validator.validate_date_range(
+        date_from=body.from_date.isoformat(),
+        date_to=body.to_date.isoformat(),
+    )
+
+
+@router.post("/rera", response_model=ReraValidationReport)
+async def run_rera_validation(
+    body: ReraValidationRequest,
+    actor: RequireAuth,
+    db: AsyncSession = Depends(get_db),
+) -> ReraValidationReport:
+    validator = ReraValidator(db, actor.profile_id)
     return await validator.validate_date_range(
         date_from=body.from_date.isoformat(),
         date_to=body.to_date.isoformat(),

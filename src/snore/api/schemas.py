@@ -44,6 +44,7 @@ __all__ = [
     "ValidationRequest",
     "FlValidationRequest",
     "BreathTrendsValidationRequest",
+    "ReraValidationRequest",
     "EventItem",
     "DayDetail",
     "DayListItem",
@@ -193,6 +194,17 @@ class BreathTrendsValidationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_date_order(self) -> BreathTrendsValidationRequest:
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be >= from_date")
+        return self
+
+
+class ReraValidationRequest(BaseModel):
+    from_date: date
+    to_date: date
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> ReraValidationRequest:
         if self.to_date < self.from_date:
             raise ValueError("to_date must be >= from_date")
         return self
