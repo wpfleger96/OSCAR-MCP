@@ -812,6 +812,9 @@ async def list_pipeline_jobs(
                 stage=stage,
                 file_count=job.file_count,
                 created_at=job.created_at_wall.isoformat(),
+                started_at=job.started_at_wall.isoformat()
+                if job.started_at_wall
+                else None,
                 finished_at=job.finished_at_wall.isoformat()
                 if job.finished_at_wall
                 else None,
@@ -856,6 +859,9 @@ async def list_pipeline_jobs(
             stage=stage,
             file_count=rec.file_count,
             created_at=rec.created_at.isoformat(),
+            started_at=rec.started_at.isoformat()
+            if rec.started_at is not None
+            else None,
             finished_at=rec.finished_at.isoformat()
             if rec.finished_at is not None
             else None,

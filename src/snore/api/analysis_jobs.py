@@ -188,6 +188,11 @@ class AnalysisJob(JobRecordBase[AnalysisJobState]):
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serialisable snapshot of this job's state.
 
+        Timestamps are emitted as wall-clock epoch seconds (never the internal
+        ``time.monotonic()`` values used for ETA and TTL reaping) so this
+        in-memory path matches the DB-row path in the analysis router — feeding a
+        monotonic value to the client would render as a 1970-era date.
+
         eta_seconds is a linear extrapolation: (elapsed / done) * remaining.
         Early estimates can be imprecise; the value is clamped to zero so a
         race where progress_completed momentarily exceeds progress_total never
@@ -214,14 +219,11 @@ class AnalysisJob(JobRecordBase[AnalysisJobState]):
                 "progress_total": self._progress_total,
                 "eta_seconds": eta,
                 "error_message": self._error_message,
-                "created_at": self.created_at,
-                "started_at": self._started_at,
-                "finished_at": self._finished_at,
-                "created_at_wall": self.created_at_wall.isoformat(),
-                "started_at_wall": self._started_at_wall.isoformat()
+                "created_at": self.created_at_wall.timestamp(),
+                "started_at": self._started_at_wall.timestamp()
                 if self._started_at_wall
                 else None,
-                "finished_at_wall": self._finished_at_wall.isoformat()
+                "finished_at": self._finished_at_wall.timestamp()
                 if self._finished_at_wall
                 else None,
             }

@@ -3996,7 +3996,7 @@ export interface components {
          * PipelineJobStatus
          * @description Stitched view of one import job and its downstream analysis job.
          *
-         *     created_at and finished_at are ISO 8601 UTC datetime strings.
+         *     created_at, started_at, and finished_at are ISO 8601 UTC datetime strings.
          */
         PipelineJobStatus: {
             /** Analysis Job Id */
@@ -4024,6 +4024,8 @@ export interface components {
             sessions_imported: number | null
             /** Stage */
             stage: string
+            /** Started At */
+            started_at: string | null
             /** State */
             state: string
         }

@@ -60,6 +60,7 @@ function makeJob(overrides: Partial<PipelineJobStatus> = {}): PipelineJobStatus 
         stage: 'queued',
         file_count: 3,
         created_at: '2024-01-01T00:00:00+00:00',
+        started_at: null,
         finished_at: null,
         progress_message: null,
         sessions_imported: null,
