@@ -240,6 +240,9 @@ function createChart(): void {
                 stroke: colors.series,
                 width: 1,
                 fill: colors.fill,
+                // uPlot auto-shows point markers when visible samples are sparse, which
+                // makes the interim cache slice flash dots until the denser fetch lands.
+                points: { show: false },
             },
         ],
         hooks: {
