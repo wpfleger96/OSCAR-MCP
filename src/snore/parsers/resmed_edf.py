@@ -43,7 +43,6 @@ from snore.parsers.base import (
     ParserMetadata,
     RawFileManifest,
     build_root_metadata,
-    filter_units_by_date,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
 from snore.parsers.event_labels import EVENT_TYPE_MAP, FILTERED_ANNOTATIONS
@@ -163,6 +162,15 @@ class _PldSignal(NamedTuple):
     scale_factor: float | None = None
     exclude: tuple[str, ...] = ()
     warn_label: str | None = None
+
+
+class _ResmedParseContext(NamedTuple):
+    """Shared per-parse state passed to the ResMed parse_sessions hooks."""
+
+    device_info: DeviceInfo
+    str_series11: bool
+    str_settings_cache: dict[date, dict[str, float]] | None
+    str_summaries_cache: dict[date, dict[str, float]] | None
 
 
 class ResmedEDFParser(DeviceParser):
@@ -717,6 +725,10 @@ class ResmedEDFParser(DeviceParser):
     # device-local wall-clock and need no conversion.
     # ------------------------------------------------------------------
 
+    # A chain can be dropped by the ID-vs-contents date re-filter or a parse
+    # failure, so `limit` must count yielded sessions, not pre-slice nights.
+    _unit_may_yield_nothing = True
+
     def _resolve_units(
         self, path: Path, sort_by: str | None, timezone_name: str | None
     ) -> tuple[Path, list[tuple[str, str, dict[str, dict[str, Path]]]]]:
@@ -731,29 +743,29 @@ class ResmedEDFParser(DeviceParser):
         """Chain night-date ID drives range filtering (device-local already)."""
         return self._night_item_date(unit)
 
+    def _unit_label(self, unit: tuple[str, str, dict[str, dict[str, Path]]]) -> str:
+        """Failure-log id: the chain id (not the file-dict-bearing segments)."""
+        return f"chain {unit[1]}"
+
     def _build_context(
-        self,
-        path: Path,
-        root: Path,
-        units: list[tuple[str, str, dict[str, dict[str, Path]]]],
-        timezone_name: str | None,
-    ) -> dict[str, Any]:
+        self, root: Path, timezone_name: str | None
+    ) -> _ResmedParseContext:
         """Load per-parse device info, series-11 flag and STR caches once."""
         # Instance flag is also read by the sequential decode path
         # (_convert_str_to_therapy_settings), so set it here as before.
         self._str_series11 = self._detect_series11(root)
         settings_cache, summaries_cache = self._load_str_caches(root)
-        return {
-            "device_info": self.get_device_info(root),
-            "str_series11": self._str_series11,
-            "str_settings_cache": settings_cache,
-            "str_summaries_cache": summaries_cache,
-        }
+        return _ResmedParseContext(
+            device_info=self.get_device_info(root),
+            str_series11=self._str_series11,
+            str_settings_cache=settings_cache,
+            str_summaries_cache=summaries_cache,
+        )
 
     def _worker_dispatch(
         self,
         unit: tuple[str, str, dict[str, dict[str, Path]]],
-        ctx: dict[str, Any],
+        ctx: _ResmedParseContext,
         root: Path,
         date_from: str | None,
         date_to: str | None,
@@ -769,20 +781,20 @@ class ResmedEDFParser(DeviceParser):
             night_date,
             chain_id,
             segments,
-            ctx["device_info"],
+            ctx.device_info,
             root,
-            _slice_str_cache(ctx["str_settings_cache"], therapy_days),
-            _slice_str_cache(ctx["str_summaries_cache"], therapy_days),
+            _slice_str_cache(ctx.str_settings_cache, therapy_days),
+            _slice_str_cache(ctx.str_summaries_cache, therapy_days),
             date_from,
             date_to,
-            ctx["str_series11"],
+            ctx.str_series11,
         )
         return _resmed_parse_bundle_worker, args
 
     def _parse_unit_sequential(
         self,
         unit: tuple[str, str, dict[str, dict[str, Path]]],
-        ctx: dict[str, Any],
+        ctx: _ResmedParseContext,
         root: Path,
         date_from: str | None,
         date_to: str | None,
@@ -793,10 +805,10 @@ class ResmedEDFParser(DeviceParser):
             night_date,
             chain_id,
             segments,
-            ctx["device_info"],
+            ctx.device_info,
             root,
-            ctx["str_settings_cache"],
-            ctx["str_summaries_cache"],
+            ctx.str_settings_cache,
+            ctx.str_summaries_cache,
             date_from,
             date_to,
         )
@@ -846,17 +858,6 @@ class ResmedEDFParser(DeviceParser):
             night_items = list(chains)
 
         return path, night_items
-
-    def _filter_night_items(
-        self,
-        night_items: list[tuple[str, str, dict[str, dict[str, Path]]]],
-        date_from: str | None,
-        date_to: str | None,
-    ) -> list[tuple[str, str, dict[str, dict[str, Path]]]]:
-        """Filter chain items by date range based on their night-date IDs."""
-        return filter_units_by_date(
-            night_items, self._night_item_date, date_from, date_to
-        )
 
     @staticmethod
     def _night_item_date(

@@ -11,6 +11,7 @@ and implement these methods - the rest of the system automatically works.
 from __future__ import annotations
 
 import logging
+import os
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
@@ -241,6 +242,12 @@ class DeviceParser(ABC):
         """
         pass
 
+    #: Whether a single parse unit may yield no session (dropped by a
+    #: post-parse guard or a parse failure).  True selects the submit-all +
+    #: stop-after-``limit``-yields driver; False lets ``limit`` pre-slice the
+    #: sorted units up front for a bounded, deterministic first-N set.
+    _unit_may_yield_nothing: bool = True
+
     def parse_sessions(
         self,
         path: Path,
@@ -257,10 +264,17 @@ class DeviceParser(ABC):
 
         Template method shared by every parser: resolve the parse units, filter
         them by date, then run each either across the process pool (parallel and
-        more than one unit) or sequentially.  The parallel path yields exactly
-        ``limit`` sessions when set, cancelling remaining futures, and maps a
-        crashed worker pool to a RuntimeError.  Subclasses supply the
-        manufacturer-specific behavior via the hooks below.
+        more than one unit) or sequentially, mapping a crashed worker pool to a
+        RuntimeError.  Subclasses supply the manufacturer-specific behavior via
+        the hooks below.
+
+        ``limit`` is honored one of two ways, selected by
+        ``_unit_may_yield_nothing``: when a unit always yields exactly one
+        session (flag False) the sorted, filtered units are pre-sliced to the
+        first ``limit`` — bounded work, deterministic set; when a unit may yield
+        nothing (flag True) all units are submitted and the driver stops after
+        ``limit`` yields, cancelling the rest, since pre-slicing could
+        under-deliver.
 
         Args:
             path: Path to data directory/file
@@ -287,8 +301,10 @@ class DeviceParser(ABC):
         units = filter_units_by_date(
             units, lambda u: self._unit_date(u, timezone_name), date_from, date_to
         )
+        if limit is not None and not self._unit_may_yield_nothing:
+            units = units[:limit]
         total = len(units)
-        ctx = self._build_context(path, root, units, timezone_name)
+        ctx = self._build_context(root, timezone_name)
 
         sessions_yielded = 0
         completed = 0
@@ -300,7 +316,9 @@ class DeviceParser(ABC):
                 progress_callback(f"Parsing session {completed}/{total}...")
 
         if parallel and len(units) > 1:
-            logger.debug(f"Parsing {total} units in parallel")
+            logger.info(
+                f"Parsing {total} sessions in parallel with {os.cpu_count()} workers"
+            )
             futures: dict[Any, Any] = {}
             try:
                 pool = get_pool()
@@ -320,17 +338,13 @@ class DeviceParser(ABC):
                     except BrokenProcessPool:
                         raise
                     except Exception as e:
-                        logger.error(f"Failed to parse session: {e}")
+                        logger.error(
+                            f"Failed to parse {self._unit_label(futures[future])}: {e}"
+                        )
                         emit_progress()
                         continue
 
                     emit_progress()
-                    if session is None:
-                        continue
-
-                    session = self._postprocess_unit(
-                        session, futures[future], date_from, date_to
-                    )
                     if session is None:
                         continue
 
@@ -353,7 +367,7 @@ class DeviceParser(ABC):
                         unit, ctx, root, date_from, date_to
                     )
                 except Exception as e:
-                    logger.error(f"Failed to parse session: {e}")
+                    logger.error(f"Failed to parse {self._unit_label(unit)}: {e}")
                     emit_progress()
                     continue
 
@@ -385,9 +399,7 @@ class DeviceParser(ABC):
         """Return a unit's calendar date for range filtering, or None."""
 
     @abstractmethod
-    def _build_context(
-        self, path: Path, root: Any, units: list[Any], timezone_name: str | None
-    ) -> Any:
+    def _build_context(self, root: Any, timezone_name: str | None) -> Any:
         """Build the shared per-parse context passed to the per-unit hooks.
 
         Runs once after unit resolution and filtering; use it for work shared
@@ -420,20 +432,13 @@ class DeviceParser(ABC):
     ) -> UnifiedSession | None:
         """Parse ``unit`` in-process (sequential path); None drops the unit."""
 
-    def _postprocess_unit(
-        self,
-        session: UnifiedSession,
-        unit: Any,
-        date_from: str | None,
-        date_to: str | None,
-    ) -> UnifiedSession | None:
-        """Post-process a parallel-path result so both paths agree.
+    def _unit_label(self, unit: Any) -> str:
+        """Short identifier for ``unit`` used in failure logs.
 
-        Default passthrough; parsers whose sequential path applies an extra
-        guard override this to apply it to worker results too.  Returning None
-        drops the session.
+        Default is the raw unit; parsers override to return a bounded, readable
+        id rather than dumping a large unit structure.
         """
-        return session
+        return str(unit)
 
     def parse_single_session(
         self, path: Path, session_id: str

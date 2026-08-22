@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -99,6 +99,13 @@ def _oscar_parse_session_worker(
     return OscarDeviceParser()._parse_single_session(
         session_id, summary_path, events_path, device_info, base_path, timezone_name
     )
+
+
+class _OscarParseContext(NamedTuple):
+    """Shared per-parse state passed to the OSCAR parse_sessions hooks."""
+
+    device_info: DeviceInfo
+    timezone_name: str | None
 
 
 class OscarDeviceParser(DeviceParser):
@@ -268,10 +275,20 @@ class OscarDeviceParser(DeviceParser):
     # Each .000/.001 pair is one session; OSCAR already groups sessions.
     # ------------------------------------------------------------------
 
+    # Every OSCAR session yields exactly one UnifiedSession (no post-parse
+    # drop), so `limit` pre-slices the sorted units for a deterministic set.
+    _unit_may_yield_nothing = False
+
     def _resolve_units(
         self, path: Path, sort_by: str | None, timezone_name: str | None
     ) -> tuple[Path, list[tuple[int, Path | None, Path | None]]]:
-        """Resolve one OSCAR data root and its ordered session files."""
+        """Resolve one OSCAR data root and its ordered session files.
+
+        Single-root contract: one ``parse_sessions`` call parses one data root
+        (callers expand a multi-root path into one source per root).  If a path
+        resolves to several roots only the first is parsed and the rest are
+        logged; an empty resolution yields no units.
+        """
         path = Path(path)
 
         # Defense in depth: the name was validated at `snore profile
@@ -295,6 +312,19 @@ class OscarDeviceParser(DeviceParser):
                 raise ParserError("No OSCAR data found at path", self)
             roots_to_parse = self._data_roots
 
+        if not roots_to_parse:
+            return path, []
+
+        if len(roots_to_parse) > 1:
+            skipped = ", ".join(str(r.path) for r in roots_to_parse[1:])
+            logger.warning(
+                "OSCAR path resolved to %d data roots; parsing only %s and "
+                "skipping %s. Import one root at a time for full coverage.",
+                len(roots_to_parse),
+                roots_to_parse[0].path,
+                skipped,
+            )
+
         root = roots_to_parse[0].path
         session_files = self._find_session_files(root)
 
@@ -311,23 +341,23 @@ class OscarDeviceParser(DeviceParser):
         """Session-start epoch drives filtering with the same clock as parsing."""
         return _epoch_to_wall_clock(unit[0], timezone_name).date()
 
+    def _unit_label(self, unit: tuple[int, Path | None, Path | None]) -> str:
+        """Failure-log id: the session's epoch id."""
+        return f"session {unit[0]}"
+
     def _build_context(
-        self,
-        path: Path,
-        root: Path,
-        units: list[tuple[int, Path | None, Path | None]],
-        timezone_name: str | None,
-    ) -> dict[str, Any]:
+        self, root: Path, timezone_name: str | None
+    ) -> _OscarParseContext:
         """Device info plus the declared timezone, shared across all sessions."""
-        return {
-            "device_info": self.get_device_info(root),
-            "timezone_name": timezone_name,
-        }
+        return _OscarParseContext(
+            device_info=self.get_device_info(root),
+            timezone_name=timezone_name,
+        )
 
     def _worker_dispatch(
         self,
         unit: tuple[int, Path | None, Path | None],
-        ctx: dict[str, Any],
+        ctx: _OscarParseContext,
         root: Path,
         date_from: str | None,
         date_to: str | None,
@@ -338,16 +368,16 @@ class OscarDeviceParser(DeviceParser):
             session_id,
             summary_path,
             events_path,
-            ctx["device_info"],
+            ctx.device_info,
             root,
-            ctx["timezone_name"],
+            ctx.timezone_name,
         )
         return _oscar_parse_session_worker, args
 
     def _parse_unit_sequential(
         self,
         unit: tuple[int, Path | None, Path | None],
-        ctx: dict[str, Any],
+        ctx: _OscarParseContext,
         root: Path,
         date_from: str | None,
         date_to: str | None,
@@ -358,9 +388,9 @@ class OscarDeviceParser(DeviceParser):
             session_id,
             summary_path,
             events_path,
-            ctx["device_info"],
+            ctx.device_info,
             root,
-            ctx["timezone_name"],
+            ctx.timezone_name,
         )
 
     def _find_session_files(
