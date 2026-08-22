@@ -103,9 +103,6 @@ def test_resmed_broken_pool_raises_runtime_error():
         patch.object(
             parser, "_discover_session_files", return_value=(Path("/data"), nights)
         ),
-        patch.object(
-            parser, "_filter_night_items", side_effect=lambda items, *a: items
-        ),
         patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.base.get_pool", return_value=broken_pool),
@@ -120,7 +117,10 @@ def test_resmed_broken_pool_raises_runtime_error():
 
 
 def test_oscar_broken_pool_raises_runtime_error():
-    from snore.parsers.oscar_device import OscarDeviceParser
+    from snore.parsers.oscar_device import (
+        OscarDeviceParser,
+        _OscarParseContext,
+    )
 
     parser = OscarDeviceParser()
     device_info = MagicMock()
@@ -139,7 +139,9 @@ def test_oscar_broken_pool_raises_runtime_error():
         patch.object(
             parser,
             "_build_context",
-            return_value={"device_info": device_info, "timezone_name": None},
+            return_value=_OscarParseContext(
+                device_info=device_info, timezone_name=None
+            ),
         ),
         patch("snore.parsers.base.get_pool", return_value=broken_pool),
     ):
@@ -181,9 +183,6 @@ def test_resmed_generator_close_cancels_pending():
         patch.object(
             parser, "_discover_session_files", return_value=(Path("/data"), nights)
         ),
-        patch.object(
-            parser, "_filter_night_items", side_effect=lambda items, *a: items
-        ),
         patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.base.get_pool", return_value=mock_pool),
@@ -198,7 +197,10 @@ def test_resmed_generator_close_cancels_pending():
 
 def test_oscar_generator_close_cancels_pending():
     """Calling .close() on a live oscar generator triggers cancel_pending."""
-    from snore.parsers.oscar_device import OscarDeviceParser
+    from snore.parsers.oscar_device import (
+        OscarDeviceParser,
+        _OscarParseContext,
+    )
 
     parser = OscarDeviceParser()
     session_files = [
@@ -219,7 +221,9 @@ def test_oscar_generator_close_cancels_pending():
         patch.object(
             parser,
             "_build_context",
-            return_value={"device_info": device_info, "timezone_name": None},
+            return_value=_OscarParseContext(
+                device_info=device_info, timezone_name=None
+            ),
         ),
         patch("snore.parsers.base.get_pool", return_value=mock_pool),
     ):
@@ -256,9 +260,6 @@ def test_resmed_broken_pool_from_future_result_raises_runtime_error():
         patch.object(
             parser, "_discover_session_files", return_value=(Path("/data"), nights)
         ),
-        patch.object(
-            parser, "_filter_night_items", side_effect=lambda items, *a: items
-        ),
         patch.object(parser, "_load_str_caches", return_value=(None, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.base.get_pool", return_value=mock_pool),
@@ -271,7 +272,10 @@ def test_oscar_broken_pool_from_future_result_raises_runtime_error():
     """BrokenProcessPool from future.result() propagates as RuntimeError."""
     from concurrent.futures import Future
 
-    from snore.parsers.oscar_device import OscarDeviceParser
+    from snore.parsers.oscar_device import (
+        OscarDeviceParser,
+        _OscarParseContext,
+    )
 
     parser = OscarDeviceParser()
     device_info = MagicMock()
@@ -293,7 +297,9 @@ def test_oscar_broken_pool_from_future_result_raises_runtime_error():
         patch.object(
             parser,
             "_build_context",
-            return_value={"device_info": device_info, "timezone_name": None},
+            return_value=_OscarParseContext(
+                device_info=device_info, timezone_name=None
+            ),
         ),
         patch("snore.parsers.base.get_pool", return_value=mock_pool),
     ):
@@ -348,9 +354,6 @@ def test_parallel_submits_per_night_str_cache_slices():
     with (
         patch.object(
             parser, "_discover_session_files", return_value=(Path("/data"), nights)
-        ),
-        patch.object(
-            parser, "_filter_night_items", side_effect=lambda items, *a: items
         ),
         patch.object(
             parser, "_load_str_caches", return_value=(full_settings, full_summaries)
@@ -420,9 +423,6 @@ def test_absent_str_entry_submits_none_cache():
         patch.object(
             parser, "_discover_session_files", return_value=(Path("/data"), nights)
         ),
-        patch.object(
-            parser, "_filter_night_items", side_effect=lambda items, *a: items
-        ),
         patch.object(parser, "_load_str_caches", return_value=(full_settings, None)),
         patch.object(parser, "get_device_info", return_value=MagicMock()),
         patch("snore.parsers.base.get_pool", return_value=mock_pool),
@@ -445,3 +445,99 @@ def test_absent_str_entry_submits_none_cache():
     # Chain with an entry → single-entry slice.
     args_present = by_night["20250102"]
     assert args_present[6] == {d_known: {"pressure_min": 6.0}}
+
+
+# ---------------------------------------------------------------------------
+# limit semantics: OSCAR pre-slices (deterministic first-N); ResMed submits all
+# ---------------------------------------------------------------------------
+
+
+def test_oscar_limit_presubmits_only_first_n_sorted():
+    """OSCAR (_unit_may_yield_nothing False) pre-slices to `limit` before submit.
+
+    Every OSCAR session yields exactly one UnifiedSession, so bounding work up
+    front is safe and gives a deterministic first-N-sorted set — regression
+    guard against the submit-all driver over-parsing a large archive.
+    """
+    from snore.parsers.oscar_device import (
+        OscarDeviceParser,
+        _OscarParseContext,
+    )
+
+    parser = OscarDeviceParser()
+    device_info = MagicMock()
+    # Already sorted ascending, as _resolve_units returns them.
+    session_files = [
+        (sid, Path(f"/data/{sid}.000"), Path(f"/data/{sid}.001"))
+        for sid in (10, 20, 30, 40, 50)
+    ]
+
+    submitted_ids: list[int] = []
+
+    def fake_submit(fn, *args):
+        submitted_ids.append(args[0])
+        f: Future = Future()
+        f.set_result(_make_mock_session("20240101"))
+        return f
+
+    mock_pool = MagicMock()
+    mock_pool.submit.side_effect = fake_submit
+
+    with (
+        patch.object(
+            parser, "_resolve_units", return_value=(Path("/data"), session_files)
+        ),
+        patch.object(
+            parser,
+            "_build_context",
+            return_value=_OscarParseContext(
+                device_info=device_info, timezone_name=None
+            ),
+        ),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
+    ):
+        out = list(parser.parse_sessions(Path("/data"), limit=3, parallel=True))
+
+    assert submitted_ids == [10, 20, 30], (
+        "OSCAR must submit exactly the first N sorted units, not all of them"
+    )
+    assert len(out) == 3
+
+
+def test_resmed_limit_submits_all_then_stops_after_n_yields():
+    """ResMed (_unit_may_yield_nothing True) submits every night, stops after N.
+
+    A night can yield None (date re-filter / parse failure), so pre-slicing
+    would under-deliver; the driver must submit all and count yields.
+    """
+    from snore.parsers.resmed_edf import ResmedEDFParser
+
+    parser = ResmedEDFParser()
+    nights = [(f"2024010{i}", f"2024010{i}_000000", {}) for i in range(1, 5)]
+
+    submitted_nights: list[str] = []
+
+    def fake_submit(fn, *args):
+        submitted_nights.append(args[0])
+        f: Future = Future()
+        # First night yields nothing; the rest yield a session.
+        f.set_result(None if args[0] == "20240101" else _make_mock_session(args[0]))
+        return f
+
+    mock_pool = MagicMock()
+    mock_pool.submit.side_effect = fake_submit
+
+    with (
+        patch.object(
+            parser, "_discover_session_files", return_value=(Path("/data"), nights)
+        ),
+        patch.object(parser, "_load_str_caches", return_value=(None, None)),
+        patch.object(parser, "get_device_info", return_value=MagicMock()),
+        patch("snore.parsers.base.get_pool", return_value=mock_pool),
+    ):
+        out = list(parser.parse_sessions(Path("/data"), limit=2, parallel=True))
+
+    assert len(submitted_nights) == 4, (
+        "ResMed must submit every night up front, not pre-slice to the limit"
+    )
+    assert len(out) == 2, "limit counts yielded sessions, reaching past the None night"
