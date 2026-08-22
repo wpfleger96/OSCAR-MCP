@@ -10,22 +10,88 @@ and implement these methods - the rest of the system automatically works.
 
 from __future__ import annotations
 
+import logging
+import os
+
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
+from concurrent.futures import as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from snore.parsers.types import ParserMetadata
+from snore.parsers.types import DataRoot, ParserMetadata
 from snore.parsers.unified import DeviceInfo, UnifiedSession
+from snore.utils.parse_pool import cancel_pending, get_pool
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DeviceParser",
     "ParserDetectionResult",
     "ParserMetadata",
     "RawFileManifest",
+    "build_root_metadata",
+    "filter_units_by_date",
 ]
+
+
+def build_root_metadata(roots: list[DataRoot]) -> dict[str, Any]:
+    """Build the shared ``detect`` metadata dict from discovered data roots.
+
+    The first root supplies the primary fields; ``all_roots`` and
+    ``root_metadata`` describe every discovered root.  Both the ResMed and
+    OSCAR ``detect`` methods return this identical structure.
+    """
+    first = roots[0]
+    return {
+        "data_root": str(first.path),
+        "structure_type": first.structure_type,
+        "profile_name": first.profile_name,
+        "device_serial": first.device_serial,
+        "all_roots": [str(r.path) for r in roots],
+        "root_metadata": {
+            str(r.path): {
+                "profile_name": r.profile_name,
+                "structure_type": r.structure_type,
+                "device_serial": r.device_serial,
+            }
+            for r in roots
+        },
+    }
+
+
+def filter_units_by_date[Unit](
+    units: list[Unit],
+    key_date_fn: Callable[[Unit], date | None],
+    date_from: str | None,
+    date_to: str | None,
+) -> list[Unit]:
+    """Filter parse units to those whose key date is within the range.
+
+    ``key_date_fn`` maps a unit to its calendar date, or None when the date is
+    unknown/unparseable — such units are always kept (the caller logs why).
+    ``date_from``/``date_to`` are inclusive ISO dates; when both are None the
+    input list is returned unchanged.
+    """
+    if not (date_from or date_to):
+        return units
+
+    from_date = datetime.fromisoformat(date_from).date() if date_from else None
+    to_date = datetime.fromisoformat(date_to).date() if date_to else None
+
+    kept: list[Unit] = []
+    for unit in units:
+        unit_date = key_date_fn(unit)
+        if unit_date is not None:
+            if from_date is not None and unit_date < from_date:
+                continue
+            if to_date is not None and unit_date > to_date:
+                continue
+        kept.append(unit)
+    return kept
 
 
 class ParserDetectionResult:
@@ -176,7 +242,12 @@ class DeviceParser(ABC):
         """
         pass
 
-    @abstractmethod
+    #: Whether a single parse unit may yield no session (dropped by a
+    #: post-parse guard or a parse failure).  True selects the submit-all +
+    #: stop-after-``limit``-yields driver; False lets ``limit`` pre-slice the
+    #: sorted units up front for a bounded, deterministic first-N set.
+    _unit_may_yield_nothing: bool = True
+
     def parse_sessions(
         self,
         path: Path,
@@ -191,11 +262,19 @@ class DeviceParser(ABC):
         """
         Parse all sessions from the given path and yield unified sessions.
 
-        This is the core parsing method. It should:
-        1. Locate all session data files
-        2. Parse each session's native format
-        3. Convert to UnifiedSession format
-        4. Yield one UnifiedSession at a time (memory efficient)
+        Template method shared by every parser: resolve the parse units, filter
+        them by date, then run each either across the process pool (parallel and
+        more than one unit) or sequentially, mapping a crashed worker pool to a
+        RuntimeError.  Subclasses supply the manufacturer-specific behavior via
+        the hooks below.
+
+        ``limit`` is honored one of two ways, selected by
+        ``_unit_may_yield_nothing``: when a unit always yields exactly one
+        session (flag False) the sorted, filtered units are pre-sliced to the
+        first ``limit`` — bounded work, deterministic set; when a unit may yield
+        nothing (flag True) all units are submitted and the driver stops after
+        ``limit`` yields, cancelling the rest, since pre-slicing could
+        under-deliver.
 
         Args:
             path: Path to data directory/file
@@ -215,15 +294,151 @@ class DeviceParser(ABC):
 
         Raises:
             ParserError: If parsing fails
-
-        Example:
-            for session_file in self._find_session_files(path):
-                native_data = self._parse_native_format(session_file)
-
-                unified = self._to_unified_session(native_data)
-
-                yield unified
         """
+        path = Path(path)
+
+        root, units = self._resolve_units(path, sort_by, timezone_name)
+        units = filter_units_by_date(
+            units, lambda u: self._unit_date(u, timezone_name), date_from, date_to
+        )
+        if limit is not None and not self._unit_may_yield_nothing:
+            units = units[:limit]
+        total = len(units)
+        ctx = self._build_context(root, timezone_name)
+
+        sessions_yielded = 0
+        completed = 0
+
+        def emit_progress() -> None:
+            nonlocal completed
+            completed += 1
+            if progress_callback:
+                progress_callback(f"Parsing session {completed}/{total}...")
+
+        if parallel and len(units) > 1:
+            logger.info(
+                f"Parsing {total} sessions in parallel with {os.cpu_count()} workers"
+            )
+            futures: dict[Any, Any] = {}
+            try:
+                pool = get_pool()
+                for unit in units:
+                    fn, args = self._worker_dispatch(
+                        unit, ctx, root, date_from, date_to
+                    )
+                    futures[pool.submit(fn, *args)] = unit
+
+                for future in as_completed(futures):
+                    if limit is not None and sessions_yielded >= limit:
+                        cancel_pending(futures)
+                        break
+
+                    try:
+                        session = future.result()
+                    except BrokenProcessPool:
+                        raise
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to parse {self._unit_label(futures[future])}: {e}"
+                        )
+                        emit_progress()
+                        continue
+
+                    emit_progress()
+                    if session is None:
+                        continue
+
+                    yield session
+                    sessions_yielded += 1
+            except BrokenProcessPool as exc:
+                raise RuntimeError(
+                    f"Parser worker process crashed: {exc}. "
+                    "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
+                ) from exc
+            finally:
+                cancel_pending(futures)
+        else:
+            for unit in units:
+                if limit is not None and sessions_yielded >= limit:
+                    break
+
+                try:
+                    session = self._parse_unit_sequential(
+                        unit, ctx, root, date_from, date_to
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to parse {self._unit_label(unit)}: {e}")
+                    emit_progress()
+                    continue
+
+                emit_progress()
+                if session is None:
+                    continue
+
+                yield session
+                sessions_yielded += 1
+
+    # ------------------------------------------------------------------
+    # parse_sessions hooks — implemented by each parser
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def _resolve_units(
+        self, path: Path, sort_by: str | None, timezone_name: str | None
+    ) -> tuple[Any, list[Any]]:
+        """Resolve the data root and its ordered list of parse units.
+
+        Returns ``(root, units)``.  ``root`` is passed unchanged to the other
+        hooks; each element of ``units`` is one session (or session chain) to
+        parse.  ``sort_by`` orders the units; ``timezone_name`` lets parsers
+        that need it validate the zone before parsing.
+        """
+
+    @abstractmethod
+    def _unit_date(self, unit: Any, timezone_name: str | None) -> date | None:
+        """Return a unit's calendar date for range filtering, or None."""
+
+    @abstractmethod
+    def _build_context(self, root: Any, timezone_name: str | None) -> Any:
+        """Build the shared per-parse context passed to the per-unit hooks.
+
+        Runs once after unit resolution and filtering; use it for work shared
+        across all units (device info, caches, the declared timezone).
+        """
+
+    @abstractmethod
+    def _worker_dispatch(
+        self,
+        unit: Any,
+        ctx: Any,
+        root: Any,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> tuple[Callable[..., UnifiedSession | None], tuple[Any, ...]]:
+        """Return ``(worker_fn, args)`` for parsing ``unit`` in a subprocess.
+
+        ``worker_fn`` MUST be a module-level function (picklable for the process
+        pool), never a bound method.
+        """
+
+    @abstractmethod
+    def _parse_unit_sequential(
+        self,
+        unit: Any,
+        ctx: Any,
+        root: Any,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """Parse ``unit`` in-process (sequential path); None drops the unit."""
+
+    def _unit_label(self, unit: Any) -> str:
+        """Short identifier for ``unit`` used in failure logs.
+
+        Default is the raw unit; parsers override to return a bounded, readable
+        id rather than dumping a large unit structure.
+        """
+        return str(unit)
 
     def parse_single_session(
         self, path: Path, session_id: str

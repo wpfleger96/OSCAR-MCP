@@ -20,12 +20,10 @@ import math
 import os
 import re
 
-from collections.abc import Callable, Iterator
-from concurrent.futures import as_completed
-from concurrent.futures.process import BrokenProcessPool
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -44,6 +42,7 @@ from snore.parsers.base import (
     ParserError,
     ParserMetadata,
     RawFileManifest,
+    build_root_metadata,
 )
 from snore.parsers.discovery import DataRoot, DataRootFinder
 from snore.parsers.event_labels import EVENT_TYPE_MAP, FILTERED_ANNOTATIONS
@@ -64,7 +63,6 @@ from snore.parsers.unified import (
     WaveformType,
     extract_basic_stats,
 )
-from snore.utils.parse_pool import cancel_pending, get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +141,36 @@ def _resmed_parse_bundle_worker(
         date_from,
         date_to,
     )
+
+
+class _PldSignal(NamedTuple):
+    """One PLD waveform's name candidates and read parameters.
+
+    Entries are resolved in list order; ``exclude`` names earlier entries whose
+    already-claimed signal must be skipped (e.g. therapy pressure excludes the
+    mask/EPAP signals, so it must appear after them).  ``warn_label`` set means
+    a "no data" warning is logged when the signal is found but reads empty;
+    unset entries skip silently.
+    """
+
+    key: str
+    patterns: list[str]
+    waveform_type: WaveformType
+    unit: str
+    valid_range: tuple[float, float] | None = None
+    convert_lps_to_lpm: bool = False
+    scale_factor: float | None = None
+    exclude: tuple[str, ...] = ()
+    warn_label: str | None = None
+
+
+class _ResmedParseContext(NamedTuple):
+    """Shared per-parse state passed to the ResMed parse_sessions hooks."""
+
+    device_info: DeviceInfo
+    str_series11: bool
+    str_settings_cache: dict[date, dict[str, float]] | None
+    str_summaries_cache: dict[date, dict[str, float]] | None
 
 
 class ResmedEDFParser(DeviceParser):
@@ -491,21 +519,7 @@ class ResmedEDFParser(DeviceParser):
         self._root_metadata = roots[0]
         self._all_roots = roots
 
-        metadata_dict = {
-            "data_root": str(self._data_root),
-            "structure_type": self._root_metadata.structure_type,
-            "profile_name": self._root_metadata.profile_name,
-            "device_serial": self._root_metadata.device_serial,
-            "all_roots": [str(r.path) for r in roots],
-            "root_metadata": {
-                str(r.path): {
-                    "profile_name": r.profile_name,
-                    "structure_type": r.structure_type,
-                    "device_serial": r.device_serial,
-                }
-                for r in roots
-            },
-        }
+        metadata_dict = build_root_metadata(roots)
 
         if self._data_root != path:
             location_desc = f"in {'parent' if self._data_root in path.parents else 'child'} directory"
@@ -705,158 +719,99 @@ class ResmedEDFParser(DeviceParser):
             manufacturer="ResMed", model="Unknown", serial_number="Unknown"
         )
 
-    def parse_sessions(
+    # ------------------------------------------------------------------
+    # parse_sessions hooks (driver lives in DeviceParser.parse_sessions).
+    # timezone_name is ignored — ResMed EDF timestamps are already
+    # device-local wall-clock and need no conversion.
+    # ------------------------------------------------------------------
+
+    # A chain can be dropped by the ID-vs-contents date re-filter or a parse
+    # failure, so `limit` must count yielded sessions, not pre-slice nights.
+    _unit_may_yield_nothing = True
+
+    def _resolve_units(
+        self, path: Path, sort_by: str | None, timezone_name: str | None
+    ) -> tuple[Path, list[tuple[str, str, dict[str, dict[str, Path]]]]]:
+        """Resolve the data root and discover proximity-chained night items."""
+        return self._discover_session_files(path, sort_by)
+
+    def _unit_date(
         self,
-        path: Path,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        limit: int | None = None,
-        sort_by: str | None = None,
-        parallel: bool = True,
-        progress_callback: Callable[[str], None] | None = None,
-        timezone_name: str | None = None,
-    ) -> Iterator[UnifiedSession]:
+        unit: tuple[str, str, dict[str, dict[str, Path]]],
+        timezone_name: str | None,
+    ) -> date | None:
+        """Chain night-date ID drives range filtering (device-local already)."""
+        return self._night_item_date(unit)
+
+    def _unit_label(self, unit: tuple[str, str, dict[str, dict[str, Path]]]) -> str:
+        """Failure-log id: the chain id (not the file-dict-bearing segments)."""
+        return f"chain {unit[1]}"
+
+    def _build_context(
+        self, root: Path, timezone_name: str | None
+    ) -> _ResmedParseContext:
+        """Load per-parse device info, series-11 flag and STR caches once."""
+        # Instance flag is also read by the sequential decode path
+        # (_convert_str_to_therapy_settings), so set it here as before.
+        self._str_series11 = self._detect_series11(root)
+        settings_cache, summaries_cache = self._load_str_caches(root)
+        return _ResmedParseContext(
+            device_info=self.get_device_info(root),
+            str_series11=self._str_series11,
+            str_settings_cache=settings_cache,
+            str_summaries_cache=summaries_cache,
+        )
+
+    def _worker_dispatch(
+        self,
+        unit: tuple[str, str, dict[str, dict[str, Path]]],
+        ctx: _ResmedParseContext,
+        root: Path,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> tuple[Callable[..., UnifiedSession | None], tuple[Any, ...]]:
+        """Submit one chain to the picklable module-level bundle worker.
+
+        Each future gets only its chain's STR cache slice to keep the pickled
+        payload O(1) per night rather than O(nights).
         """
-        Parse all ResMed sessions from the given path.
+        night_date, chain_id, segments = unit
+        therapy_days = _chain_therapy_days(segments)
+        args = (
+            night_date,
+            chain_id,
+            segments,
+            ctx.device_info,
+            root,
+            _slice_str_cache(ctx.str_settings_cache, therapy_days),
+            _slice_str_cache(ctx.str_summaries_cache, therapy_days),
+            date_from,
+            date_to,
+            ctx.str_series11,
+        )
+        return _resmed_parse_bundle_worker, args
 
-        Yields one UnifiedSession per therapy session.
-
-        Args:
-            path: Path to data directory
-            date_from: Filter sessions from this date
-            date_to: Filter sessions to this date
-            limit: Limit number of sessions
-            sort_by: Sort order (date-asc, date-desc, or None)
-            parallel: Enable parallel parsing (default: True)
-            progress_callback: Optional callback for progress messages
-            timezone_name: Ignored — ResMed EDF timestamps are already
-                device-local wall-clock; no conversion is needed.
-        """
-        path = Path(path)
-
-        path, night_items = self._discover_session_files(path, sort_by)
-        night_items = self._filter_night_items(night_items, date_from, date_to)
-        total_nights = len(night_items)
-
-        device_info = self.get_device_info(path)
-
-        self._str_series11 = self._detect_series11(path)
-        str_settings_cache, str_summaries_cache = self._load_str_caches(path)
-
-        sessions_yielded = 0
-
-        if parallel and len(night_items) > 1:
-            # limit counts yielded sessions, not nights: a night can be dropped
-            # by the per-session date filter or fail to parse, so truncating
-            # night_items up front would under-deliver. The as_completed loop
-            # below enforces the limit and cancels remaining futures instead.
-            logger.debug(
-                f"Parsing {len(night_items)} chains in parallel with {os.cpu_count()} workers"
-            )
-
-            futures: dict[Any, Any] = {}
-            try:
-                pool = get_pool()
-                futures = {}
-                for night_date, chain_id, segments in night_items:
-                    therapy_days = _chain_therapy_days(segments)
-                    futures[
-                        pool.submit(
-                            _resmed_parse_bundle_worker,
-                            night_date,
-                            chain_id,
-                            segments,
-                            device_info,
-                            path,
-                            _slice_str_cache(str_settings_cache, therapy_days),
-                            _slice_str_cache(str_summaries_cache, therapy_days),
-                            date_from,
-                            date_to,
-                            self._str_series11,
-                        )
-                    ] = chain_id
-
-                completed = 0
-
-                def emit_progress() -> None:
-                    nonlocal completed
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(
-                            f"Parsing session {completed}/{total_nights}..."
-                        )
-
-                for future in as_completed(futures):
-                    chain_id = futures[future]
-
-                    if limit is not None and sessions_yielded >= limit:
-                        logger.debug(
-                            f"Reached session limit of {limit}, cancelling remaining"
-                        )
-                        cancel_pending(futures)
-                        break
-
-                    try:
-                        session = future.result()
-                    except BrokenProcessPool:
-                        raise
-                    except Exception as e:
-                        logger.error(f"Failed to parse chain {chain_id}: {e}")
-                        emit_progress()
-                        continue
-
-                    emit_progress()
-
-                    if session is None:
-                        continue
-
-                    yield session
-                    sessions_yielded += 1
-            except BrokenProcessPool as exc:
-                raise RuntimeError(
-                    f"Parser worker process crashed: {exc}. "
-                    "Reduce SNORE_PARSE_MAX_WORKERS if memory is constrained."
-                ) from exc
-            finally:
-                cancel_pending(futures)
-        else:
-            completed = 0
-
-            def emit_progress() -> None:
-                nonlocal completed
-                completed += 1
-                if progress_callback:
-                    progress_callback(f"Parsing session {completed}/{total_nights}...")
-
-            for night_date, chain_id, segments in night_items:
-                if limit is not None and sessions_yielded >= limit:
-                    logger.debug(f"Reached session limit of {limit}, stopping")
-                    break
-
-                try:
-                    session = self._parse_single_session_bundle(
-                        night_date,
-                        chain_id,
-                        segments,
-                        device_info,
-                        path,
-                        str_settings_cache,
-                        str_summaries_cache,
-                        date_from,
-                        date_to,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to parse chain {chain_id}: {e}")
-                    emit_progress()
-                    continue
-
-                emit_progress()
-
-                if session is None:
-                    continue
-
-                yield session
-                sessions_yielded += 1
+    def _parse_unit_sequential(
+        self,
+        unit: tuple[str, str, dict[str, dict[str, Path]]],
+        ctx: _ResmedParseContext,
+        root: Path,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> UnifiedSession | None:
+        """Parse one chain in-process (bundle applies the date re-filter)."""
+        night_date, chain_id, segments = unit
+        return self._parse_single_session_bundle(
+            night_date,
+            chain_id,
+            segments,
+            ctx.device_info,
+            root,
+            ctx.str_settings_cache,
+            ctx.str_summaries_cache,
+            date_from,
+            date_to,
+        )
 
     def _discover_session_files(
         self, path: Path, sort_by: str | None
@@ -904,42 +859,17 @@ class ResmedEDFParser(DeviceParser):
 
         return path, night_items
 
-    def _filter_night_items(
-        self,
-        night_items: list[tuple[str, str, dict[str, dict[str, Path]]]],
-        date_from: str | None,
-        date_to: str | None,
-    ) -> list[tuple[str, str, dict[str, dict[str, Path]]]]:
-        """Filter chain items by date range based on their night-date IDs."""
-        if not (date_from or date_to):
-            return night_items
-
-        filtered_items = []
-        for night_date, chain_id, segments in night_items:
-            try:
-                night_date_obj = datetime.strptime(night_date, "%Y%m%d").date()
-
-                if date_from:
-                    filter_date_from = datetime.fromisoformat(date_from).date()
-                    if night_date_obj < filter_date_from:
-                        logger.debug(
-                            f"Skipping chain {chain_id}: before {filter_date_from}"
-                        )
-                        continue
-
-                if date_to:
-                    filter_date_to = datetime.fromisoformat(date_to).date()
-                    if night_date_obj > filter_date_to:
-                        logger.debug(
-                            f"Skipping chain {chain_id}: after {filter_date_to}"
-                        )
-                        continue
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Could not parse night date {night_date}: {e}")
-
-            filtered_items.append((night_date, chain_id, segments))
-
-        return filtered_items
+    @staticmethod
+    def _night_item_date(
+        item: tuple[str, str, dict[str, dict[str, Path]]],
+    ) -> date | None:
+        """Parse a chain item's night-date ID; None (kept) if unparseable."""
+        night_date = item[0]
+        try:
+            return datetime.strptime(night_date, "%Y%m%d").date()
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Could not parse night date {night_date}: {e}")
+            return None
 
     def _parse_single_session_bundle(
         self,
@@ -1365,10 +1295,12 @@ class ResmedEDFParser(DeviceParser):
         ``chain_id`` defaults to the lexicographically smallest segment id (which
         is the chronologically first segment) so existing callers remain compatible.
 
-        Delegates to ``_parse_night_session``.
+        Delegates to ``_parse_night_session`` and finalizes statistics so the
+        returned session honors the "complete ``UnifiedSession``" contract that
+        ``_parse_single_session_bundle`` provides on the normal parse path.
         """
         effective_chain_id = chain_id if chain_id is not None else min(segments)
-        return self._parse_night_session(
+        session = self._parse_night_session(
             night_date=night_date,
             chain_id=effective_chain_id,
             segments=segments,
@@ -1377,6 +1309,10 @@ class ResmedEDFParser(DeviceParser):
             str_settings_cache=str_settings_cache,
             str_summaries_cache=str_summaries_cache,
         )
+        if session is None:
+            return None
+        session.finalize_statistics()
+        return session
 
     def _parse_night_session(
         self,
@@ -2011,6 +1947,100 @@ class ResmedEDFParser(DeviceParser):
                     return signal
         return None
 
+    # Ordered PLD waveform specs. ResMed signal names vary by firmware, e.g.
+    # "MaskPress.2s"/"EPRPress.2s"/"Press.2s" (AirSense 11) vs "MaskPressure"/
+    # "Exp Pres"/"Pressure" (older).  Mask and EPAP are resolved first so
+    # therapy pressure can exclude them; TidVol before Ti so bare "Ti" does not
+    # match "TidVol".  FlowLim/Snore/RespRate/TidVol/IERatio/Ti are index-like
+    # (valid_range-gated) and skip silently when absent (VAuto-only for the
+    # last two).
+    _PLD_SIGNALS: tuple[_PldSignal, ...] = (
+        _PldSignal(
+            "mask",
+            ["MaskPress", "Mask Pres"],
+            WaveformType.MASK_PRESSURE,
+            UNIT_PRESSURE,
+            warn_label="mask pressure",
+        ),
+        _PldSignal(
+            "epap",
+            ["EPRPress", "Exp Pres"],
+            WaveformType.EPAP,
+            UNIT_PRESSURE,
+            warn_label="EPAP",
+        ),
+        _PldSignal(
+            "therapy",
+            ["Press", "Therapy Pres", "Pressure"],
+            WaveformType.THERAPY_PRESSURE,
+            UNIT_PRESSURE,
+            exclude=("mask", "epap"),
+            warn_label="therapy pressure",
+        ),
+        _PldSignal(
+            "leak",
+            ["Leak"],
+            WaveformType.LEAK_RATE,
+            UNIT_FLOW,
+            convert_lps_to_lpm=True,
+            warn_label="leak",
+        ),
+        _PldSignal(
+            "mv",
+            ["MinVent", "MV"],
+            WaveformType.MINUTE_VENTILATION,
+            UNIT_FLOW,
+            warn_label="minute-vent",
+        ),
+        _PldSignal(
+            "flow_lim",
+            ["FlowLim.2s", "FlowLim", "FFL Index"],
+            WaveformType.FLOW_LIMITATION,
+            "",
+            valid_range=(0.0, 1.0),
+        ),
+        _PldSignal(
+            "snore",
+            ["Snore.2s", "Snore"],
+            WaveformType.SNORE,
+            "",
+            valid_range=(0.0, 5.0),
+        ),
+        _PldSignal(
+            "resp_rate",
+            ["RespRate.2s", "RespRate"],
+            WaveformType.RESPIRATORY_RATE,
+            UNIT_BPM,
+            valid_range=(0.0, 90.0),
+        ),
+        # TidVol is stored in L on the device; scale to mL (range applied after).
+        _PldSignal(
+            "tidvol",
+            ["TidVol.2s", "TidVol"],
+            WaveformType.TIDAL_VOLUME,
+            UNIT_ML,
+            valid_range=(0.0, 4000.0),
+            scale_factor=1000.0,
+        ),
+        _PldSignal(
+            "ie_ratio",
+            ["IERatio.2s", "IERatio"],
+            WaveformType.IE_RATIO,
+            UNIT_PERCENT,
+            valid_range=(0.0, 400.0),
+        ),
+        # R5Ti.2s preferred over Ti.2s where both appear (OSCAR
+        # resmed_loader.cpp:4173); excludes the claimed TidVol signal only.
+        _PldSignal(
+            "ti",
+            ["R5Ti.2s", "Ti.2s", "Ti"],
+            WaveformType.TI,
+            UNIT_SECONDS,
+            valid_range=(0.0, 10.0),
+            exclude=("tidvol",),
+        ),
+    )
+
     def _parse_pressure_leak(self, file_path: Path, session: UnifiedSession) -> None:
         """Parse PLD pressure/leak file."""
         from .formats.edf import get_edf_record_count
@@ -2033,170 +2063,41 @@ class ResmedEDFParser(DeviceParser):
             )
 
             with EDFReader(file_path) as edf:
-                # Parse all three pressure signals separately
-                # ResMed signal names: "MaskPress.2s", "EPRPress.2s", "Press.2s" (AirSense 11)
-                # or "MaskPressure", "Exp Pres", "Pressure" (older devices)
-                mask_signal = self._find_signal(edf, ["MaskPress", "Mask Pres"])
-                epap_signal = self._find_signal(edf, ["EPRPress", "Exp Pres"])
-
-                claimed = {s for s in (mask_signal, epap_signal) if s is not None}
-                therapy_signal = self._find_signal_excluding(
-                    edf, ["Press", "Therapy Pres", "Pressure"], exclude=claimed
-                )
-
-                # Parse therapy pressure (device's target pressure)
-                if therapy_signal:
-                    result = self._read_waveform(
-                        edf,
-                        therapy_signal,
-                        WaveformType.THERAPY_PRESSURE,
-                        UNIT_PRESSURE,
-                    )
-                    if result is None:
-                        logger.warning(
-                            f"No data in therapy pressure signal {therapy_signal}"
+                resolved: dict[str, str | None] = {}
+                for spec in self._PLD_SIGNALS:
+                    if spec.exclude:
+                        exclude = {
+                            sig
+                            for k in spec.exclude
+                            if (sig := resolved.get(k)) is not None
+                        }
+                        signal = self._find_signal_excluding(
+                            edf, spec.patterns, exclude=exclude
                         )
                     else:
-                        session.add_waveform(result[0])
+                        signal = self._find_signal(edf, spec.patterns)
+                    resolved[spec.key] = signal
 
-                # Parse mask pressure (measured at mask)
-                if mask_signal:
+                    if signal is None:
+                        continue
+
                     result = self._read_waveform(
-                        edf, mask_signal, WaveformType.MASK_PRESSURE, UNIT_PRESSURE
+                        edf,
+                        signal,
+                        spec.waveform_type,
+                        spec.unit,
+                        valid_range=spec.valid_range,
+                        convert_lps_to_lpm=spec.convert_lps_to_lpm,
+                        scale_factor=spec.scale_factor,
                     )
                     if result is None:
-                        logger.warning(f"No data in mask pressure signal {mask_signal}")
-                    else:
-                        session.add_waveform(result[0])
+                        if spec.warn_label:
+                            logger.warning(
+                                f"No data in {spec.warn_label} signal {signal}"
+                            )
+                        continue
 
-                # Parse EPAP (therapy pressure minus EPR)
-                if epap_signal:
-                    result = self._read_waveform(
-                        edf, epap_signal, WaveformType.EPAP, UNIT_PRESSURE
-                    )
-                    if result is None:
-                        logger.warning(f"No data in EPAP signal {epap_signal}")
-                    else:
-                        session.add_waveform(result[0])
-
-                # ResMed uses names like "Leak.2s", "LeakRate"
-                leak_signal = self._find_signal(edf, ["Leak"])
-
-                if leak_signal:
-                    result = self._read_waveform(
-                        edf,
-                        leak_signal,
-                        WaveformType.LEAK_RATE,
-                        UNIT_FLOW,
-                        convert_lps_to_lpm=True,
-                    )
-                    if result is None:
-                        logger.warning(f"No data in leak signal {leak_signal}")
-                    else:
-                        session.add_waveform(result[0])
-
-                # ResMed uses names like "MinVent.2s"; stored in L/min already
-                mv_signal = self._find_signal(edf, ["MinVent", "MV"])
-
-                if mv_signal:
-                    result = self._read_waveform(
-                        edf, mv_signal, WaveformType.MINUTE_VENTILATION, UNIT_FLOW
-                    )
-                    if result is None:
-                        logger.warning(f"No data in minute-vent signal {mv_signal}")
-                    else:
-                        session.add_waveform(result[0])
-
-                # Flow limitation index: dimensionless score 0–1 from the
-                # device's FL algorithm. Imported as the device reference for
-                # FL validation (see FL validation workstream).
-                flow_lim_signal = self._find_signal(
-                    edf, ["FlowLim.2s", "FlowLim", "FFL Index"]
-                )
-                if flow_lim_signal:
-                    result = self._read_waveform(
-                        edf,
-                        flow_lim_signal,
-                        WaveformType.FLOW_LIMITATION,
-                        "",
-                        valid_range=(0.0, 1.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                snore_signal = self._find_signal(edf, ["Snore.2s", "Snore"])
-                if snore_signal:
-                    result = self._read_waveform(
-                        edf,
-                        snore_signal,
-                        WaveformType.SNORE,
-                        "",
-                        valid_range=(0.0, 5.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                rr_signal = self._find_signal(edf, ["RespRate.2s", "RespRate"])
-                if rr_signal:
-                    result = self._read_waveform(
-                        edf,
-                        rr_signal,
-                        WaveformType.RESPIRATORY_RATE,
-                        UNIT_BPM,
-                        valid_range=(0.0, 90.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                # TidVol is stored in L on the device; scale to mL for the
-                # unified model (valid_range is applied after conversion).
-                tidvol_signal = self._find_signal(edf, ["TidVol.2s", "TidVol"])
-                if tidvol_signal:
-                    result = self._read_waveform(
-                        edf,
-                        tidvol_signal,
-                        WaveformType.TIDAL_VOLUME,
-                        UNIT_ML,
-                        valid_range=(0.0, 4000.0),
-                        scale_factor=1000.0,
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                # IERatio and Ti are VAuto-only; absent on APAP/CPAP devices —
-                # _find_signal returns None and the block is skipped silently.
-                ie_ratio_signal = self._find_signal(edf, ["IERatio.2s", "IERatio"])
-                if ie_ratio_signal:
-                    result = self._read_waveform(
-                        edf,
-                        ie_ratio_signal,
-                        WaveformType.IE_RATIO,
-                        UNIT_PERCENT,
-                        valid_range=(0.0, 400.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                # Use _find_signal_excluding so bare "Ti" does not accidentally
-                # match "TidVol" (substring collision) when the volume signal
-                # was already claimed above.
-                # R5Ti.2s and Ti.2s may both appear on some devices (e.g. 37051);
-                # prefer R5Ti.2s when present (OSCAR resmed_loader.cpp:4173).
-                ti_signal = self._find_signal_excluding(
-                    edf,
-                    ["R5Ti.2s", "Ti.2s", "Ti"],
-                    exclude={tidvol_signal} if tidvol_signal else set(),
-                )
-                if ti_signal:
-                    result = self._read_waveform(
-                        edf,
-                        ti_signal,
-                        WaveformType.TI,
-                        UNIT_SECONDS,
-                        valid_range=(0.0, 10.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
+                    session.add_waveform(result[0])
 
                 logger.debug(f"Parsed pressure/leak from {file_path.name}")
 
@@ -2243,108 +2144,6 @@ class ResmedEDFParser(DeviceParser):
         except Exception as e:
             logger.warning(f"Failed to parse TCV: {e}")
             session.data_quality_notes.append(f"TCV parsing failed: {e}")
-
-    def _parse_events(self, file_path: Path, session: UnifiedSession) -> None:
-        """Parse EVE events file."""
-        from .formats.edf import EDFDiscontinuousReader, is_discontinuous_edf
-
-        if file_path.stat().st_size == 0:
-            logger.debug(
-                f"Skipping empty EVE file (zero-byte device stub): {file_path.name}"
-            )
-            return
-
-        is_discontinuous = is_discontinuous_edf(file_path)
-
-        if is_discontinuous:
-            logger.debug(
-                f"EVE file {file_path.name} is discontinuous (EDF+D format) - "
-                f"using MNE library to read annotations"
-            )
-            session.data_quality_notes.append(
-                "EVE file is discontinuous (mask removal detected during session)"
-            )
-
-        try:
-            if is_discontinuous:
-                with EDFDiscontinuousReader(file_path) as edf:
-                    annotations = edf.read_annotations()
-            else:
-                with EDFReader(file_path) as edf:
-                    annotations = edf.read_annotations()
-
-            event_count = 0
-            filtered_count = 0
-            unknown_count = 0
-            unknown_annotations = set()
-
-            for annotation in annotations:
-                event_type = None
-                annotation_text = None
-
-                for text in annotation.annotations:
-                    if text in FILTERED_ANNOTATIONS:
-                        filtered_count += 1
-                        break
-
-                    if text in EVENT_TYPE_MAP:
-                        event_type = EVENT_TYPE_MAP[text]
-                        annotation_text = text
-                        break
-
-                if annotation_text is None and event_type is None:
-                    for text in annotation.annotations:
-                        if text not in FILTERED_ANNOTATIONS:
-                            unknown_annotations.add(text)
-                            unknown_count += 1
-                    continue
-
-                if event_type is None:
-                    continue
-
-                duration = annotation.duration if annotation.duration else 10.0
-                flag_time = annotation.to_datetime(session.start_time)
-                # ResMed flags events at their end; subtract duration to store the
-                # true start (OSCAR renders backward from the flag time for the same
-                # reason).
-                event = RespiratoryEvent(
-                    event_type=event_type,
-                    start_time=flag_time - timedelta(seconds=duration),
-                    duration_seconds=duration,
-                )
-
-                session.add_event(event)
-                event_count += 1
-
-            if is_discontinuous and event_count > 0:
-                logger.debug(
-                    f"Successfully parsed {event_count} events from discontinuous EVE file "
-                    f"(mask removal periods detected)"
-                )
-            else:
-                logger.debug(f"Parsed {event_count} events from {file_path.name}")
-
-            if filtered_count > 0:
-                logger.debug(f"Filtered out {filtered_count} non-event annotations")
-            if unknown_count > 0:
-                logger.warning(
-                    f"Encountered {unknown_count} unknown annotations: {unknown_annotations}"
-                )
-                session.data_quality_notes.append(
-                    f"Unknown event annotations: {', '.join(sorted(unknown_annotations))}"
-                )
-
-        except Exception as e:
-            if "discontinuous" in str(e).lower():
-                logger.warning(
-                    "EVE file is discontinuous (mask removal during session) - events not imported"
-                )
-                session.data_quality_notes.append(
-                    "EVE file is discontinuous (mask removal detected) - events cannot be imported"
-                )
-            else:
-                logger.warning(f"Failed to parse events: {e}")
-                session.data_quality_notes.append(f"EVE parsing failed: {e}")
 
     def _parse_eve_files_for_night(
         self, eve_files: list[Path], session: UnifiedSession
@@ -2548,60 +2347,6 @@ class ResmedEDFParser(DeviceParser):
                 f"CSL file(s) for session starting {session.start_time}"
             )
 
-    def _parse_str_settings(
-        self, str_file: Path, session_date: date, is_eleven_series: bool | None = None
-    ) -> TherapySettings | None:
-        """
-        Parse therapy settings from STR.edf for a specific session date.
-
-        STR.edf contains one data record per day since device initialization.
-        Each signal has one sample per record, representing that day's setting value.
-
-        Args:
-            str_file: Path to STR.edf file
-            session_date: Date of session to get settings for
-            is_eleven_series: Passed through unchanged to _convert_str_to_therapy_settings;
-                None lets the converter fall back to ProductCode-derived self._str_series11.
-
-        Returns:
-            TherapySettings populated from STR.edf, None if not found, or None
-            for no-usage days where ResMed writes all-sentinel (negative) values
-        """
-        try:
-            with EDFReader(str_file) as edf:
-                header = edf.get_header()
-
-                str_start_date = header.start_datetime.date()
-                days_offset = (session_date - str_start_date).days
-
-                if days_offset < 0 or days_offset >= header.num_data_records:
-                    logger.warning(
-                        f"Session date {session_date} outside STR.edf range "
-                        f"({str_start_date} + {header.num_data_records} days)"
-                    )
-                    return None
-
-                settings_values = {}
-                signals = edf.get_signal_info()
-
-                for signal_label, setting_key in self.ALL_STR_SIGNAL_MAPS.items():
-                    if signal_label in signals:
-                        data, _ = edf.read_signal(signal_label)
-                        if len(data) > days_offset:
-                            settings_values[setting_key] = data[days_offset]
-
-                if not settings_values:
-                    logger.debug(f"No settings found in STR.edf for {session_date}")
-                    return None
-
-                return self._convert_str_to_therapy_settings(
-                    settings_values, is_eleven_series
-                )
-
-        except Exception as e:
-            logger.warning(f"Failed to parse STR.edf settings: {e}")
-            return None
-
     def _load_str_caches(
         self, root_path: Path
     ) -> tuple[
@@ -2799,18 +2544,6 @@ class ResmedEDFParser(DeviceParser):
             logger.warning(f"Failed to preload STR file {str_file.name}: {e}")
             return None, None
 
-    def _preload_str_settings(
-        self, str_file: Path
-    ) -> dict[date, dict[str, float]] | None:
-        """Thin wrapper — returns the settings half of _preload_str_file."""
-        return self._preload_str_file(str_file)[0]
-
-    def _preload_str_summaries(
-        self, str_file: Path
-    ) -> dict[date, dict[str, float]] | None:
-        """Thin wrapper — returns the summaries half of _preload_str_file."""
-        return self._preload_str_file(str_file)[1]
-
     def _convert_str_to_therapy_settings(
         self, values: dict[str, float], is_eleven_series: bool | None = None
     ) -> TherapySettings | None:
@@ -2828,7 +2561,7 @@ class ResmedEDFParser(DeviceParser):
 
         Args:
             values: Dictionary of setting keys to raw float values (as preloaded
-                by _preload_str_settings — keys come from STR_SETTINGS_MAP and
+                by _preload_str_file — keys come from STR_SETTINGS_MAP and
                 the signal group dicts).
             is_eleven_series: Explicit family override; defaults to
                 self._str_series11 (set once from ProductCode by _detect_series11).
@@ -2895,6 +2628,16 @@ class ResmedEDFParser(DeviceParser):
             if v is None or math.isnan(v):
                 return None
             return v - 1 if series11 else v
+
+        def _s10_or_bl(s10_key: str, bl_key: str) -> str:
+            """Return the S10 bare-signal key when present, else the S.BL.* key.
+
+            S10 bilevel prefers bare ``S.*`` timing/rise signals and falls back
+            to ``S.BL.*`` only when the bare signal is absent (OSCAR :2347-2392).
+            Returns the key so the caller applies ``values.get``/``_nn`` to it
+            exactly as it would to a single signal.
+            """
+            return s10_key if values.get(s10_key) is not None else bl_key
 
         def _apply_timing(
             ti_max_v: float | None,
@@ -3147,41 +2890,13 @@ class ResmedEDFParser(DeviceParser):
                 # S10: prefer bare S.* timing signals (OSCAR :2347-2392);
                 # fall back to S.BL.* if bare key absent (defensive — real S10
                 # devices emit bare signals, but older/unknown firmware may not).
-                ti_max_v = (
-                    values.get("s10_ti_max")
-                    if values.get("s10_ti_max") is not None
-                    else values.get("bl_ti_max")
-                )
-                ti_min_v = (
-                    values.get("s10_ti_min")
-                    if values.get("s10_ti_min") is not None
-                    else values.get("bl_ti_min")
-                )
-                trigger_v = (
-                    _nn("s10_trigger")
-                    if values.get("s10_trigger") is not None
-                    else _nn("bl_trigger")
-                )
-                cycle_v = (
-                    _nn("s10_cycle")
-                    if values.get("s10_cycle") is not None
-                    else _nn("bl_cycle")
-                )
-                rise_enable_norm = (
-                    _nn("s10_rise_enable")
-                    if values.get("s10_rise_enable") is not None
-                    else _nn("bl_rise_enable")
-                )
-                rise_time_v = (
-                    values.get("s10_rise_time")
-                    if values.get("s10_rise_time") is not None
-                    else values.get("bl_rise_time")
-                )
-                easy_breathe_v = (
-                    _nn("s10_easy_breathe")
-                    if values.get("s10_easy_breathe") is not None
-                    else _nn("bl_easy_breathe")
-                )
+                ti_max_v = values.get(_s10_or_bl("s10_ti_max", "bl_ti_max"))
+                ti_min_v = values.get(_s10_or_bl("s10_ti_min", "bl_ti_min"))
+                trigger_v = _nn(_s10_or_bl("s10_trigger", "bl_trigger"))
+                cycle_v = _nn(_s10_or_bl("s10_cycle", "bl_cycle"))
+                rise_enable_norm = _nn(_s10_or_bl("s10_rise_enable", "bl_rise_enable"))
+                rise_time_v = values.get(_s10_or_bl("s10_rise_time", "bl_rise_time"))
+                easy_breathe_v = _nn(_s10_or_bl("s10_easy_breathe", "bl_easy_breathe"))
 
             if ipap is not None and epap is not None:
                 ps = round(ipap - epap, 2)

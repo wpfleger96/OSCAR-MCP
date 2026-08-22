@@ -6,13 +6,12 @@ Format version 10 (current OSCAR version).
 """
 
 import io
-import struct
 
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from snore.constants import OSCAR_MAGIC_NUMBER
 from snore.parsers.compression import QtCompressionError, qUncompress
+from snore.parsers.oscar_header import parse_oscar_header
 from snore.parsers.qdatastream import QDataStreamReader
 from snore.parsers.types import EventList, EventListType, SessionEvents
 
@@ -99,81 +98,18 @@ class OscarEventsParser:
 
     def _parse_header(self, stream: BinaryIO) -> dict[str, Any]:
         """
-        Parse header from events file.
+        Parse header from events file (file type 1).
 
-        Base header format (32 bytes, all versions):
-        - 4 bytes: magic number (0xC73216AB)
-        - 2 bytes: version
-        - 2 bytes: file type (1 for events)
-        - 4 bytes: machine ID
-        - 4 bytes: session ID
-        - 8 bytes: first timestamp (ms since epoch)
-        - 8 bytes: last timestamp (ms since epoch)
-
-        Extended header (10 bytes, version >= 10 only):
-        - 2 bytes: compression method (0=none, 1=qCompress)
-        - 2 bytes: machine type
-        - 4 bytes: uncompressed data size
-        - 2 bytes: CRC16 checksum
-
-        Returns:
-            Dictionary with header fields
-
-        Raises:
-            OscarEventsParseError: If header is invalid
+        Delegates to the shared OSCAR header parser, which also reads the
+        version>=10 extended header (compression, machine type, data size,
+        crc16); see ``parse_oscar_header`` for the field layout.
         """
-        base_header = stream.read(32)
-        if len(base_header) != 32:
-            raise OscarEventsParseError("File too short to contain header")
-
-        (
-            magic,
-            version,
-            file_type,
-            machine_id,
-            session_id,
-            first_timestamp,
-            last_timestamp,
-        ) = struct.unpack("<IHH II qq", base_header)
-
-        if magic != OSCAR_MAGIC_NUMBER:
-            raise OscarEventsParseError(
-                f"Invalid magic number: 0x{magic:08x} (expected 0x{OSCAR_MAGIC_NUMBER:08x})"
-            )
-
-        if file_type != 1:
-            raise OscarEventsParseError(
-                f"Invalid file type: {file_type} (expected 1 for events)"
-            )
-
-        compression = 0
-        machine_type = 0
-        data_size = 0
-        crc16 = 0
-
-        if version >= 10:
-            ext_header = stream.read(10)
-            if len(ext_header) != 10:
-                raise OscarEventsParseError(
-                    f"File too short for version {version} extended header"
-                )
-            (compression, machine_type, data_size, crc16) = struct.unpack(
-                "<HH iH", ext_header
-            )
-
-        return {
-            "magic": magic,
-            "version": version,
-            "file_type": file_type,
-            "machine_id": machine_id,
-            "session_id": session_id,
-            "first_timestamp": first_timestamp,
-            "last_timestamp": last_timestamp,
-            "compression": compression,
-            "machine_type": machine_type,
-            "data_size": data_size,
-            "crc16": crc16,
-        }
+        return parse_oscar_header(
+            stream,
+            expected_file_type=1,
+            error_cls=OscarEventsParseError,
+            read_extended=True,
+        )
 
     def _parse_channel_metadata(
         self, reader: QDataStreamReader, version: int
