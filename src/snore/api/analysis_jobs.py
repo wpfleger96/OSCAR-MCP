@@ -28,8 +28,8 @@ from snore.api.jobs.core import (
     JOB_TTL_SECONDS,
     JobRecordBase,
     JobStore,
-    run_worker_loop,
 )
+from snore.api.jobs.pool import WorkerPool
 
 logger = logging.getLogger(__name__)
 
@@ -242,14 +242,6 @@ _all_jobs = _store.jobs
 _lock = _store.lock
 _condition = threading.Condition(_lock)
 
-_worker_threads: list[threading.Thread] = []
-_stop_event: threading.Event | None = None
-# Every stop event ever handed to a worker generation. start_worker() may be
-# called more than once per process (app restarts in tests, repeated test
-# setups); shutdown() must be able to stop EVERY generation, not just the
-# latest, or an abandoned generation keeps draining the shared queue.
-_stop_events: list[threading.Event] = []
-
 
 def enqueue(
     profile_id: int,
@@ -431,94 +423,34 @@ def _execute_job(job: AnalysisJob) -> None:
             )
 
 
-class _ThrottledReaper:
-    """Per-worker reap cadence: unconditional after each job, throttled on idle.
-
-    The analysis store is polled only by the workers and a low-frequency list
-    endpoint, so reaping inline here suffices (import runs a dedicated reaper
-    thread instead).  Idle cycles reap at most every ``interval`` seconds; a
-    completed job always reaps and resets the clock.
-    """
-
-    def __init__(self, interval: float = 60.0) -> None:
-        self._interval = interval
-        self._last_reap = time.monotonic()
-
-    def on_idle(self) -> None:
-        now = time.monotonic()
-        if now - self._last_reap >= self._interval:
-            _reap_terminal()
-            self._last_reap = now
-
-    def after_job(self) -> None:
-        _reap_terminal()
-        self._last_reap = time.monotonic()
-
-
-def _worker_loop(stop_event: threading.Event, condition: threading.Condition) -> None:
-    reaper = _ThrottledReaper(60.0)
-
-    def _on_error(job: AnalysisJob, exc: BaseException) -> None:
-        if not job.is_terminal:
-            job.finish(succeeded=False, error_message=str(exc))
-
-    run_worker_loop(
-        stop_event,
-        condition,
-        _queue,
-        _execute_job,
-        on_idle=reaper.on_idle,
-        after_execute=reaper.after_job,
-        on_execute_error=_on_error,
-    )
+# The worker-pool layer (throttled reaping, per-worker loop wiring, restartable
+# start/shutdown thread bookkeeping) is shared with validation_jobs.  ``execute``
+# and ``concurrency`` are wrapped so a test patching the module-level
+# ``_execute_job`` / ``_get_job_concurrency`` is honoured at call time.
+_pool: WorkerPool[AnalysisJob] = WorkerPool(
+    queue=_queue,
+    condition=_condition,
+    store=_store,
+    execute=lambda job: _execute_job(job),
+    concurrency=lambda: _get_job_concurrency(),
+    thread_name_prefix="analysis-job-worker",
+    reap=_reap_terminal,
+)
 
 
 def start_worker() -> tuple[list[threading.Thread], threading.Event]:
-    """Start N persistent worker threads (N from config, default 2).
+    """Start N persistent worker threads (N from config, default 4).
 
     Returns (threads, stop_event) so the caller can shut them down.
     """
-    global _stop_event
-    n = _get_job_concurrency()
-    stop_event = threading.Event()
-    _stop_event = stop_event
-    _stop_events.append(stop_event)
-    threads: list[threading.Thread] = []
-    for i in range(n):
-        t = threading.Thread(
-            target=_worker_loop,
-            args=(stop_event, _condition),
-            daemon=True,
-            name=f"analysis-job-worker-{i}",
-        )
-        threads.append(t)
-        t.start()
-    _worker_threads.extend(threads)
-    return threads, stop_event
+    return _pool.start()
 
 
 def shutdown(timeout: float = 10.0) -> None:
     """Signal all workers to stop; cancel all queued and running jobs.
 
-    Stops every worker generation ever started in this process (see
-    ``_stop_events``), then drops references to exited threads. Threads that
-    outlive ``timeout`` stay registered so a later call can retry.
+    Stops every worker generation ever started in this process, then drops
+    references to exited threads. Threads that outlive ``timeout`` stay
+    registered so a later call can retry.
     """
-    global _stop_event
-    for ev in _stop_events:
-        ev.set()
-    if _stop_event is not None:
-        _stop_event.set()
-    with _condition:
-        for job in list(_all_jobs.values()):
-            job.try_cancel()
-        _queue.clear()
-        _condition.notify_all()  # Wake all idle workers so they see the stop event.
-    deadline = time.monotonic() + timeout
-    for t in _worker_threads:
-        remaining = max(0.0, deadline - time.monotonic())
-        t.join(timeout=remaining)
-    _worker_threads[:] = [t for t in _worker_threads if t.is_alive()]
-    if not _worker_threads:
-        _stop_events.clear()
-        _stop_event = None
+    _pool.shutdown(timeout)

@@ -42,7 +42,10 @@ class _FakeJob(JobRecordBase[_State]):
             self._start_running(_State.RUNNING)
             return True
 
-    def finish(self) -> None:
+    def finish(self, succeeded: bool = True, error_message: str | None = None) -> None:
+        # Signature matches the shared JobRecordBase.finish contract; this fake
+        # has no FAILED state, so it terminalises to DONE (or CANCELLED on a
+        # pending cancel) regardless of ``succeeded``.
         with self._lock:
             if self._state in _TERMINAL:
                 return

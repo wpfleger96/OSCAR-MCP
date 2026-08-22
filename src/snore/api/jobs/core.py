@@ -68,6 +68,12 @@ class JobRecordBase[StateT: Enum]:
         # against it without the base creating a field of its own.
         _state: StateT
 
+        # Every concrete job implements this identical terminal-transition
+        # signature; declared here (TYPE_CHECKING only, so it never shadows the
+        # real methods) so shared machinery — e.g. the WorkerPool error handler —
+        # can force a failed job terminal without a per-subclass callback.
+        def finish(self, succeeded: bool, error_message: str | None = None) -> None: ...
+
     job_id: str
     owner_user_id: int | None = None
     created_at: float = field(default_factory=time.monotonic)
