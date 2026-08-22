@@ -27,6 +27,27 @@ ICON_TIP = "[yellow]\U0001f4a1[/yellow]"
 ICON_CHART = "\U0001f4c8"
 
 
+def fmt_sig(v: float | None, *, na: str = "N/A") -> str:
+    """Adaptive formatting so tiny magnitudes stay visible.
+
+    Values such as a chance-precision floor (~4e-5) and proxy precision (~1e-3)
+    collapse to ``0.000`` at fixed 3 decimals — comparing floor vs precision is
+    the whole point of those fields, so render small values with more decimals
+    or in scientific notation.  Callers keep the full float in their models and
+    JSON/CSV exports; this only affects terminal display.
+    """
+    if v is None:
+        return na
+    if v == 0.0:
+        return "0"
+    a = abs(v)
+    if a >= 0.1:
+        return f"{v:.3f}"
+    if a >= 1e-3:
+        return f"{v:.4f}"
+    return f"{v:.2e}"
+
+
 def _indent_prefix(indent: int) -> str:
     return "  " * indent
 
