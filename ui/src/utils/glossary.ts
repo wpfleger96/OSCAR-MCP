@@ -84,6 +84,16 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         label: 'Flow Limitations',
         short: 'Breaths or periods where the inspiratory airflow shape is flattened by partial airway narrowing.',
     },
+    fl_class_ge4_pct: {
+        label: 'FL Class ≥4',
+        short: 'Share of confidently-classified breaths with a flow-limitation class of 4 or higher (more flattened inspiratory shapes).',
+        long: "From SNORE's experimental breath analysis, not the device. Useful for night-to-night trends, not a clinically validated measurement.",
+    },
+    rera_index: {
+        label: 'RERA Index (proxy)',
+        short: "Estimated respiratory effort-related arousals per hour, from SNORE's flow-limitation-run RERA proxy.",
+        long: "SNORE's experimental breath analysis; useful for night-to-night trends, not a clinically validated measurement. Distinct from the device RERA count and the analysis-time RERA detector.",
+    },
     event_type_oa: {
         label: 'OA — Obstructive Apnea',
         short: 'Airway blocked by soft-tissue collapse; airflow drops ≥90% for ≥10 s while breathing effort continues.',

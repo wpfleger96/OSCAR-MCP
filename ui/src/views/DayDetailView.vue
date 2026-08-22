@@ -53,6 +53,31 @@
                 glossary-key="hypopneas"
             />
             <StatCard label="RERAs" :value="data.reras" :decimals="0" glossary-key="reras" />
+            <StatCard
+                v-if="data.fl_class_ge4_pct != null || data.fl_class_ge4_pct_reason != null"
+                label="FL Class ≥4"
+                :value="data.fl_class_ge4_pct ?? null"
+                :reason="data.fl_class_ge4_pct_reason"
+                unit="%"
+                :decimals="1"
+                glossary-key="fl_class_ge4_pct"
+            />
+            <StatCard
+                v-if="data.rera_index != null || data.rera_index_reason != null"
+                label="RERA Index (proxy)"
+                :value="data.rera_index ?? null"
+                :reason="data.rera_index_reason"
+                :decimals="2"
+                glossary-key="rera_index"
+            />
+            <StatCard
+                v-if="data.rera_count != null || data.rera_reason != null"
+                label="RERA Proxy Count"
+                :value="data.rera_count ?? null"
+                :reason="data.rera_reason"
+                :decimals="0"
+                glossary-key="rera_index"
+            />
         </div>
 
         <!-- Pressure group -->
