@@ -27,7 +27,11 @@ from snore.database.models import (
     User,
 )
 from snore.parsers.apple_health.models import apply_noon_split
-from snore.services.breath.dtos import NightlyAnalysisSummary, NightlyRangeSummary
+from snore.services.breath.dtos import (
+    DeviceAmbiguityError,
+    NightlyAnalysisSummary,
+    NightlyRangeSummary,
+)
 from snore.services.breath_service import BreathService
 from snore.validation.apple_cross_report import correlate_night_pairs
 from snore.validation.apple_cross_validator import AppleCrossValidator
@@ -150,6 +154,44 @@ def _stub_nights(
             date_start=date_start,
             date_end=date_end,
             device_id=1,
+            compliance_threshold_hours=4.0,
+            n_calendar_nights=(date_end - date_start).days + 1,
+            n_nights=len(in_range),
+            days_compliant=len(in_range),
+            compliance_pct=100.0,
+            nights=in_range,
+        )
+
+    monkeypatch.setattr(BreathService, "get_nightly_range_summary", _fake)
+
+
+def _stub_multi_device(
+    monkeypatch: pytest.MonkeyPatch,
+    nights: list[NightlyAnalysisSummary],
+    ambiguous: set[date],
+) -> None:
+    """Stub get_nightly_range_summary to raise ambiguity for unpinned nights.
+
+    A call is ambiguous when ``device_id`` is None and its span covers any
+    ``ambiguous`` date — mirroring _resolve_range raising for a multi-device
+    night.  Pinning ``device_id`` suppresses the raise and returns every night.
+    """
+
+    async def _fake(self, date_start, date_end, *, device_id=None, **_kwargs):  # noqa: ANN001
+        if device_id is None:
+            hit = next((d for d in ambiguous if date_start <= d <= date_end), None)
+            if hit is not None:
+                raise DeviceAmbiguityError(
+                    therapy_date=hit,
+                    profile_id=0,
+                    owned_device_ids=[1, 2],
+                    device_serials={1: "A", 2: "B"},
+                )
+        in_range = [n for n in nights if date_start <= n.therapy_date <= date_end]
+        return NightlyRangeSummary(
+            date_start=date_start,
+            date_end=date_end,
+            device_id=device_id or 1,
             compliance_threshold_hours=4.0,
             n_calendar_nights=(date_end - date_start).days + 1,
             n_nights=len(in_range),
@@ -314,6 +356,61 @@ class TestAppleCrossValidator:
 
         rec = report.nights[0]
         assert rec.apple_breathing_disturbances == pytest.approx(15.0)
+
+    async def test_device_ambiguous_night_degrades_rest_scored(
+        self, async_db_session, monkeypatch
+    ):
+        """One multi-device night skips as device_ambiguous; the range never aborts."""
+        profile_id = await _make_profile(async_db_session)
+        nights = [date(2024, 7, d) for d in (1, 2, 3)]
+        ambiguous_night = nights[1]
+        # Only the two unambiguous nights carry resolvable SNORE summaries.
+        summaries = [
+            _night(nights[0], rera_index=1.0),
+            _night(nights[2], rera_index=3.0),
+        ]
+        _stub_multi_device(monkeypatch, summaries, ambiguous={ambiguous_night})
+        for n in nights:
+            await _seed_apple_bd(async_db_session, profile_id, n, 5.0)
+        await async_db_session.flush()
+
+        report = await AppleCrossValidator(
+            async_db_session, profile_id
+        ).validate_date_range("2024-07-01", "2024-07-03")
+
+        by_date = {r.night_date: r for r in report.nights}
+        assert by_date["2024-07-02"].skip_reason == "device_ambiguous"
+        assert by_date["2024-07-02"].rera_index is None
+        # Apple side is still joined onto the skipped night.
+        assert by_date["2024-07-02"].apple_breathing_disturbances == pytest.approx(5.0)
+        assert by_date["2024-07-01"].skip_reason is None
+        assert by_date["2024-07-03"].skip_reason is None
+
+        agg = report.aggregate
+        assert agg.total_nights == 3
+        assert agg.n_device_ambiguous == 1
+
+    async def test_pinned_device_id_resolves_ambiguity(
+        self, async_db_session, monkeypatch
+    ):
+        """Passing device_id suppresses ambiguity; the night is scored, not skipped."""
+        profile_id = await _make_profile(async_db_session)
+        nights = [date(2024, 9, d) for d in (1, 2, 3)]
+        summaries = [_night(n, rera_index=float(i + 1)) for i, n in enumerate(nights)]
+        _stub_multi_device(monkeypatch, summaries, ambiguous={nights[1]})
+        for i, n in enumerate(nights):
+            await _seed_apple_bd(async_db_session, profile_id, n, float(i + 1))
+        await async_db_session.flush()
+
+        report = await AppleCrossValidator(
+            async_db_session, profile_id
+        ).validate_date_range("2024-09-01", "2024-09-03", device_id=1)
+
+        agg = report.aggregate
+        assert agg.n_device_ambiguous == 0
+        assert agg.total_nights == 3
+        assert agg.rera_vs_apple_bd.n_paired_nights == 3
+        assert agg.rera_vs_apple_bd.rho == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
