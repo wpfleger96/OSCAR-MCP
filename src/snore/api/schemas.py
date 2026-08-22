@@ -193,6 +193,12 @@ class BreathTrendsValidationRequest(BaseModel):
         return self
 
 
+# Apple cross-validation walks its calendar span in 90-night pages in the
+# request path, so an unbounded span means thousands of sequential queries.
+# One year of nights is far beyond any real Apple Watch export horizon.
+_APPLE_CROSS_MAX_SPAN_NIGHTS = 366
+
+
 class AppleCrossValidationRequest(BaseModel):
     from_date: date
     to_date: date
@@ -202,6 +208,12 @@ class AppleCrossValidationRequest(BaseModel):
     def validate_date_order(self) -> AppleCrossValidationRequest:
         if self.to_date < self.from_date:
             raise ValueError("to_date must be >= from_date")
+        span_nights = (self.to_date - self.from_date).days + 1
+        if span_nights > _APPLE_CROSS_MAX_SPAN_NIGHTS:
+            raise ValueError(
+                f"Date range spans {span_nights} nights; the maximum is "
+                f"{_APPLE_CROSS_MAX_SPAN_NIGHTS}. Narrow the range."
+            )
         return self
 
 
