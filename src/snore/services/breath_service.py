@@ -72,7 +72,7 @@ from snore.services.breath import (
     _fetch_waveform_blobs as _fetch_waveform_blobs,
 )
 from snore.services.breath import (
-    _iter_fl_run_recoveries as _iter_fl_run_recoveries,
+    iter_fl_run_recoveries as iter_fl_run_recoveries,
 )
 
 __all__ = [
