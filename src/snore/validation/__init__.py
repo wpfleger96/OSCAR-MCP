@@ -3,6 +3,16 @@ Validation module for comparing SNORE's programmatic detection with machine even
 and for signal-level FL and breath-trends validation against device waveforms.
 """
 
+from snore.validation.apple_cross_report import (
+    AppleCrossAggregate,
+    AppleCrossNightRecord,
+    AppleCrossValidationReport,
+    PairCorrelation,
+    correlate_night_pairs,
+    export_apple_cross_report_csv,
+    export_apple_cross_report_json,
+)
+from snore.validation.apple_cross_validator import AppleCrossValidator
 from snore.validation.batch import BatchValidator
 from snore.validation.breath_trends_report import (
     BreathTrendsAggregateMetrics,
@@ -41,6 +51,14 @@ from snore.validation.rera_validator import ReraValidator
 from snore.validation.stats import mean_or_none, spearman_or_none
 
 __all__ = [
+    "AppleCrossValidator",
+    "AppleCrossValidationReport",
+    "AppleCrossNightRecord",
+    "AppleCrossAggregate",
+    "PairCorrelation",
+    "correlate_night_pairs",
+    "export_apple_cross_report_json",
+    "export_apple_cross_report_csv",
     "BatchValidator",
     "CrossParserSameDay",
     "IntegrityReport",

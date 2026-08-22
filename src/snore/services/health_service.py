@@ -20,6 +20,9 @@ __all__ = ["HealthService"]
 
 _SPO2_RECORD_TYPE = "HKQuantityTypeIdentifierOxygenSaturation"
 _RR_RECORD_TYPE = "HKQuantityTypeIdentifierRespiratoryRate"
+_BREATHING_DISTURBANCE_RECORD_TYPE = (
+    "HKQuantityTypeIdentifierAppleSleepingBreathingDisturbances"
+)
 
 
 def _normalize_spo2(v: float) -> float:
@@ -142,6 +145,63 @@ class HealthService(ProfileScopedService):
             min_spo2_pct=min_spo2,
             avg_rr=round(avg_rr, 2) if avg_rr is not None else None,
         )
+
+    async def get_breathing_disturbance_by_night(
+        self, date_from: date, date_to: date
+    ) -> dict[date, float]:
+        """Return mean Apple sleeping-breathing-disturbance value per night.
+
+        Aggregates ``value_num`` of
+        ``HKQuantityTypeIdentifierAppleSleepingBreathingDisturbances`` samples
+        grouped by ``night_date`` (profile-scoped, inclusive date range).  Apple
+        writes this metric sparsely — most nights have no row and are simply
+        absent from the returned mapping (never keyed to ``None``).
+
+        The mean collapses the rare multi-source night to one value; single-row
+        nights (the common case) pass through unchanged.
+        """
+        rows = (
+            await self.db_session.execute(
+                select(
+                    models.HealthSample.night_date,
+                    func.avg(models.HealthSample.value_num),
+                )
+                .where(
+                    models.HealthSample.profile_id == self.profile_id,
+                    models.HealthSample.record_type
+                    == _BREATHING_DISTURBANCE_RECORD_TYPE,
+                    models.HealthSample.night_date >= date_from,
+                    models.HealthSample.night_date <= date_to,
+                    models.HealthSample.value_num.is_not(None),
+                )
+                .group_by(models.HealthSample.night_date)
+            )
+        ).all()
+        return {night: float(value) for night, value in rows if value is not None}
+
+    async def get_fragmentation_by_night(
+        self, date_from: date, date_to: date
+    ) -> dict[date, tuple[float | None, float | None]]:
+        """Return ``(awake_seconds, sleep_efficiency_pct)`` per night.
+
+        Sourced from cached ``HealthNightlySummary`` rows (profile-scoped,
+        inclusive range); either component may be ``None`` when the summary
+        lacked stage data.  Nights without a summary row are absent from the map.
+        """
+        rows = (
+            await self.db_session.execute(
+                select(
+                    models.HealthNightlySummary.night_date,
+                    models.HealthNightlySummary.awake_seconds,
+                    models.HealthNightlySummary.sleep_efficiency_pct,
+                ).where(
+                    models.HealthNightlySummary.profile_id == self.profile_id,
+                    models.HealthNightlySummary.night_date >= date_from,
+                    models.HealthNightlySummary.night_date <= date_to,
+                )
+            )
+        ).all()
+        return {night: (awake, efficiency) for night, awake, efficiency in rows}
 
     async def get_night_samples(
         self, night_date: date, source_name: str | None = None

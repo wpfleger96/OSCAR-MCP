@@ -4,12 +4,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import (
+    AppleCrossValidationRequest,
     BreathTrendsValidationRequest,
     FlValidationRequest,
     ReraValidationRequest,
     ValidationRequest,
 )
 from snore.validation import (
+    AppleCrossValidationReport,
+    AppleCrossValidator,
     BatchValidator,
     BreathTrendsValidationReport,
     BreathTrendsValidator,
@@ -57,6 +60,19 @@ async def run_rera_validation(
     db: AsyncSession = Depends(get_db),
 ) -> ReraValidationReport:
     validator = ReraValidator(db, actor.profile_id)
+    return await validator.validate_date_range(
+        date_from=body.from_date.isoformat(),
+        date_to=body.to_date.isoformat(),
+    )
+
+
+@router.post("/apple", response_model=AppleCrossValidationReport)
+async def run_apple_cross_validation(
+    body: AppleCrossValidationRequest,
+    actor: RequireAuth,
+    db: AsyncSession = Depends(get_db),
+) -> AppleCrossValidationReport:
+    validator = AppleCrossValidator(db, actor.profile_id)
     return await validator.validate_date_range(
         date_from=body.from_date.isoformat(),
         date_to=body.to_date.isoformat(),

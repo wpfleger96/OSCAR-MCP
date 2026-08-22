@@ -205,6 +205,17 @@ class ReraValidationRequest(BaseModel):
         return self
 
 
+class AppleCrossValidationRequest(BaseModel):
+    from_date: date
+    to_date: date
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> AppleCrossValidationRequest:
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be >= from_date")
+        return self
+
+
 # Style vocabulary must stay in sync: DB CHECKs (models.py, migrations 008/009), services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
 MaskStyle = Literal["pillows", "nasal", "full_face"]
 
