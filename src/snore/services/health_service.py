@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import NamedTuple
 
 from sqlalchemy import case, func, select
 
@@ -16,7 +17,18 @@ from snore.services.schemas import (
     HealthSampleRead,
 )
 
-__all__ = ["HealthService"]
+__all__ = ["HealthService", "NightFragmentation"]
+
+
+class NightFragmentation(NamedTuple):
+    """Watch-derived sleep-fragmentation components for one night.
+
+    Either component may be ``None`` when the summary lacked stage data.
+    """
+
+    awake_seconds: float | None
+    sleep_efficiency_pct: float | None
+
 
 _SPO2_RECORD_TYPE = "HKQuantityTypeIdentifierOxygenSaturation"
 _RR_RECORD_TYPE = "HKQuantityTypeIdentifierRespiratoryRate"
@@ -181,8 +193,8 @@ class HealthService(ProfileScopedService):
 
     async def get_fragmentation_by_night(
         self, date_from: date, date_to: date
-    ) -> dict[date, tuple[float | None, float | None]]:
-        """Return ``(awake_seconds, sleep_efficiency_pct)`` per night.
+    ) -> dict[date, NightFragmentation]:
+        """Return ``NightFragmentation(awake_seconds, sleep_efficiency_pct)`` per night.
 
         Sourced from cached ``HealthNightlySummary`` rows (profile-scoped,
         inclusive range); either component may be ``None`` when the summary
@@ -201,7 +213,10 @@ class HealthService(ProfileScopedService):
                 )
             )
         ).all()
-        return {night: (awake, efficiency) for night, awake, efficiency in rows}
+        return {
+            night: NightFragmentation(awake, efficiency)
+            for night, awake, efficiency in rows
+        }
 
     async def get_night_samples(
         self, night_date: date, source_name: str | None = None

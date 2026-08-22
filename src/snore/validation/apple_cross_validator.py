@@ -27,17 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.shared.versioning import DayAnalysisStatus
 from snore.services.breath.dtos import DeviceAmbiguityError, NightlyAnalysisSummary
+from snore.services.breath.nightly import MAX_NIGHTS_PER_CALL
 from snore.services.breath_service import BreathService
-from snore.services.health_service import HealthService
+from snore.services.health_service import HealthService, NightFragmentation
 from snore.validation.apple_cross_report import (
     AppleCrossAggregate,
     AppleCrossNightRecord,
     AppleCrossValidationReport,
     correlate_night_pairs,
 )
-
-# get_nightly_range_summary caps a single call at 90 nights; page longer ranges.
-_MAX_NIGHTS_PER_CALL = 90
 
 
 def _skip_reason_for(day_status: DayAnalysisStatus) -> str | None:
@@ -89,7 +87,7 @@ class AppleCrossValidator:
             self._ambiguous_record(d, apple_bd, fragmentation) for d in ambiguous_dates
         )
         records.sort(key=lambda r: r.night_date)
-        aggregate = self._aggregate(records, apple_bd)
+        aggregate = self._aggregate(records)
 
         return AppleCrossValidationReport(
             report_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -114,7 +112,7 @@ class AppleCrossValidator:
         ambiguous: list[date] = []
         cursor = start
         while cursor <= end:
-            chunk_end = min(cursor + timedelta(days=_MAX_NIGHTS_PER_CALL - 1), end)
+            chunk_end = min(cursor + timedelta(days=MAX_NIGHTS_PER_CALL - 1), end)
             chunk_nights, chunk_ambiguous = await self._resolve_chunk(
                 breath_svc, cursor, chunk_end, device_id
             )
@@ -162,10 +160,10 @@ class AppleCrossValidator:
     def _build_record(
         night: NightlyAnalysisSummary,
         apple_bd: dict[date, float],
-        fragmentation: dict[date, tuple[float | None, float | None]],
+        fragmentation: dict[date, NightFragmentation],
     ) -> AppleCrossNightRecord:
         bd = apple_bd.get(night.therapy_date)
-        awake, efficiency = fragmentation.get(night.therapy_date, (None, None))
+        frag = fragmentation.get(night.therapy_date, NightFragmentation(None, None))
         return AppleCrossNightRecord(
             night_date=night.therapy_date.isoformat(),
             rera_index=night.rera_index,
@@ -174,8 +172,8 @@ class AppleCrossValidator:
             fl_class_ge4_pct_reason=_reason_str(night.fl_class_ge4_pct_reason),
             apple_breathing_disturbances=bd,
             apple_bd_reason="no_apple_bd" if bd is None else None,
-            awake_seconds=awake,
-            sleep_efficiency_pct=efficiency,
+            awake_seconds=frag.awake_seconds,
+            sleep_efficiency_pct=frag.sleep_efficiency_pct,
             skip_reason=_skip_reason_for(night.day_status),
         )
 
@@ -183,11 +181,11 @@ class AppleCrossValidator:
     def _ambiguous_record(
         night_date: date,
         apple_bd: dict[date, float],
-        fragmentation: dict[date, tuple[float | None, float | None]],
+        fragmentation: dict[date, NightFragmentation],
     ) -> AppleCrossNightRecord:
         """A device-ambiguous night: null SNORE side, Apple side still joined."""
         bd = apple_bd.get(night_date)
-        awake, efficiency = fragmentation.get(night_date, (None, None))
+        frag = fragmentation.get(night_date, NightFragmentation(None, None))
         return AppleCrossNightRecord(
             night_date=night_date.isoformat(),
             rera_index=None,
@@ -196,35 +194,39 @@ class AppleCrossValidator:
             fl_class_ge4_pct_reason="device_ambiguous",
             apple_breathing_disturbances=bd,
             apple_bd_reason="no_apple_bd" if bd is None else None,
-            awake_seconds=awake,
-            sleep_efficiency_pct=efficiency,
+            awake_seconds=frag.awake_seconds,
+            sleep_efficiency_pct=frag.sleep_efficiency_pct,
             skip_reason="device_ambiguous",
         )
 
     @staticmethod
-    def _aggregate(
-        records: list[AppleCrossNightRecord],
-        apple_bd: dict[date, float],
-    ) -> AppleCrossAggregate:
-        # Build per-metric night→value maps, dropping nights whose value is null.
+    def _aggregate(records: list[AppleCrossNightRecord]) -> AppleCrossAggregate:
+        # Build per-metric night→value maps from the records themselves.  The
+        # SNORE side (rera, fl) is gated on ``skip_reason is None`` so a skipped
+        # night — including a stale / version-mismatched one that still carries
+        # non-null indices — contributes to no correlation, upholding the
+        # skip_reason invariant.  The Apple side is joined regardless of skip.
         rera: dict[date, float] = {}
         fl: dict[date, float] = {}
         awake: dict[date, float] = {}
         efficiency: dict[date, float] = {}
+        apple_bd: dict[date, float] = {}
         for r in records:
             key = date.fromisoformat(r.night_date)
-            if r.rera_index is not None:
-                rera[key] = r.rera_index
-            if r.fl_class_ge4_pct is not None:
-                fl[key] = r.fl_class_ge4_pct
+            if r.apple_breathing_disturbances is not None:
+                apple_bd[key] = r.apple_breathing_disturbances
             if r.awake_seconds is not None:
                 awake[key] = r.awake_seconds
             if r.sleep_efficiency_pct is not None:
                 efficiency[key] = r.sleep_efficiency_pct
+            if r.skip_reason is not None:
+                continue
+            if r.rera_index is not None:
+                rera[key] = r.rera_index
+            if r.fl_class_ge4_pct is not None:
+                fl[key] = r.fl_class_ge4_pct
 
-        n_with_apple_bd = sum(
-            1 for r in records if r.apple_breathing_disturbances is not None
-        )
+        n_with_apple_bd = len(apple_bd)
 
         return AppleCrossAggregate(
             total_nights=len(records),

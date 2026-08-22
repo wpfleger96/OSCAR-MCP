@@ -66,6 +66,13 @@ def validate_apple(
     if db and not Path(db).expanduser().exists():
         raise click.ClickException(f"Database not found: {db}")
 
+    # Reject an unsupported --export suffix up front, before running the
+    # validation, so a bad path never wastes a full range scan.
+    if export is not None and Path(export).suffix not in (".json", ".csv"):
+        raise click.ClickException(
+            f"Unknown export format '{Path(export).suffix}'. Use .json or .csv"
+        )
+
     async def _run() -> None:
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
         from snore.validation import (  # noqa: PLC0415
@@ -106,6 +113,10 @@ def validate_apple(
                 console.print(f"Skipped (analysis not run): {agg.n_analysis_not_run}")
                 console.print(f"Skipped (analysis stale):   {agg.n_analysis_stale}")
                 console.print(f"Skipped (device ambiguous): {agg.n_device_ambiguous}")
+                console.print(
+                    "[dim](skip counters are independent axes over the same "
+                    "nights; do not sum them)[/dim]"
+                )
 
                 corr_table = Table(title="Cross-source Spearman correlations")
                 corr_table.add_column("Metric pair")
@@ -130,15 +141,11 @@ def validate_apple(
 
                 if export:
                     export_path = Path(export)
+                    # Suffix already validated up front to be .json or .csv.
                     if export_path.suffix == ".json":
                         export_apple_cross_report_json(report, export_path)
-                    elif export_path.suffix == ".csv":
-                        export_apple_cross_report_csv(report, export_path)
                     else:
-                        raise click.ClickException(
-                            f"Unknown export format '{export_path.suffix}'. "
-                            "Use .json or .csv"
-                        )
+                        export_apple_cross_report_csv(report, export_path)
                     console.print(f"\nReport exported to {export_path}")
 
             except click.ClickException:
