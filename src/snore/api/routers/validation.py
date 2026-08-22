@@ -1,14 +1,18 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.deps import get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import (
+    AppleCrossValidationRequest,
     BreathTrendsValidationRequest,
     FlValidationRequest,
     ValidationRequest,
 )
+from snore.services.breath.dtos import DeviceNotOwnedError
 from snore.validation import (
+    AppleCrossValidationReport,
+    AppleCrossValidator,
     BatchValidator,
     BreathTrendsValidationReport,
     BreathTrendsValidator,
@@ -45,6 +49,25 @@ async def run_fl_validation(
         date_from=body.from_date.isoformat(),
         date_to=body.to_date.isoformat(),
     )
+
+
+@router.post("/apple", response_model=AppleCrossValidationReport)
+async def run_apple_cross_validation(
+    body: AppleCrossValidationRequest,
+    actor: RequireAuth,
+    db: AsyncSession = Depends(get_db),
+) -> AppleCrossValidationReport:
+    validator = AppleCrossValidator(db, actor.profile_id)
+    try:
+        return await validator.validate_date_range(
+            date_from=body.from_date.isoformat(),
+            date_to=body.to_date.isoformat(),
+            device_id=body.device_id,
+        )
+    except DeviceNotOwnedError as exc:
+        raise HTTPException(
+            status_code=404, detail="device_id not found for this profile"
+        ) from exc
 
 
 @router.post("/breaths", response_model=BreathTrendsValidationReport)
