@@ -117,7 +117,7 @@ class TestEmptyEveStubSkipped:
         empty_eve.touch()
 
         with caplog.at_level(logging.DEBUG, logger=PARSER_LOGGER):
-            ResmedEDFParser()._parse_events(empty_eve, session)
+            ResmedEDFParser()._parse_eve_files_for_night([empty_eve], session)
 
         assert session.events == []
         assert _warnings(caplog) == []
