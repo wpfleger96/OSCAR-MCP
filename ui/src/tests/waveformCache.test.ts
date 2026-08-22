@@ -56,6 +56,22 @@ describe('WaveformWindowCache.resolve', () => {
         expect(r.slice!.timestamps.length).toBeGreaterThanOrEqual(MIN_INVIEW_POINTS)
     })
 
+    it('test_exact_cover_beats_denser_inexact_cover', () => {
+        const cache = new WaveformWindowCache()
+        // Inexact cover that slices to MANY points over [0, 300].
+        cache.store(fw(0, 300, 6000), makeResponse(linspace(0, 300, 6000), 6000), 1000)
+        // Exact cover over the same span that slices to FAR fewer points.
+        cache.store(fw(0, 300, 2000), makeResponse(linspace(0, 300, 40), 40), 1000)
+
+        const r = cache.resolve(100, 200, 1000)
+
+        // Exact = native resolution and cannot be improved, so it wins outright — no refetch —
+        // even though the inexact cover would slice to more points.
+        expect(r.hit).toBe(true)
+        expect(r.fetchWindow).toBeNull()
+        expect(r.slice!.timestamps.length).toBeLessThan(MIN_INVIEW_POINTS)
+    })
+
     it('test_covered_but_sparse_returns_slice_and_fetch', () => {
         const cache = new WaveformWindowCache()
         // 100 downsampled pts over the whole chunk; a narrow view is far below the density floor.

@@ -5,4 +5,4 @@ export const WINDOW_EXPANSION = 3 // fetch ±1 window-width around the visible s
 export const MIN_INVIEW_POINTS = 1000 // density threshold for serving a window from cache
 export const MAX_CACHED_CHUNKS = 16 // per-type LRU depth (excludes the full-night overview)
 export const SERVER_MAX_POINTS = 10000 // must match the backend max_points le= bound
-export const ZOOM_FETCH_DEBOUNCE_MS = 120
+export const ZOOM_FETCH_DEBOUNCE_MS = 120 // coalesces a drag gesture's setScale burst into one zoom emit

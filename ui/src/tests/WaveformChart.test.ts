@@ -4,7 +4,10 @@ import { ZOOM_FETCH_DEBOUNCE_MS } from '@/constants/waveform'
 
 // Shared handle so tests can reach the uPlot instance the component created.
 // Hoisted because vi.mock factories run before module-level declarations.
-const mockState = vi.hoisted(() => ({ lastChart: null as Record<string, unknown> | null }))
+const mockState = vi.hoisted(() => ({
+    lastChart: null as Record<string, unknown> | null,
+    lastOpts: null as Record<string, unknown> | null,
+}))
 
 // uPlot must be mocked before the component is imported.
 // Vitest requires a 'function' or 'class' body for constructor mocks.
@@ -59,6 +62,7 @@ vi.mock('uplot', () => {
         }
 
         mockState.lastChart = this
+        mockState.lastOpts = opts
     }
     ;(UPlotMock as unknown as Record<string, unknown>).sync = vi.fn(() => ({
         key: 'k',
@@ -91,6 +95,7 @@ vi.mock('@/utils/formatting', () => ({
 // Vitest requires a function or class body for constructor mocks.
 beforeEach(() => {
     mockState.lastChart = null
+    mockState.lastOpts = null
     ;(globalThis as unknown as Record<string, unknown>).ResizeObserver = vi.fn(
         function ResizeObserverMock(this: Record<string, unknown>) {
             this.observe = vi.fn()
@@ -205,6 +210,27 @@ describe('WaveformChart', () => {
         expect(x.max).toBeCloseTo(3, 10)
     })
 
+    it('test_data_series_disables_point_markers', () => {
+        mount(WaveformChart, { props: LONG_PROPS })
+
+        const opts = mockState.lastOpts as unknown as {
+            series: Array<{ points?: { show?: boolean } }>
+        }
+        // Dot-flash regression guard: point markers stay hidden even when a slice is sparse.
+        expect(opts.series[1].points!.show).toBe(false)
+    })
+
+    it('test_data_update_swaps_without_rescaling_the_viewport', async () => {
+        const wrapper = mount(WaveformChart, { props: LONG_PROPS })
+        const chart = mockState.lastChart as unknown as { setData: ReturnType<typeof vi.fn> }
+
+        await wrapper.setProps({ timestamps: [0, 50, 100], values: [1, 2, 3] })
+
+        expect(chart.setData).toHaveBeenCalled()
+        // resetScales=false pins the viewport across the data swap (the invariant).
+        expect(chart.setData.mock.calls.at(-1)![1]).toBe(false)
+    })
+
     describe('with fake timers', () => {
         beforeEach(() => vi.useFakeTimers())
         afterEach(() => vi.useRealTimers())
@@ -244,6 +270,34 @@ describe('WaveformChart', () => {
             const [start, end] = emitted![0] as [number, number]
             expect(start).toBeCloseTo(8, 10)
             expect(end).toBeCloseTo(13, 10)
+        })
+
+        it('test_setScaleX_same_window_skips_setScale_and_does_not_swallow_next_emit', () => {
+            const wrapper = mount(WaveformChart, { props: LONG_PROPS })
+            const vm = wrapper.vm as unknown as { setScaleX: (min: number, max: number) => void }
+            const chart = mockState.lastChart as unknown as {
+                scales: { x?: { min: number; max: number } }
+                setScale: ((key: string, range: { min: number; max: number }) => void) & {
+                    mock: { calls: unknown[] }
+                }
+            }
+
+            // First programmatic zoom commits the window and arms+consumes isInitialRender.
+            vm.setScaleX(10, 30)
+            const callsAfterFirst = chart.setScale.mock.calls.length
+            expect(chart.scales.x!.min).toBeCloseTo(10, 10)
+            expect(chart.scales.x!.max).toBeCloseTo(30, 10)
+
+            // Same window again: the idempotence guard returns before touching setScale.
+            vm.setScaleX(10, 30)
+            expect(chart.setScale.mock.calls.length).toBe(callsAfterFirst)
+
+            // A genuine gesture still emits — the no-op call left no armed flag behind.
+            chart.setScale('x', { min: 12, max: 28 })
+            vi.advanceTimersByTime(ZOOM_FETCH_DEBOUNCE_MS)
+            const emitted = wrapper.emitted('zoom')
+            expect(emitted).toHaveLength(1)
+            expect(emitted![0]).toEqual([12, 28])
         })
     })
 })

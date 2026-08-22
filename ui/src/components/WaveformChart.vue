@@ -40,6 +40,10 @@ const emit = defineEmits<{
 // Every inbound x position must add `props.startEpoch` to a session-relative offset,
 // and every outbound value (emits/exposed methods) must subtract it to restore
 // session-relative seconds. Future canvas-drawing features must follow the same rule.
+//
+// Viewport invariant: data swaps NEVER move the viewport. The data watch calls
+// setData(..., false) so a cache miss's interim slice cannot rescale the x range; every
+// viewport change comes from a user gesture or an explicit setScaleX/resetZoom call.
 
 const containerRef = ref<HTMLDivElement>()
 let chart: uPlot | null = null
@@ -294,7 +298,10 @@ onBeforeUnmount(() => {
     if (debounceTimer) clearTimeout(debounceTimer)
 })
 
-// Update data in-place when timestamps/values change (avoids canvas flicker)
+// Update data in-place when timestamps/values change (avoids canvas flicker).
+// resetScales=false pins the viewport (see invariant above): the interim cache slice never
+// rescales the x range, so no setScale fires — hence isInitialRender must NOT be armed here,
+// or it would swallow the next genuine gesture's zoom emit.
 watch(
     () => [props.timestamps, props.values] as const,
     async ([ts, vals]) => {
@@ -304,8 +311,7 @@ watch(
             createChart()
             return
         }
-        isInitialRender = true
-        chart.setData([ts.map((t) => t + props.startEpoch), vals])
+        chart.setData([ts.map((t) => t + props.startEpoch), vals], false)
     },
 )
 
@@ -333,8 +339,22 @@ defineExpose({
     },
     setScaleX(min: number, max: number) {
         if (!chart) return
+        const targetMin = min + props.startEpoch
+        const targetMax = max + props.startEpoch
+        // Idempotence: if the x scale already sits at the target (e.g. the origin chart of a drag
+        // receiving its own window back), skip setScale so isInitialRender is not left double-armed
+        // to swallow a later genuine gesture.
+        const cur = chart.scales.x
+        if (
+            cur.min != null &&
+            cur.max != null &&
+            Math.abs(cur.min - targetMin) < 1e-6 &&
+            Math.abs(cur.max - targetMax) < 1e-6
+        ) {
+            return
+        }
         isInitialRender = true
-        chart.setScale('x', { min: min + props.startEpoch, max: max + props.startEpoch })
+        chart.setScale('x', { min: targetMin, max: targetMax })
     },
 })
 </script>

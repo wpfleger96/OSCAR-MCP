@@ -41,6 +41,11 @@ vi.mock('@/components/WaveformChart.vue', () => ({
             'events',
         ],
         emits: ['zoom'],
+        // Viewport methods the parent drives via chartRefs (no-ops for the stub).
+        methods: {
+            setScaleX() {},
+            resetZoom() {},
+        },
         template: '<div class="waveform-chart-stub" :data-refetching="refetching" />',
     },
 }))
@@ -312,6 +317,37 @@ describe('MultiWaveformView', () => {
 
         // Assert: no user-facing fetch — the step resolves entirely from the prefetched cache.
         expect(mockGetWaveformData).not.toHaveBeenCalled()
+    })
+
+    it('test_unmount_aborts_in_flight_fetch_and_stores_nothing', async () => {
+        // Model axios: an aborted request rejects (CanceledError), so its response is never stored.
+        let capturedSignal: AbortSignal | undefined
+        mockGetWaveformData.mockImplementation(
+            (_s, _t, _p, signal) =>
+                new Promise<WaveformDataResponse>((_resolve, reject) => {
+                    capturedSignal = signal as AbortSignal
+                    signal?.addEventListener('abort', () =>
+                        reject(Object.assign(new Error('canceled'), { name: 'CanceledError' })),
+                    )
+                }),
+        )
+
+        const registry = createWaveformCacheRegistry()
+        const wrapper = mount(MultiWaveformView, {
+            props: makeProps({ cacheRegistry: registry, initialTypes: ['flow'] }),
+        })
+        await Promise.resolve() // let onMounted → loadChart issue the in-flight fetch
+
+        expect(capturedSignal).toBeDefined()
+        expect(capturedSignal!.aborted).toBe(false)
+
+        // Unmount mid-flight: onBeforeUnmount aborts the fetch, which rejects and never stores —
+        // so a late response cannot land the previous session's chunk into the cleared cache.
+        wrapper.unmount()
+        await flushPromises()
+
+        expect(capturedSignal!.aborted).toBe(true)
+        expect(registry.getCache('flow').resolve(0, 3600, 3600).slice).toBeNull()
     })
 
     it('test_removing_a_chart_aborts_its_pending_prefetch', async () => {

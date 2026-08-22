@@ -1,10 +1,12 @@
 import { ref, shallowRef, type Ref, type ShallowRef } from 'vue'
-import { getWaveformData, type WaveformDataParams } from '@/api/waveforms'
-import type { WaveformCacheRegistry, FetchWindow, WaveformSlice } from '@/utils/waveformCache'
+import { getWaveformData } from '@/api/waveforms'
+import {
+    buildWaveformParams,
+    type WaveformCacheRegistry,
+    type FetchWindow,
+    type WaveformSlice,
+} from '@/utils/waveformCache'
 import { prefetchAdjacentWindows } from '@/utils/waveformPrefetch'
-
-// Tolerance for treating a fetch window as spanning the full night (fractional bounds).
-const EPS = 1e-6
 
 export interface WaveformWindowComposable {
     data: ShallowRef<WaveformSlice | null>
@@ -64,20 +66,12 @@ export function useWaveformWindow(
         // Capture the type at fetch time: the response belongs to this type's cache even if
         // waveformType changes before the request completes.
         const fetchedType = waveformType.value
-        const spansFullNight =
-            fetchWindow.startSec <= EPS && fetchWindow.endSec >= durationSec.value - EPS
-
-        const params: WaveformDataParams = { max_points: fetchWindow.maxPoints }
-        if (!spansFullNight) {
-            params.start_seconds = fetchWindow.startSec
-            params.end_seconds = fetchWindow.endSec
-        }
 
         try {
             const response = await getWaveformData(
                 sessionId.value,
                 fetchedType,
-                params,
+                buildWaveformParams(fetchWindow, durationSec.value),
                 thisController.signal,
             )
             // Superseded by a newer load: never store, never touch state (last call wins).

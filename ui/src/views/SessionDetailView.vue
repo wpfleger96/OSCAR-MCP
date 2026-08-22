@@ -1009,6 +1009,7 @@ import { getDay } from '@/api/days'
 import { getHealthNight } from '@/api/health'
 import { useWaveformWindow } from '@/composables/useWaveformWindow'
 import { createWaveformCacheRegistry } from '@/utils/waveformCache'
+import { zoomInWindow, zoomOutWindow } from '@/utils/zoomMath'
 import { MIN_ZOOM_WINDOW_SEC } from '@/constants/waveform'
 import {
     useAvailableDates,
@@ -1180,6 +1181,9 @@ if (jumpToTime != null) {
                 const end = Math.min(fullDuration.value, jumpToTime + padding)
                 currentZoomRange.value = { start, end }
                 singleChartRef.value?.setScaleX(start, end)
+                // Load dense data for the jumped window (and warm its neighbors); the overview alone
+                // would render the jump sparsely until the user next interacts.
+                loadWindow(start, end)
             })
         }
     })
@@ -1192,27 +1196,17 @@ function handleZoom(startSec: number, endSec: number): void {
     }
 }
 
-function handleResetZoom(): void {
+async function handleResetZoom(): Promise<void> {
     currentZoomRange.value = null
     if (multiMode.value) {
         multiViewRef.value?.resetZoom()
     } else {
         loadWindow()
+        // resetZoom scales to the data extent, correct only after the full-night data has landed;
+        // loadWindow resolves the never-evicted overview synchronously but props flush async.
+        await nextTick()
         singleChartRef.value?.resetZoom()
     }
-}
-
-function clampZoomRange(
-    center: number,
-    halfWidth: number,
-    duration: number,
-): { start: number; end: number } {
-    let start = Math.max(0, center - halfWidth)
-    let end = Math.min(duration, center + halfWidth)
-    const desired = halfWidth * 2
-    if (start === 0) end = Math.min(duration, desired)
-    else if (end === duration) start = Math.max(0, duration - desired)
-    return { start, end }
 }
 
 function applyZoom(startSec: number, endSec: number): void {
@@ -1221,6 +1215,9 @@ function applyZoom(startSec: number, endSec: number): void {
         multiViewRef.value?.zoomTo(startSec, endSec)
     } else {
         loadWindow(startSec, endSec)
+        // Data swaps no longer rescale (WaveformChart pins the viewport), so a button zoom must
+        // move the viewport explicitly and immediately.
+        singleChartRef.value?.setScaleX(startSec, endSec)
     }
 }
 
@@ -1228,12 +1225,9 @@ function handleZoomIn(): void {
     if (!session.value) return
     const duration = fullDuration.value
     const range = currentZoomRange.value ?? { start: 0, end: duration }
-    const currentWindow = range.end - range.start
-    if (currentWindow <= MIN_ZOOM_WINDOW_SEC) return
+    if (range.end - range.start <= MIN_ZOOM_WINDOW_SEC) return
 
-    const center = (range.start + range.end) / 2
-    const newHalf = Math.max(MIN_ZOOM_WINDOW_SEC / 2, currentWindow / 4)
-    const { start, end } = clampZoomRange(center, newHalf, duration)
+    const { start, end } = zoomInWindow(range.start, range.end, duration)
     applyZoom(start, end)
 }
 
@@ -1241,14 +1235,12 @@ function handleZoomOut(): void {
     if (!session.value || !currentZoomRange.value) return
     const duration = fullDuration.value
     const range = currentZoomRange.value
-    const currentWindow = range.end - range.start
-    if (currentWindow * 2 >= duration) {
-        handleResetZoom()
+    if ((range.end - range.start) * 2 >= duration) {
+        void handleResetZoom()
         return
     }
 
-    const center = (range.start + range.end) / 2
-    const { start, end } = clampZoomRange(center, currentWindow, duration)
+    const { start, end } = zoomOutWindow(range.start, range.end, duration)
     applyZoom(start, end)
 }
 

@@ -6,6 +6,7 @@ vi.mock('@/api/waveforms')
 import { getWaveformData } from '@/api/waveforms'
 import { WaveformWindowCache } from '@/utils/waveformCache'
 import { prefetchAdjacentWindows } from '@/utils/waveformPrefetch'
+import { SERVER_MAX_POINTS } from '@/constants/waveform'
 import type { WaveformDataResponse } from '@/types'
 
 const mockGetWaveformData = vi.mocked(getWaveformData)
@@ -84,11 +85,12 @@ describe('prefetchAdjacentWindows', () => {
         // The zoom-in fetch window ([20, 80]) comes back dense + exact so it wins on re-resolve.
         mockGetWaveformData.mockResolvedValue(makeWindow(20, 80, 3000))
 
-        // Window [30, 70]: zoom-in target [40, 60] is a miss; zoom-out [10, 90] stays a dense hit.
+        // Window [30, 70]: zoom-in [40, 60] misses and the headroom probe [47.5, 52.5] misses, so
+        // both fetch; zoom-out [10, 90] stays a dense hit.
         prefetchAdjacentWindows(optsFor(cache, 30, 70))
         await flushPromises()
 
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
         expect(mockGetWaveformData).toHaveBeenCalledWith(
             1,
             'flow',
@@ -99,16 +101,83 @@ describe('prefetchAdjacentWindows', () => {
         expect(cache.resolve(40, 60, DURATION).hit).toBe(true)
     })
 
-    it('test_zoom_out_at_full_night_does_not_fetch', async () => {
+    it('test_probe_miss_fetches_current_window_at_server_max', async () => {
         const cache = new WaveformWindowCache()
-        seedOverview(cache, 2000)
+        // Dense-but-inexact overview: the ±½-width zoom neighbors slice densely (hits), but the
+        // 1/10-width headroom probe is too sparse and misses.
+        cache.store(
+            { startSec: 0, endSec: DURATION, maxPoints: 6000 },
+            makeWindow(0, DURATION, 6000),
+            DURATION,
+        )
+        // The headroom fetch of the current window returns exact, covering every deeper drag.
+        mockGetWaveformData.mockResolvedValue(makeWindow(30, 70, 5000))
 
-        // Already at the full night: the zoom-out candidate equals the current view and is skipped;
-        // the zoom-in candidate is covered densely by the overview.
+        prefetchAdjacentWindows(optsFor(cache, 30, 70))
+        await flushPromises()
+
+        // Only the headroom target fetches: the un-expanded current window at native density.
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
+        expect(mockGetWaveformData).toHaveBeenCalledWith(
+            1,
+            'flow',
+            { max_points: SERVER_MAX_POINTS, start_seconds: 30, end_seconds: 70 },
+            expect.any(AbortSignal),
+        )
+        // A deep drag inside the view is now an instant hit.
+        expect(cache.resolve(45, 55, DURATION).hit).toBe(true)
+    })
+
+    it('test_probe_hit_warms_only_the_two_adjacent_windows', async () => {
+        const cache = new WaveformWindowCache()
+        // An exact chunk covering just the headroom probe [47.5, 52.5] — but neither zoom neighbor.
+        cache.store(
+            { startSec: 47, endSec: 53, maxPoints: 2000 },
+            makeWindow(47, 53, 100),
+            DURATION,
+        )
+        mockGetWaveformData.mockImplementation((_id, _type, params) => {
+            const p = (params ?? {}) as { start_seconds?: number; end_seconds?: number }
+            return Promise.resolve(
+                makeWindow(p.start_seconds ?? 0, p.end_seconds ?? DURATION, 3000),
+            )
+        })
+
+        // Window [40, 60]: both zoom neighbors miss and fetch, but the probe is already covered,
+        // so the headroom copy is skipped.
+        prefetchAdjacentWindows(optsFor(cache, 40, 60))
+        await flushPromises()
+
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
+        expect(mockGetWaveformData).not.toHaveBeenCalledWith(
+            1,
+            'flow',
+            expect.objectContaining({ max_points: SERVER_MAX_POINTS }),
+            expect.any(AbortSignal),
+        )
+    })
+
+    it('test_full_night_current_view_headroom_omits_bounds', async () => {
+        const cache = new WaveformWindowCache()
+        cache.store(
+            { startSec: 0, endSec: DURATION, maxPoints: 6000 },
+            makeWindow(0, DURATION, 6000),
+            DURATION,
+        )
+        mockGetWaveformData.mockResolvedValue(makeWindow(0, DURATION, 5000))
+
+        // Current view IS the full night: zoom-out equals it (skipped), zoom-in slices densely
+        // (hit), and only the headroom copy fetches — as a full-night request that omits its bounds.
         prefetchAdjacentWindows(optsFor(cache, 0, DURATION))
         await flushPromises()
 
-        expect(mockGetWaveformData).not.toHaveBeenCalled()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
+        expect(mockGetWaveformData).toHaveBeenCalledWith(
+            1,
+            'flow',
+            { max_points: SERVER_MAX_POINTS },
+            expect.any(AbortSignal),
+        )
     })
 
     it('test_fetch_error_is_silent_and_stores_nothing', async () => {
@@ -137,9 +206,9 @@ describe('prefetchAdjacentWindows', () => {
         expect(cache.resolve(40, 60, DURATION).hit).toBe(false)
     })
 
-    it('test_both_candidates_can_fetch_concurrently', async () => {
+    it('test_empty_cache_warms_all_three_targets', async () => {
         const cache = new WaveformWindowCache()
-        // No overview: both zoom-in and zoom-out miss and must each fetch.
+        // No overview: zoom-in, zoom-out, and the drag-headroom copy all miss and each fetch.
         mockGetWaveformData.mockImplementation((_id, _type, params) => {
             const p = (params ?? {}) as { start_seconds?: number; end_seconds?: number }
             return Promise.resolve(
@@ -147,10 +216,10 @@ describe('prefetchAdjacentWindows', () => {
             )
         })
 
-        // Window [40, 60] centered mid-night: zoom-in [45, 55] and zoom-out [30, 70] both miss.
+        // Window [40, 60]: zoom-in [45, 55], zoom-out [30, 70], and headroom [40, 60] all fetch.
         prefetchAdjacentWindows(optsFor(cache, 40, 60))
         await flushPromises()
 
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(3)
     })
 })

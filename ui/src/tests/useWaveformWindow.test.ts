@@ -115,23 +115,28 @@ describe('useWaveformWindow', () => {
     })
 
     it('test_sparse_region_serves_slice_and_fetches_denser', async () => {
-        mockGetWaveformData
-            .mockResolvedValueOnce(makeDenseOverview())
-            .mockResolvedValueOnce(makeWindow(30, 60))
-        const { composable } = makeComposable()
+        // Windowed fetches return a dense exact window; any later prefetch fetches resolve too.
+        mockGetWaveformData.mockImplementation((_id, _type, params) => {
+            const p = (params ?? {}) as { start_seconds?: number; end_seconds?: number }
+            if (p.start_seconds === undefined) return Promise.resolve(makeDenseOverview())
+            return Promise.resolve(makeWindow(p.start_seconds, p.end_seconds ?? 100))
+        })
+        const { composable, registry } = makeComposable()
 
-        composable.loadWindow()
-        await tick()
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(1)
+        // Seed a dense-but-inexact full-night overview directly. (Loading it via loadWindow() would
+        // also warm the drag-headroom copy of the full night, which densifies this 100 s test night
+        // enough to make the sub-window a hit — an artifact of the tiny duration, not production.)
+        registry
+            .getCache('flow')
+            .store({ startSec: 0, endSec: 100, maxPoints: 2000 }, makeDenseOverview(), 100)
 
         // Covered by the inexact overview but too sparse: render the slice now and fetch a denser
-        // window immediately (no debounce) — the call fires synchronously within loadWindow.
+        // window immediately (no debounce) — the fetch fires synchronously within loadWindow.
         composable.loadWindow(40, 50)
         expect(composable.data.value?.timestamps.length).toBeGreaterThan(0)
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
-        // Expanded window (±1 width) at density-scaled max_points.
+        // Expanded window (±1 width) at density-scaled max_points, issued as the first fetch.
         expect(mockGetWaveformData).toHaveBeenNthCalledWith(
-            2,
+            1,
             1,
             'flow',
             { max_points: 6000, start_seconds: 30, end_seconds: 60 },
@@ -139,7 +144,6 @@ describe('useWaveformWindow', () => {
         )
 
         await tick()
-        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
     })
 
     it('test_rapid_successive_calls_each_fetch_immediately_last_wins', async () => {
@@ -330,25 +334,27 @@ describe('useWaveformWindow', () => {
     })
 
     it('test_prefetch_is_aborted_by_the_next_load', async () => {
-        const windowedSignals: AbortSignal[] = []
-        mockGetWaveformData.mockImplementation((_id, _type, params, signal) => {
-            const p = (params ?? {}) as { start_seconds?: number }
-            if (p.start_seconds === undefined) return Promise.resolve(makeDenseOverview())
-            windowedSignals.push(signal as AbortSignal)
-            return new Promise<WaveformDataResponse>(() => {})
+        const prefetchSignals: AbortSignal[] = []
+        mockGetWaveformData.mockImplementation((_id, _type, _params, signal) => {
+            prefetchSignals.push(signal as AbortSignal)
+            return new Promise<WaveformDataResponse>(() => {}) // every prefetch fetch hangs in flight
         })
-        const { composable } = makeComposable()
+        const { composable, registry } = makeComposable()
 
-        composable.loadWindow()
-        await tick()
+        // Seed a dense-but-inexact chunk over [40, 60]: the 20 s view resolves as a hit, but its
+        // narrower zoom-in/headroom neighbors are too sparse and must fetch (60 pts/s: 20 s clears
+        // the 1000-point floor, ≤10 s does not).
+        registry
+            .getCache('flow')
+            .store({ startSec: 40, endSec: 60, maxPoints: 1200 }, makeWindow(40, 60, 1200), 100)
 
-        // Hit path kicks a prefetch whose windowed fetch is now in flight.
-        composable.loadWindow(25, 75)
-        expect(windowedSignals).toHaveLength(1)
+        // Hit path kicks a prefetch whose sparse-neighbor fetches are now in flight.
+        composable.loadWindow(40, 60)
+        expect(prefetchSignals.length).toBeGreaterThan(0)
 
         // The next load aborts the in-flight prefetch before doing its own work.
         composable.loadWindow(10, 20)
-        expect(windowedSignals[0].aborted).toBe(true)
+        expect(prefetchSignals[0].aborted).toBe(true)
     })
 
     it('test_prefetch_failure_leaves_error_null', async () => {
