@@ -18,28 +18,13 @@ from snore.cli.decorators import (
 from snore.cli.decorators import (
     db_session as open_db_session,
 )
-from snore.cli.display import console, err_console, print_footer, print_header
-
-
-def _fmt_sig(v: float | None, *, na: str = "N/A") -> str:
-    """Adaptive formatting so tiny magnitudes stay visible.
-
-    The chance-precision floor (~4e-5) and proxy precision (~1e-3) collapse to
-    ``0.000`` at fixed 3 decimals — comparing floor vs precision is the whole
-    point of the field, so render small values with more decimals or in
-    scientific notation.  The report model and JSON/CSV exports keep the full
-    float; this only affects the terminal display.
-    """
-    if v is None:
-        return na
-    if v == 0.0:
-        return "0"
-    a = abs(v)
-    if a >= 0.1:
-        return f"{v:.3f}"
-    if a >= 1e-3:
-        return f"{v:.4f}"
-    return f"{v:.2e}"
+from snore.cli.display import (
+    console,
+    err_console,
+    fmt_sig,
+    print_footer,
+    print_header,
+)
 
 
 @click.command()
@@ -102,8 +87,6 @@ def validate_rera(
 
                 agg = report.aggregate
 
-                _fmt_r = _fmt_sig
-
                 print_footer()
                 print_header("RERA VALIDATION REPORT")
                 console.print(
@@ -127,37 +110,53 @@ def validate_rera(
                 console.print("\nEvent counts / densities (per therapy hour):")
                 console.print(
                     f"  Machine RE:  {agg.total_machine_re:<6} "
-                    f"({_fmt_r(agg.machine_re_density)}/h)"
+                    f"({fmt_sig(agg.machine_re_density)}/h)"
                 )
                 console.print(
                     f"  Amplitude:   {agg.total_amplitude_reras:<6} "
-                    f"({_fmt_r(agg.amplitude_density)}/h)"
+                    f"({fmt_sig(agg.amplitude_density)}/h)"
                 )
                 console.print(
                     f"  FL-run proxy:{agg.total_proxy_reras:<6} "
-                    f"({_fmt_r(agg.proxy_density)}/h)"
+                    f"({fmt_sig(agg.proxy_density)}/h)"
                 )
                 console.print(
-                    f"  Chance-precision floor (tol={agg.match_tolerance_seconds}s): "
-                    f"{_fmt_r(agg.chance_precision_floor)}"
+                    "  Chance-precision floor (whole-dataset, "
+                    f"tol={agg.match_tolerance_seconds}s): "
+                    f"{fmt_sig(agg.chance_precision_floor)}"
                 )
 
                 if agg.sessions_with_machine_re > 0:
                     console.print(
-                        "\nMean scores over sessions with machine RE "
-                        "(amplitude | proxy):"
+                        "\nScores over sessions with machine RE (amplitude | proxy):"
                     )
                     console.print(
-                        f"  Sensitivity: {_fmt_r(agg.mean_amplitude_sensitivity)} | "
-                        f"{_fmt_r(agg.mean_proxy_sensitivity)}"
+                        f"  Sensitivity (mean):   "
+                        f"{fmt_sig(agg.mean_amplitude_sensitivity)} | "
+                        f"{fmt_sig(agg.mean_proxy_sensitivity)}"
                     )
                     console.print(
-                        f"  Precision:   {_fmt_r(agg.mean_amplitude_precision)} | "
-                        f"{_fmt_r(agg.mean_proxy_precision)}"
+                        f"  Sensitivity (pooled): "
+                        f"{fmt_sig(agg.pooled_amplitude_sensitivity)} | "
+                        f"{fmt_sig(agg.pooled_proxy_sensitivity)}"
                     )
                     console.print(
-                        f"  F1:          {_fmt_r(agg.mean_amplitude_f1)} | "
-                        f"{_fmt_r(agg.mean_proxy_f1)}"
+                        f"  Precision (mean):     "
+                        f"{fmt_sig(agg.mean_amplitude_precision)} | "
+                        f"{fmt_sig(agg.mean_proxy_precision)}"
+                    )
+                    console.print(
+                        f"  Precision (pooled):   "
+                        f"{fmt_sig(agg.pooled_amplitude_precision)} | "
+                        f"{fmt_sig(agg.pooled_proxy_precision)}"
+                    )
+                    console.print(
+                        f"  F1 (mean):            {fmt_sig(agg.mean_amplitude_f1)} | "
+                        f"{fmt_sig(agg.mean_proxy_f1)}"
+                    )
+                    console.print(
+                        "  Chance-precision floor (scored hours): "
+                        f"{fmt_sig(agg.scored_chance_precision_floor)}"
                     )
 
                 # Most-informative rows lead: most machine RE first.
@@ -189,10 +188,10 @@ def validate_rera(
                             f"{s.date:<12} "
                             f"{s.session_id:<6} "
                             f"{s.machine_re_count:<4} "
-                            f"{_fmt_sig(s.amplitude_sensitivity, na='N/A'):<9} "
-                            f"{_fmt_sig(s.amplitude_precision, na='N/A'):<9} "
-                            f"{_fmt_sig(s.proxy_sensitivity, na='N/A'):<9} "
-                            f"{_fmt_sig(s.proxy_precision, na='N/A'):<9}"
+                            f"{fmt_sig(s.amplitude_sensitivity):<9} "
+                            f"{fmt_sig(s.amplitude_precision):<9} "
+                            f"{fmt_sig(s.proxy_sensitivity):<9} "
+                            f"{fmt_sig(s.proxy_precision):<9}"
                         )
                     if len(scored) > _table_cap:
                         console.print(

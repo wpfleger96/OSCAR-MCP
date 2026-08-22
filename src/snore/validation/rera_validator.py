@@ -40,11 +40,12 @@ from snore.analysis.modes.postprocess import (
     validate_event_type,
 )
 from snore.analysis.shared.types import RERAEvent
-from snore.analysis.shared.versioning import AnalysisStatus
+from snore.analysis.shared.versioning import AlgoVersions, AnalysisStatus
+from snore.analysis.types import AnalysisResult
 from snore.analysis.utils import convert_machine_reras
 from snore.constants import RERAProxyConstants
 from snore.database import models
-from snore.services.breath.algorithms import _iter_fl_run_recoveries
+from snore.services.breath.algorithms import iter_fl_run_recoveries
 from snore.services.breath_service import BreathService
 from snore.validation.rera_report import (
     ReraAggregateMetrics,
@@ -157,7 +158,7 @@ def proxy_reras_from_breath_arrays(
 ) -> list[float]:
     """Recompute FL-run-proxy RERA start offsets from parallel breath arrays.
 
-    Wraps the arrays as breath rows and delegates to ``_iter_fl_run_recoveries``
+    Wraps the arrays as breath rows and delegates to ``iter_fl_run_recoveries``
     (the single implementation of the proxy criterion), mapping each yielded run
     to the ``start_offset_s`` of its first flow-limited breath.  All four arrays
     must be ordered by ``breath_number`` and equal length.  Tunables default to
@@ -171,7 +172,7 @@ def proxy_reras_from_breath_arrays(
     ]
     return [
         start_offset_s[run_start]
-        for run_start, _run_last, _recovery in _iter_fl_run_recoveries(
+        for run_start, _run_last, _recovery in iter_fl_run_recoveries(
             rows,
             fl_class_threshold=fl_class_threshold,
             min_fl_run_length=min_fl_run_length,
@@ -263,11 +264,11 @@ class ReraValidator:
         if status != AnalysisStatus.OK or ar_id is None:
             return _skip("no_analysis")
 
-        # 2. Fetch the stored analysis DTO (amplitude RERAs + machine events).
-        from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
-
-        facade = AnalysisFacade(self._db, self._profile_id)
-        analysis = await facade.get_analysis_result(session.id)
+        # 2. Fetch the stored analysis DTO (amplitude RERAs + machine events) by
+        #    its known id — ownership is already assured by the profile-scoped
+        #    session query above, so a narrow by-id read avoids the facade's
+        #    redundant ownership re-check and latest-run re-resolution.
+        analysis = await self._analysis_by_id(ar_id)
         if analysis is None or not analysis.mode_results:
             return _skip("no_analysis")
 
@@ -280,11 +281,9 @@ class ReraValidator:
         breath_stmt = (
             select(
                 models.Breath.flow_class,
-                models.Breath.flow_confidence,
                 models.Breath.is_recovery_breath,
                 models.Breath.peak_flow_lpm,
                 models.Breath.start_offset_s,
-                models.Breath.end_offset_s,
             )
             .where(models.Breath.analysis_result_id == ar_id)
             .order_by(models.Breath.breath_number)
@@ -351,11 +350,24 @@ class ReraValidator:
         )
         return base
 
+    async def _analysis_by_id(self, analysis_id: int) -> AnalysisResult | None:
+        """Load the stored analysis DTO by its known result id.
+
+        A narrow primary-key read: the caller already holds a profile-scoped
+        ``analysis_id``, so no ownership re-check or latest-run resolution is
+        needed.  Returns None if the row has vanished.
+        """
+        row = await self._db.get(models.AnalysisResult, analysis_id)
+        if row is None:
+            return None
+        return AnalysisResult.from_stored_json(row.programmatic_result_json)
+
     @staticmethod
     def _apply_score(
         record: ReraSessionValidation, prefix: str, score: ReraScore
     ) -> None:
-        """Write one definition's sensitivity/precision/F1 (+ reasons) in place."""
+        """Write one definition's matched/sensitivity/precision/F1 (+ reasons)."""
+        setattr(record, f"{prefix}_matched", score.matched)
         setattr(record, f"{prefix}_sensitivity", score.sensitivity)
         setattr(record, f"{prefix}_precision", score.precision)
         setattr(record, f"{prefix}_f1", score.f1)
@@ -366,14 +378,14 @@ class ReraValidator:
             setattr(record, f"{prefix}_f1_reason", _REASON_NO_PROGRAMMATIC)
 
     @staticmethod
-    def _select_mode(algo: object | None, available: list[str]) -> str:
+    def _select_mode(algo: AlgoVersions | None, available: list[str]) -> str:
         """Pick the analysis mode to read amplitude RERAs from.
 
         Prefers the run's persisted primary mode; otherwise falls back to
         ``aasm`` when present, else the first available mode.
         """
-        primary = getattr(getattr(algo, "run", None), "primary_mode", None)
-        if isinstance(primary, str) and primary in available:
+        primary = algo.run.primary_mode if algo is not None else None
+        if primary in available:
             return primary
         return "aasm" if "aasm" in available else available[0]
 
@@ -388,9 +400,16 @@ class ReraValidator:
         def _count_skip(reason: str) -> int:
             return sum(1 for s in sessions if s.skipped_reason == reason)
 
-        # Pooled densities over every session with real therapy hours (scored or
-        # skipped-for-no-RE alike) — the machine-RE skip still contributes hours.
-        with_hours = [s for s in sessions if s.duration_hours > 0]
+        # Pooled densities over sessions that were genuinely evaluated for RE —
+        # scored plus skipped-for-no-machine-RE.  Sessions skipped for no
+        # analysis / no breaths / error carry structurally-zero event counts, so
+        # their hours would dilute every density and understate the chance floor.
+        with_hours = [
+            s
+            for s in sessions
+            if s.duration_hours > 0
+            and s.skipped_reason in (None, _REASON_NO_MACHINE_RE)
+        ]
         total_hours = sum(s.duration_hours for s in with_hours)
         total_machine_re = sum(s.machine_re_count for s in sessions)
         total_amplitude = sum(s.amplitude_rera_count for s in sessions)
@@ -399,10 +418,30 @@ class ReraValidator:
         def _pooled(total: int) -> float | None:
             return total / total_hours if total_hours > 0 else None
 
-        chance_floor: float | None = None
-        if total_hours > 0:
-            machine_re_per_second = total_machine_re / (total_hours * 3600.0)
-            chance_floor = machine_re_per_second * 2 * EVENT_MATCH_TOLERANCE_SECONDS
+        def _floor(machine_re: int, hours: float) -> float | None:
+            if hours <= 0:
+                return None
+            per_second = machine_re / (hours * 3600.0)
+            return per_second * 2 * EVENT_MATCH_TOLERANCE_SECONDS
+
+        # Whole-dataset floor (density context): machine-RE rate over every
+        # evaluated therapy hour, most of which carry zero RE.
+        chance_floor = _floor(total_machine_re, total_hours)
+
+        # Scored-population floor: machine-RE rate over scored-session hours
+        # only, whose RE density far exceeds the dataset average.  This is the
+        # honest baseline for the precision/sensitivity reported beside it, which
+        # likewise cover only scored sessions.
+        scored_hours = sum(s.duration_hours for s in scored if s.duration_hours > 0)
+        scored_machine_re = sum(s.machine_re_count for s in scored)
+        scored_chance_floor = _floor(scored_machine_re, scored_hours)
+
+        def _pooled_ratio(matched_attr: str, denominator: int) -> float | None:
+            matched = sum(getattr(s, matched_attr) or 0 for s in scored)
+            return matched / denominator if denominator else None
+
+        scored_amplitude = sum(s.amplitude_rera_count for s in scored)
+        scored_proxy = sum(s.proxy_rera_count for s in scored)
 
         def _mean(attr: str) -> float | None:
             vals = [v for s in scored if (v := getattr(s, attr)) is not None]
@@ -423,10 +462,19 @@ class ReraValidator:
             proxy_density=_pooled(total_proxy),
             match_tolerance_seconds=EVENT_MATCH_TOLERANCE_SECONDS,
             chance_precision_floor=chance_floor,
+            scored_chance_precision_floor=scored_chance_floor,
             mean_amplitude_sensitivity=_mean("amplitude_sensitivity"),
             mean_amplitude_precision=_mean("amplitude_precision"),
             mean_amplitude_f1=_mean("amplitude_f1"),
             mean_proxy_sensitivity=_mean("proxy_sensitivity"),
             mean_proxy_precision=_mean("proxy_precision"),
             mean_proxy_f1=_mean("proxy_f1"),
+            pooled_amplitude_sensitivity=_pooled_ratio(
+                "amplitude_matched", scored_machine_re
+            ),
+            pooled_amplitude_precision=_pooled_ratio(
+                "amplitude_matched", scored_amplitude
+            ),
+            pooled_proxy_sensitivity=_pooled_ratio("proxy_matched", scored_machine_re),
+            pooled_proxy_precision=_pooled_ratio("proxy_matched", scored_proxy),
         )
