@@ -65,6 +65,7 @@ from snore.parsers.unified import (
     WaveformData,
     extract_basic_stats,
 )
+from snore.therapy_hours import TherapyHoursBasis, therapy_hours
 
 logger = logging.getLogger(__name__)
 
@@ -486,6 +487,10 @@ class OscarDeviceParser(DeviceParser):
         start_time = _epoch_to_wall_clock(first_ts / 1000, timezone_name)
         end_time = _epoch_to_wall_clock(last_ts / 1000, timezone_name)
 
+        # One OSCAR .000 session file is a single wear period, so the session
+        # span is the mask-on time by construction.
+        duration_seconds = (end_time - start_time).total_seconds()
+
         session = UnifiedSession(
             device_session_id=str(session_id),
             device_info=device_info,
@@ -494,6 +499,7 @@ class OscarDeviceParser(DeviceParser):
             import_source="oscar_binary",
             parser_version=self.metadata.parser_version,
             raw_data_path=str(base_path),
+            mask_on_segments=[(0.0, duration_seconds)],
         )
 
         if summary:
@@ -569,7 +575,9 @@ class OscarDeviceParser(DeviceParser):
         stats.pulse_mean = summary.averages.get(OXI_PULSE)
 
         duration_ms = summary.last_timestamp - summary.first_timestamp
-        stats.usage_hours = duration_ms / (1000 * 3600)
+        stats.usage_hours = therapy_hours(
+            TherapyHoursBasis.SESSION_SPAN, span_seconds=duration_ms / 1000
+        )
 
         session.has_statistics = True
 

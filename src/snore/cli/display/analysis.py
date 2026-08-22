@@ -63,7 +63,8 @@ def create_header_panel(
 
 def create_machine_events_table(
     machine_events: list[AnalysisEvent],
-    session_duration_hours: float,
+    machine_ahi: float,
+    machine_rdi: float,
     plain: bool = False,
 ) -> Table:
     from snore.constants import (
@@ -85,10 +86,6 @@ def create_machine_events_table(
     caa_count = machine_event_counts.get(EVENT_TYPE_CLEAR_AIRWAY, 0)
     ma_count = machine_event_counts.get(EVENT_TYPE_MIXED_APNEA, 0)
     h_count = machine_event_counts.get(EVENT_TYPE_HYPOPNEA, 0)
-
-    machine_ahi_count = oa_count + ca_count + caa_count + ma_count + h_count
-    machine_ahi = machine_ahi_count / session_duration_hours
-    machine_rdi = machine_ahi  # RDI == AHI for CPAP data — RERAs require EEG
 
     table = Table(
         title="[bold]MACHINE-DETECTED EVENTS (CPAP)[/bold]"
@@ -606,7 +603,7 @@ def display_analysis_result(
     machine_events = result.machine_events
     if machine_events:
         machine_table = create_machine_events_table(
-            machine_events, result.session_duration_hours, plain
+            machine_events, result.machine_ahi or 0.0, result.machine_rdi or 0.0, plain
         )
         con.print(machine_table)
         con.print()

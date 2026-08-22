@@ -19,6 +19,8 @@ import numpy as np
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from snore.therapy_hours import TherapyHoursBasis, therapy_hours
+
 
 def extract_basic_stats(values: np.ndarray) -> tuple[float, float, float]:
     """Compute (min, max, mean) summary statistics for a waveform array."""
@@ -537,13 +539,16 @@ class UnifiedSession(BaseModel):
         self.statistics.hypopneas = event_counts["H"]
         self.statistics.reras = event_counts["RE"]
 
-        if self.mask_on_segments is not None:
-            therapy_seconds = sum(end - start for start, end in self.mask_on_segments)
-        else:
-            therapy_seconds = self.duration_seconds
+        hours = therapy_hours(
+            TherapyHoursBasis.MASK_ON, mask_on_segments=self.mask_on_segments
+        )
+        if hours is None:
+            # Unknown mask-on time: documented span fallback.
+            hours = therapy_hours(
+                TherapyHoursBasis.SESSION_SPAN, span_seconds=self.duration_seconds
+            )
 
-        if therapy_seconds and therapy_seconds > 0:
-            hours = therapy_seconds / 3600
+        if hours and hours > 0:
             total_events = event_counts["OA"] + event_counts["CA"] + event_counts["H"]
             self.statistics.ahi = total_events / hours
             self.statistics.oai = event_counts["OA"] / hours

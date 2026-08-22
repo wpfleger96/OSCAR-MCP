@@ -44,6 +44,12 @@ class AnalysisResult(BaseModel):
     session_duration_hours: float = Field(ge=0, description="Session duration (hours)")
     total_breaths: int = Field(ge=0, description="Total breaths segmented")
     machine_events: list[AnalysisEvent] = Field(description="Machine-flagged events")
+    machine_ahi: float | None = Field(
+        default=None, ge=0, description="Machine-reported AHI (None if no events)"
+    )
+    machine_rdi: float | None = Field(
+        default=None, ge=0, description="Machine-reported RDI (None if no events)"
+    )
     mode_results: dict[str, ModeResult] = Field(description="Results by detection mode")
     flow_analysis: dict[str, Any] | None = Field(
         default=None, description="Flow limitation analysis"

@@ -64,11 +64,19 @@ from snore.analysis.types import (
     AnalysisResult,
     ComputedBreath,
 )
+from snore.constants import (
+    EVENT_TYPE_CENTRAL_APNEA,
+    EVENT_TYPE_CLEAR_AIRWAY,
+    EVENT_TYPE_HYPOPNEA,
+    EVENT_TYPE_MIXED_APNEA,
+    EVENT_TYPE_OBSTRUCTIVE_APNEA,
+)
 from snore.constants import BreathSegmentationConstants as BSC
 from snore.constants import FlowLimitationConstants as FLC
 from snore.constants import PatternDetectionConstants as PDC
 from snore.constants import PulseChangeConstants as PCC
 from snore.database import models
+from snore.therapy_hours import TherapyHoursBasis, therapy_hours
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +89,34 @@ __all__ = [
 ]
 
 _RAMP_KEYS: frozenset[str] = frozenset({"ramp_enabled", "ramp_time", "smart_ramp"})
+
+# Machine event types counted toward the machine-reported AHI (apneas +
+# hypopneas).  RERAs are excluded — for CPAP data RDI equals AHI.
+_MACHINE_AHI_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        EVENT_TYPE_OBSTRUCTIVE_APNEA,
+        EVENT_TYPE_CENTRAL_APNEA,
+        EVENT_TYPE_CLEAR_AIRWAY,
+        EVENT_TYPE_MIXED_APNEA,
+        EVENT_TYPE_HYPOPNEA,
+    }
+)
+
+
+def _machine_ahi_rdi(
+    machine_events: list[AnalysisEvent], session_duration_hours: float
+) -> tuple[float | None, float | None]:
+    """Compute the machine-reported AHI/RDI over waveform-coverage hours.
+
+    Returns ``(None, None)`` when there are no machine events.  RDI equals AHI
+    for CPAP data because RERA scoring requires EEG.
+    """
+    if not machine_events:
+        return None, None
+    count = sum(1 for e in machine_events if e.event_type in _MACHINE_AHI_EVENT_TYPES)
+    ahi = count / session_duration_hours if session_duration_hours > 0 else 0.0
+    return ahi, ahi
+
 
 # Optional waveform channels fetched by ``load_session_inputs_raw``:
 # (waveform_type, log level on absence, log message template).
@@ -585,7 +621,14 @@ class AnalysisService:
         session_id = inputs.session_id
         primary_mode = inputs.primary_mode
 
-        session_duration_hours = len(timestamps) / sample_rate / 3600
+        session_duration_hours = (
+            therapy_hours(
+                TherapyHoursBasis.WAVEFORM_COVERAGE,
+                sample_count=len(timestamps),
+                sample_rate=sample_rate,
+            )
+            or 0.0
+        )
         logger.info(
             f"Loaded {len(timestamps)} flow samples at {sample_rate}Hz "
             f"({session_duration_hours:.1f} hours)"
@@ -697,11 +740,17 @@ class AnalysisService:
                 logger.error(f"Failed to run mode '{mode_name}': {e}")
                 continue
 
+        machine_ahi, machine_rdi = _machine_ahi_rdi(
+            inputs.machine_events, session_duration_hours
+        )
+
         summary = AnalysisResult(
             session_id=session_id,
             session_duration_hours=session_duration_hours,
             total_breaths=len(breaths),
             machine_events=inputs.machine_events,
+            machine_ahi=machine_ahi,
+            machine_rdi=machine_rdi,
             mode_results=mode_results,
             flow_analysis=flow_analysis.model_dump(),
             csr_detection=csr_detection.model_dump() if csr_detection else None,
