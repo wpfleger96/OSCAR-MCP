@@ -1,10 +1,26 @@
 """Tests for STR.edf settings parsing."""
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
-from snore.parsers.unified import TherapyMode
+from snore.parsers.resmed_edf import ResmedEDFParser
+from snore.parsers.unified import TherapyMode, TherapySettings
+
+
+def _settings_for_date(
+    parser: ResmedEDFParser, str_file: Path, session_date: date
+) -> TherapySettings | None:
+    """Load STR therapy settings for one date via the live two-step path.
+
+    Mirrors what the removed ``_parse_str_settings`` did: preload the STR file
+    once, then convert that date's raw values (falling back to the parser's
+    ProductCode-derived series-11 flag, as the old wrapper did).
+    """
+    settings_by_date, _summaries = parser._preload_str_file(str_file)
+    raw = settings_by_date.get(session_date) if settings_by_date else None
+    return parser._convert_str_to_therapy_settings(raw) if raw is not None else None
 
 
 class TestSTRSettingsParsing:
@@ -24,7 +40,7 @@ class TestSTRSettingsParsing:
         str_file = resmed_fixture_path / "STR.edf"
 
         session_date = date(2023, 8, 22)
-        settings = resmed_parser._parse_str_settings(str_file, session_date)
+        settings = _settings_for_date(resmed_parser, str_file, session_date)
 
         assert settings is not None, "Settings should be parsed from STR.edf"
         assert settings.mode is not None, "Mode should be set"
@@ -37,7 +53,7 @@ class TestSTRSettingsParsing:
         """Test pressure settings are correctly parsed."""
         str_file = resmed_fixture_path / "STR.edf"
         session_date = date(2023, 8, 22)
-        settings = resmed_parser._parse_str_settings(str_file, session_date)
+        settings = _settings_for_date(resmed_parser, str_file, session_date)
 
         assert settings is not None
 
@@ -66,7 +82,7 @@ class TestSTRSettingsParsing:
         """Test EPR settings are correctly parsed."""
         str_file = resmed_fixture_path / "STR.edf"
         session_date = date(2023, 8, 22)
-        settings = resmed_parser._parse_str_settings(str_file, session_date)
+        settings = _settings_for_date(resmed_parser, str_file, session_date)
 
         assert settings is not None
 
@@ -87,7 +103,7 @@ class TestSTRSettingsParsing:
         """Test climate control settings are correctly parsed."""
         str_file = resmed_fixture_path / "STR.edf"
         session_date = date(2023, 8, 22)
-        settings = resmed_parser._parse_str_settings(str_file, session_date)
+        settings = _settings_for_date(resmed_parser, str_file, session_date)
 
         assert settings is not None
 
@@ -165,7 +181,7 @@ class TestSTRSettingsParsing:
         str_file = resmed_fixture_path / "STR.edf"
 
         old_date = date(2000, 1, 1)
-        settings = resmed_parser._parse_str_settings(str_file, old_date)
+        settings = _settings_for_date(resmed_parser, str_file, old_date)
 
         assert settings is None, "Settings should be None for date out of range"
 
@@ -200,7 +216,7 @@ class TestSTRSettingsParsing:
         it must not produce a degenerate TherapySettings object.
         """
         str_file = resmed_fixture_path / "STR.edf"
-        settings = resmed_parser._parse_str_settings(str_file, date(2023, 8, 23))
+        settings = _settings_for_date(resmed_parser, str_file, date(2023, 8, 23))
         assert settings is None, (
             "Settings should be None for a no-usage day with sentinel values"
         )
@@ -214,7 +230,7 @@ class TestSTRSettingsParsing:
         Record 0 (2023-08-22) has Mode=1.0 (APAP), S.C.Press=10.0, etc.
         """
         str_file = resmed_fixture_path / "STR.edf"
-        settings = resmed_parser._parse_str_settings(str_file, date(2023, 8, 22))
+        settings = _settings_for_date(resmed_parser, str_file, date(2023, 8, 22))
         assert settings is not None, "Settings should be parsed for the first valid day"
         assert settings.mode is not None
         from snore.parsers.unified import TherapyMode

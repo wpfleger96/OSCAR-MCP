@@ -2244,108 +2244,6 @@ class ResmedEDFParser(DeviceParser):
             logger.warning(f"Failed to parse TCV: {e}")
             session.data_quality_notes.append(f"TCV parsing failed: {e}")
 
-    def _parse_events(self, file_path: Path, session: UnifiedSession) -> None:
-        """Parse EVE events file."""
-        from .formats.edf import EDFDiscontinuousReader, is_discontinuous_edf
-
-        if file_path.stat().st_size == 0:
-            logger.debug(
-                f"Skipping empty EVE file (zero-byte device stub): {file_path.name}"
-            )
-            return
-
-        is_discontinuous = is_discontinuous_edf(file_path)
-
-        if is_discontinuous:
-            logger.debug(
-                f"EVE file {file_path.name} is discontinuous (EDF+D format) - "
-                f"using MNE library to read annotations"
-            )
-            session.data_quality_notes.append(
-                "EVE file is discontinuous (mask removal detected during session)"
-            )
-
-        try:
-            if is_discontinuous:
-                with EDFDiscontinuousReader(file_path) as edf:
-                    annotations = edf.read_annotations()
-            else:
-                with EDFReader(file_path) as edf:
-                    annotations = edf.read_annotations()
-
-            event_count = 0
-            filtered_count = 0
-            unknown_count = 0
-            unknown_annotations = set()
-
-            for annotation in annotations:
-                event_type = None
-                annotation_text = None
-
-                for text in annotation.annotations:
-                    if text in FILTERED_ANNOTATIONS:
-                        filtered_count += 1
-                        break
-
-                    if text in EVENT_TYPE_MAP:
-                        event_type = EVENT_TYPE_MAP[text]
-                        annotation_text = text
-                        break
-
-                if annotation_text is None and event_type is None:
-                    for text in annotation.annotations:
-                        if text not in FILTERED_ANNOTATIONS:
-                            unknown_annotations.add(text)
-                            unknown_count += 1
-                    continue
-
-                if event_type is None:
-                    continue
-
-                duration = annotation.duration if annotation.duration else 10.0
-                flag_time = annotation.to_datetime(session.start_time)
-                # ResMed flags events at their end; subtract duration to store the
-                # true start (OSCAR renders backward from the flag time for the same
-                # reason).
-                event = RespiratoryEvent(
-                    event_type=event_type,
-                    start_time=flag_time - timedelta(seconds=duration),
-                    duration_seconds=duration,
-                )
-
-                session.add_event(event)
-                event_count += 1
-
-            if is_discontinuous and event_count > 0:
-                logger.debug(
-                    f"Successfully parsed {event_count} events from discontinuous EVE file "
-                    f"(mask removal periods detected)"
-                )
-            else:
-                logger.debug(f"Parsed {event_count} events from {file_path.name}")
-
-            if filtered_count > 0:
-                logger.debug(f"Filtered out {filtered_count} non-event annotations")
-            if unknown_count > 0:
-                logger.warning(
-                    f"Encountered {unknown_count} unknown annotations: {unknown_annotations}"
-                )
-                session.data_quality_notes.append(
-                    f"Unknown event annotations: {', '.join(sorted(unknown_annotations))}"
-                )
-
-        except Exception as e:
-            if "discontinuous" in str(e).lower():
-                logger.warning(
-                    "EVE file is discontinuous (mask removal during session) - events not imported"
-                )
-                session.data_quality_notes.append(
-                    "EVE file is discontinuous (mask removal detected) - events cannot be imported"
-                )
-            else:
-                logger.warning(f"Failed to parse events: {e}")
-                session.data_quality_notes.append(f"EVE parsing failed: {e}")
-
     def _parse_eve_files_for_night(
         self, eve_files: list[Path], session: UnifiedSession
     ) -> None:
@@ -2548,60 +2446,6 @@ class ResmedEDFParser(DeviceParser):
                 f"CSL file(s) for session starting {session.start_time}"
             )
 
-    def _parse_str_settings(
-        self, str_file: Path, session_date: date, is_eleven_series: bool | None = None
-    ) -> TherapySettings | None:
-        """
-        Parse therapy settings from STR.edf for a specific session date.
-
-        STR.edf contains one data record per day since device initialization.
-        Each signal has one sample per record, representing that day's setting value.
-
-        Args:
-            str_file: Path to STR.edf file
-            session_date: Date of session to get settings for
-            is_eleven_series: Passed through unchanged to _convert_str_to_therapy_settings;
-                None lets the converter fall back to ProductCode-derived self._str_series11.
-
-        Returns:
-            TherapySettings populated from STR.edf, None if not found, or None
-            for no-usage days where ResMed writes all-sentinel (negative) values
-        """
-        try:
-            with EDFReader(str_file) as edf:
-                header = edf.get_header()
-
-                str_start_date = header.start_datetime.date()
-                days_offset = (session_date - str_start_date).days
-
-                if days_offset < 0 or days_offset >= header.num_data_records:
-                    logger.warning(
-                        f"Session date {session_date} outside STR.edf range "
-                        f"({str_start_date} + {header.num_data_records} days)"
-                    )
-                    return None
-
-                settings_values = {}
-                signals = edf.get_signal_info()
-
-                for signal_label, setting_key in self.ALL_STR_SIGNAL_MAPS.items():
-                    if signal_label in signals:
-                        data, _ = edf.read_signal(signal_label)
-                        if len(data) > days_offset:
-                            settings_values[setting_key] = data[days_offset]
-
-                if not settings_values:
-                    logger.debug(f"No settings found in STR.edf for {session_date}")
-                    return None
-
-                return self._convert_str_to_therapy_settings(
-                    settings_values, is_eleven_series
-                )
-
-        except Exception as e:
-            logger.warning(f"Failed to parse STR.edf settings: {e}")
-            return None
-
     def _load_str_caches(
         self, root_path: Path
     ) -> tuple[
@@ -2799,18 +2643,6 @@ class ResmedEDFParser(DeviceParser):
             logger.warning(f"Failed to preload STR file {str_file.name}: {e}")
             return None, None
 
-    def _preload_str_settings(
-        self, str_file: Path
-    ) -> dict[date, dict[str, float]] | None:
-        """Thin wrapper — returns the settings half of _preload_str_file."""
-        return self._preload_str_file(str_file)[0]
-
-    def _preload_str_summaries(
-        self, str_file: Path
-    ) -> dict[date, dict[str, float]] | None:
-        """Thin wrapper — returns the summaries half of _preload_str_file."""
-        return self._preload_str_file(str_file)[1]
-
     def _convert_str_to_therapy_settings(
         self, values: dict[str, float], is_eleven_series: bool | None = None
     ) -> TherapySettings | None:
@@ -2828,7 +2660,7 @@ class ResmedEDFParser(DeviceParser):
 
         Args:
             values: Dictionary of setting keys to raw float values (as preloaded
-                by _preload_str_settings — keys come from STR_SETTINGS_MAP and
+                by _preload_str_file — keys come from STR_SETTINGS_MAP and
                 the signal group dicts).
             is_eleven_series: Explicit family override; defaults to
                 self._str_series11 (set once from ProductCode by _detect_series11).

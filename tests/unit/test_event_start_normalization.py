@@ -120,7 +120,7 @@ def _make_oscar_events(
 
 
 class TestEVEEventStartNormalization:
-    """_parse_events: ResMed flags events at end; parser shifts to true start."""
+    """EVE parsing: ResMed flags events at end; parser shifts to true start."""
 
     def test_eve_explicit_duration_stores_flag_time_minus_duration(self, tmp_path):
         """OA annotation at flag_time T with explicit duration D → start_time == T - D."""
@@ -142,7 +142,7 @@ class TestEVEEventStartNormalization:
             ],
         )
 
-        parser._parse_events(eve_file, session)
+        parser._parse_eve_files_for_night([eve_file], session)
 
         events = [
             e
@@ -173,7 +173,7 @@ class TestEVEEventStartNormalization:
             ],
         )
 
-        parser._parse_events(eve_file, session)
+        parser._parse_eve_files_for_night([eve_file], session)
 
         events = [
             e for e in session.events if e.event_type == RespiratoryEventType.HYPOPNEA
