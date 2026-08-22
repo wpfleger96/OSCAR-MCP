@@ -1875,6 +1875,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/validate/apple': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Apple Cross Validation */
+        post: operations['run_apple_cross_validation_api_v1_validate_apple_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/validate/breaths': {
         parameters: {
             query?: never
@@ -2307,6 +2324,156 @@ export interface components {
         }
         /** @enum {string} */
         ApneaEventType: 'OA' | 'CA' | 'MA' | 'UA'
+        /**
+         * AppleCrossAggregate
+         * @description Aggregate coverage counters and the four cross-source correlations.
+         *
+         *     The skip counters below are independent axes over the same nights, not a
+         *     partition: the SNORE-side counters (``n_analysis_not_run``,
+         *     ``n_analysis_stale``, ``n_device_ambiguous``) classify why a night's SNORE
+         *     indices are unusable, while the Apple-side ``n_skipped_no_apple_bd`` counts
+         *     nights lacking an Apple breathing-disturbance value.  A single night can be
+         *     counted on both axes, so the counters must not be summed.
+         */
+        AppleCrossAggregate: {
+            /** @description fl_class_ge4_pct vs Apple breathing disturbances */
+            fl_vs_apple_bd: components['schemas']['PairCorrelation']
+            /** @description fl_class_ge4_pct vs Apple sleep_efficiency_pct */
+            fl_vs_sleep_efficiency: components['schemas']['PairCorrelation']
+            /**
+             * N Analysis Not Run
+             * @description Nights skipped: SNORE analysis never ran
+             */
+            n_analysis_not_run: number
+            /**
+             * N Analysis Stale
+             * @description Nights skipped: SNORE analysis stale / version-mismatched
+             */
+            n_analysis_stale: number
+            /**
+             * N Device Ambiguous
+             * @description Nights skipped: multiple devices, no device_id pinned
+             */
+            n_device_ambiguous: number
+            /**
+             * N Skipped No Apple Bd
+             * @description Nights with no Apple breathing-disturbance value (an independent axis from the SNORE-side skip counters; do not sum)
+             */
+            n_skipped_no_apple_bd: number
+            /**
+             * N With Apple Bd
+             * @description Nights carrying an Apple breathing-disturbance value
+             */
+            n_with_apple_bd: number
+            /** @description rera_index vs Apple breathing disturbances */
+            rera_vs_apple_bd: components['schemas']['PairCorrelation']
+            /** @description rera_index vs Apple awake_seconds (fragmentation) */
+            rera_vs_awake_seconds: components['schemas']['PairCorrelation']
+            /**
+             * Total Nights
+             * @description Nights carrying SNORE sessions in range (resolved + device-ambiguous)
+             */
+            total_nights: number
+        }
+        /**
+         * AppleCrossNightRecord
+         * @description One night's SNORE indices, independent Apple signals, and skip status.
+         */
+        AppleCrossNightRecord: {
+            /**
+             * Apple Bd Reason
+             * @description 'no_apple_bd' when Apple recorded no disturbance value; else None
+             */
+            apple_bd_reason?: string | null
+            /**
+             * Apple Breathing Disturbances
+             * @description Mean Apple sleeping-breathing-disturbance value for the night
+             */
+            apple_breathing_disturbances?: number | null
+            /**
+             * Awake Seconds
+             * @description Apple-derived awake time in seconds (fragmentation)
+             */
+            awake_seconds?: number | null
+            /**
+             * Fl Class Ge4 Pct
+             * @description SNORE percent of leak-valid classified breaths at flow_class >= 4
+             */
+            fl_class_ge4_pct?: number | null
+            /**
+             * Fl Class Ge4 Pct Reason
+             * @description NullReason code when fl_class_ge4_pct is null
+             */
+            fl_class_ge4_pct_reason?: string | null
+            /**
+             * Night Date
+             * @description Therapy night (YYYY-MM-DD, noon-split)
+             */
+            night_date: string
+            /**
+             * Rera Index
+             * @description SNORE nightly RERA index (RERAs / therapy hour)
+             */
+            rera_index?: number | null
+            /**
+             * Rera Index Reason
+             * @description NullReason code when rera_index is null
+             */
+            rera_index_reason?: string | null
+            /**
+             * Skip Reason
+             * @description Why the night contributes no SNORE side to any correlation: 'analysis_not_run' — SNORE analysis never ran for the night; 'analysis_stale' — SNORE analysis is stale / version-mismatched; 'device_ambiguous' — the night has sessions from more than one device and no device_id was pinned to disambiguate; None — the night carries usable SNORE indices
+             */
+            skip_reason?: string | null
+            /**
+             * Sleep Efficiency Pct
+             * @description Apple-derived sleep efficiency percent
+             */
+            sleep_efficiency_pct?: number | null
+        }
+        /**
+         * AppleCrossValidationReport
+         * @description Complete Apple Health cross-source night-level validation report.
+         */
+        AppleCrossValidationReport: {
+            /** @description Coverage + correlations */
+            aggregate: components['schemas']['AppleCrossAggregate']
+            /**
+             * Date Range End
+             * @description End date of the requested range
+             */
+            date_range_end: string
+            /**
+             * Date Range Start
+             * @description Start date of the requested range
+             */
+            date_range_start: string
+            /**
+             * Nights
+             * @description Per-night records
+             */
+            nights: components['schemas']['AppleCrossNightRecord'][]
+            /**
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             */
+            report_date: string
+        }
+        /** AppleCrossValidationRequest */
+        AppleCrossValidationRequest: {
+            /** Device Id */
+            device_id?: number | null
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
+        }
         /** AuthStatusResponse */
         AuthStatusResponse: {
             /** Active Profile Id */
@@ -3868,6 +4035,33 @@ export interface components {
             offset: number
             /** Total */
             total: number
+        }
+        /**
+         * PairCorrelation
+         * @description Spearman correlation for one SNORE↔Apple metric pair over paired nights.
+         */
+        PairCorrelation: {
+            /**
+             * N Paired Nights
+             * @description Nights contributing a value to both series
+             * @default 0
+             */
+            n_paired_nights: number
+            /**
+             * P Value
+             * @description p-value for rho; None whenever rho is None
+             */
+            p_value?: number | null
+            /**
+             * Reason
+             * @description Why rho is null: 'insufficient_pairs' (< 3 paired nights); 'degenerate' (>= 3 pairs but a side is constant / scipy returned NaN); None when rho was computed
+             */
+            reason?: string | null
+            /**
+             * Rho
+             * @description Spearman rho over nights present in both series; None when fewer than 3 pairs or a side is constant (see reason)
+             */
+            rho?: number | null
         }
         /** PasswordChangeRequest */
         PasswordChangeRequest: {
@@ -7861,6 +8055,39 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['ValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_apple_cross_validation_api_v1_validate_apple_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['AppleCrossValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AppleCrossValidationReport']
                 }
             }
             /** @description Validation Error */
