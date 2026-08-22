@@ -60,10 +60,17 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
+from snore.api.jobs.core import (
+    JOB_TTL_SECONDS,
+    JobRecordBase,
+    JobStore,
+    run_worker_loop,
+)
+
 logger = logging.getLogger(__name__)
 
-# How long to retain terminal jobs before the reaper removes them.
-JOB_TTL_SECONDS: float = 600.0
+# JOB_TTL_SECONDS is defined in jobs.core and re-exported here (imported above)
+# so that existing ``import_jobs.JOB_TTL_SECONDS`` references keep resolving.
 
 # How long a PENDING_UPLOAD job may be idle (no chunk received) before the
 # reaper treats it as abandoned and releases its admission slot.
@@ -181,16 +188,15 @@ class ObserverChannel:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ImportJob:
+@dataclass(kw_only=True)
+class ImportJob(JobRecordBase[JobState]):
     """Represents a single import operation with full lifecycle management."""
 
-    job_id: str
+    _TERMINAL_STATES = TERMINAL_STATES
+    _ACTIVE_STATES = ACTIVE_STATES
+
     job_type: JobType
-    owner_user_id: int | None = None  # The user who owns this job.
     target_profile_id: int | None = None  # The profile data lands in.
-    created_at: float = field(default_factory=time.monotonic)
-    created_at_wall: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # UPLOAD jobs: temp dir with written files.
     temp_dir: Path | None = None
@@ -207,17 +213,14 @@ class ImportJob:
     _worker_thread: threading.Thread | None = field(
         default=None, init=False, repr=False
     )
-    _cancel_flag: bool = field(default=False, init=False, repr=False)
     _observers: list[ObserverChannel] = field(
         default_factory=list, init=False, repr=False
     )
+    # Monotonic terminal timestamp (import-specific field name; analysis uses
+    # _finished_at).  Tests assign this directly, so it stays a plain field.
     _terminal_at: float | None = field(default=None, init=False, repr=False)
-    _finished_at_wall: datetime | None = field(default=None, init=False, repr=False)
     # True while the slot still counts against admission caps.
     _capacity_held: bool = field(default=True, init=False, repr=False)
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False
-    )
     # Wall-clock timestamp of last upload activity (initialised to created_at_wall).
     # Updated by touch() on each continuation chunk to prevent the stale-upload
     # reaper from reclaiming a slow-but-active upload.
@@ -238,22 +241,6 @@ class ImportJob:
     _analysis_queued: bool | None = field(default=None, init=False, repr=False)
 
     @property
-    def state(self) -> JobState:
-        with self._lock:
-            return self._state
-
-    @property
-    def is_terminal(self) -> bool:
-        with self._lock:
-            return self._state in TERMINAL_STATES
-
-    @property
-    def cancel_requested(self) -> bool:
-        """True if cancellation has been requested (checked at batch boundaries)."""
-        with self._lock:
-            return self._cancel_flag
-
-    @property
     def import_committed(self) -> bool:
         """True after the import phase has committed to the database."""
         with self._lock:
@@ -264,12 +251,6 @@ class ImportJob:
         """Monotonic timestamp when the job reached a terminal state, or None."""
         with self._lock:
             return self._terminal_at
-
-    @property
-    def finished_at_wall(self) -> datetime | None:
-        """Wall-clock UTC timestamp when the job reached a terminal state, or None."""
-        with self._lock:
-            return self._finished_at_wall
 
     @property
     def analysis_job_id(self) -> str | None:
@@ -452,7 +433,7 @@ class ImportJob:
         with self._lock:
             if self._state != JobState.PENDING:
                 return False
-            self._state = JobState.RUNNING
+            self._start_running(JobState.RUNNING)
             return True
 
     def _make_cancel_payload(self) -> dict[str, Any]:
@@ -463,29 +444,27 @@ class ImportJob:
             data["import_result"] = self._import_result
         return {"event": "error", "data": data}
 
-    def try_cancel(self) -> bool:
-        """Request cancellation.
+    def _on_cancel_locked(self) -> tuple[list[ObserverChannel], dict[str, Any]] | None:
+        """Eager-terminalize from PENDING_UPLOAD/PENDING. Caller holds ``_lock``.
 
-        Allowed from any state.  Idempotent after terminal.
-        Returns True if the job was in a non-terminal state.
+        Returns ``(observers, terminal_msg)`` to deliver outside the lock, or
+        None when the job was RUNNING (cancellation is cooperative there).
         """
-        with self._lock:
-            if self._state in TERMINAL_STATES:
-                return False
-            self._cancel_flag = True
-            if self._state in (JobState.PENDING_UPLOAD, JobState.PENDING):
-                self._state = JobState.CANCELLED
-                terminal_msg = self._make_cancel_payload()
-                self._terminal_msg = terminal_msg
-                self._terminal_at = time.monotonic()
-                self._finished_at_wall = datetime.now(UTC)
-                observers = list(self._observers)
-            else:
-                observers = []
-        if observers:
-            for ch in observers:
-                ch.put(terminal_msg)
-        return True
+        if self._state in (JobState.PENDING_UPLOAD, JobState.PENDING):
+            self._state = JobState.CANCELLED
+            terminal_msg = self._make_cancel_payload()
+            self._terminal_msg = terminal_msg
+            self._terminal_at = time.monotonic()
+            self._finished_at_wall = datetime.now(UTC)
+            return list(self._observers), terminal_msg
+        return None
+
+    def _notify_after_cancel(
+        self, payload: tuple[list[ObserverChannel], dict[str, Any]]
+    ) -> None:
+        observers, terminal_msg = payload
+        for ch in observers:
+            ch.put(terminal_msg)
 
     def try_cancel_if_stale_upload(self, timeout_seconds: float) -> float | None:
         """Atomically cancel only if this job is still PENDING_UPLOAD and idle.
@@ -597,8 +576,11 @@ class ImportJob:
 # Job store and admission counters
 # ---------------------------------------------------------------------------
 
-_jobs: dict[str, ImportJob] = {}
-_lock = threading.Lock()
+# _jobs and _lock are the store's live objects: app.py startup-resume and tests
+# mutate _jobs directly, so both names must alias the store-visible dict/lock.
+_store: JobStore[ImportJob] = JobStore()
+_jobs = _store._jobs
+_lock = _store._lock
 
 # Admission counters: per-user active count and global active count.
 # "Active" = PENDING_UPLOAD + PENDING + RUNNING (capacity_held=True).
@@ -701,8 +683,7 @@ def create_job(
 
 def get_job(job_id: str) -> ImportJob | None:
     _reap_terminal()
-    with _lock:
-        return _jobs.get(job_id)
+    return _store.get(job_id)
 
 
 def list_jobs(owner_user_id: int | None = None) -> list[ImportJob]:
@@ -713,20 +694,11 @@ def list_jobs(owner_user_id: int | None = None) -> list[ImportJob]:
     When *owner_user_id* is None the caller receives all jobs.
     """
     _reap_terminal()
-    with _lock:
-        jobs_snapshot = list(_jobs.values())
-    if owner_user_id is None:
-        return jobs_snapshot
-    return [
-        job
-        for job in jobs_snapshot
-        if job.owner_user_id is None or job.owner_user_id == owner_user_id
-    ]
+    return _store.list_visible_to(owner_user_id)
 
 
 def remove_job(job_id: str) -> None:
-    with _lock:
-        _jobs.pop(job_id, None)
+    _store.remove(job_id)
 
 
 def get_live_spool_dirs() -> frozenset[Path]:
@@ -837,55 +809,42 @@ def _import_worker_loop(
     stop_event: threading.Event,
     run_callback: Callable[[ImportJob, Path | None], None],
 ) -> None:
-    while not stop_event.is_set():
-        # Exit if this thread has been replaced by a newer worker.  This
-        # guarantees a deposed worker terminates ≤1 wait cycle after replacement
-        # rather than running indefinitely on the shared queue.
-        if _import_worker_thread is not threading.current_thread():
-            return
-        item: tuple[ImportJob, Path | None] | None = None
-        with _import_condition:
-            if not _import_queue and not stop_event.is_set():
-                _import_condition.wait(timeout=1.0)
-            # Re-check after the wait: we may have been replaced while sleeping.
-            if _import_worker_thread is not threading.current_thread():
-                return
-            if not stop_event.is_set() and _import_queue:
-                item = _import_queue.popleft()
+    def _is_deposed() -> bool:
+        # Exit if this thread has been replaced by a newer worker, guaranteeing a
+        # deposed worker terminates ≤1 wait cycle after replacement rather than
+        # running indefinitely on the shared queue.  Reads the live module global
+        # on each call so a replacement started mid-loop is observed.
+        return _import_worker_thread is not threading.current_thread()
 
-        if item is None:
-            continue
-
+    def _execute(item: tuple[ImportJob, Path | None]) -> None:
         job, profile_raw_root = item
-
         if not job.try_start():
             # Job was cancelled while it was queued (state is now CANCELLED).
             # run_callback never ran, so we are responsible for cleanup.
             job.cleanup_files()
             job.release_capacity()
-            continue
+            return
+        run_callback(job, profile_raw_root)
 
-        try:
-            run_callback(job, profile_raw_root)
-        except BaseException:
-            logger.exception(
-                "Unexpected exception in import worker for job %s", job.job_id
+    def _on_error(item: tuple[ImportJob, Path | None], exc: BaseException) -> None:
+        # run_callback's finally block (cleanup_files + release_capacity) has
+        # already run.  Ensure a terminal state is recorded so observers don't
+        # hang on a never-closing SSE stream.
+        job, _ = item
+        if not job.is_terminal:
+            job._finish(
+                succeeded=False,
+                terminal_msg={"event": "error", "data": {"message": "Worker error"}},
             )
-            # run_callback's finally block (cleanup_files + release_capacity) has
-            # already run.  Ensure a terminal state is recorded so observers don't
-            # hang on a never-closing SSE stream.
-            if not job.is_terminal:
-                try:
-                    job._finish(
-                        succeeded=False,
-                        terminal_msg={
-                            "event": "error",
-                            "data": {"message": "Worker error"},
-                        },
-                    )
-                except Exception:
-                    pass
-            # Do NOT re-raise — the worker thread must stay alive.
+
+    run_worker_loop(
+        stop_event,
+        _import_condition,
+        _import_queue,
+        _execute,
+        is_deposed=_is_deposed,
+        on_execute_error=_on_error,
+    )
 
 
 def stop_import_worker(timeout: float = 5.0) -> None:
@@ -1018,19 +977,15 @@ def start_reaper(
 
 
 def _reap_terminal() -> None:
-    """Remove terminal jobs older than JOB_TTL_SECONDS. Active jobs are NEVER reaped."""
-    now = time.monotonic()
-    with _lock:
-        to_remove = [
-            jid
-            for jid, job in _jobs.items()
-            if job.is_terminal
-            and not job._capacity_held
-            and job._terminal_at is not None
-            and now - job._terminal_at > JOB_TTL_SECONDS
-        ]
-    for jid in to_remove:
-        with _lock:
-            job = _jobs.pop(jid, None)
-        if job is not None:
-            logger.debug("Reaped terminal job %s", jid)
+    """Remove terminal jobs older than JOB_TTL_SECONDS. Active jobs are NEVER reaped.
+
+    Capacity-held jobs are skipped: the slot owns the disk it admitted, so the
+    job record is retained until cleanup releases capacity.
+    """
+    removed = _store.reap(
+        JOB_TTL_SECONDS,
+        terminal_at=lambda job: job._terminal_at,
+        reapable=lambda job: not job._capacity_held,
+    )
+    for jid in removed:
+        logger.debug("Reaped terminal job %s", jid)
