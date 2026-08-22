@@ -54,9 +54,9 @@ async def get_waveform(
     session_id: int,
     waveform_type: VALID_WAVEFORM_TYPES,
     service: WaveformServiceDep,
-    max_points: int = Query(default=2000),
-    start_seconds: float | None = Query(default=None),
-    end_seconds: float | None = Query(default=None),
+    max_points: int = Query(default=2000, ge=100, le=10000),
+    start_seconds: float | None = Query(default=None, ge=0, allow_inf_nan=False),
+    end_seconds: float | None = Query(default=None, ge=0, allow_inf_nan=False),
 ) -> WaveformDataResponse:
     timestamps, values, metadata = await service.get_waveform_data(
         session_id=session_id,

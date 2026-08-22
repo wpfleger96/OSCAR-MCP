@@ -76,7 +76,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import uPlot from 'uplot'
 import { X, Loader2, AlertTriangle } from '@lucide/vue'
 import {
@@ -90,8 +90,11 @@ import { Button } from '@/components/ui/button'
 import WaveformChart from './WaveformChart.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import { getWaveformData } from '@/api/waveforms'
+import { prefetchAdjacentWindows } from '@/utils/waveformPrefetch'
+import { buildWaveformParams } from '@/utils/waveformCache'
 import { WAVEFORM_LABELS, WAVEFORM_GLOSSARY_MAP } from '@/types'
-import type { WaveformDataResponse, EventItem, WaveformType } from '@/types'
+import type { EventItem, WaveformType } from '@/types'
+import type { WaveformCacheRegistry, WaveformSlice } from '@/utils/waveformCache'
 
 const props = defineProps<{
     sessionId: number
@@ -99,6 +102,8 @@ const props = defineProps<{
     events?: EventItem[]
     initialTypes?: string[]
     startEpoch: number
+    cacheRegistry: WaveformCacheRegistry
+    durationSec: number
 }>()
 
 const emit = defineEmits<{
@@ -108,7 +113,7 @@ const emit = defineEmits<{
 interface ChartState {
     id: number
     type: string
-    data: WaveformDataResponse | null
+    data: WaveformSlice | null
     loading: boolean
     error: string | null
 }
@@ -118,6 +123,7 @@ const syncKey = uPlot.sync(`waveform-sync-${crypto.randomUUID()}`)
 const charts = ref<ChartState[]>([])
 const chartRefs = ref<(InstanceType<typeof WaveformChart> | null)[]>([])
 const chartAborts = new Map<number, AbortController>()
+const chartPrefetch = new Map<number, AbortController>()
 
 const typeOptions = computed(() =>
     props.availableTypes.map((t) => ({ value: t, label: WAVEFORM_LABELS[t] ?? t })),
@@ -127,23 +133,61 @@ function setChartRef(idx: number, el: unknown): void {
     chartRefs.value[idx] = el as InstanceType<typeof WaveformChart> | null
 }
 
+// Warm the adjacent zoom windows for this chart in the background so the next step is a cache hit.
+// Fire-and-forget: never touches chart.data/loading/error. Supersedes any prior prefetch.
+function kickChartPrefetch(chart: ChartState, startSec: number, endSec: number): void {
+    chartPrefetch.get(chart.id)?.abort()
+    const controller = new AbortController()
+    chartPrefetch.set(chart.id, controller)
+    prefetchAdjacentWindows({
+        cache: props.cacheRegistry.getCache(chart.type),
+        sessionId: props.sessionId,
+        waveformType: chart.type,
+        startSec,
+        endSec,
+        durationSec: props.durationSec,
+        signal: controller.signal,
+    })
+}
+
 async function loadChart(chart: ChartState, startSec?: number, endSec?: number): Promise<void> {
+    // A newer request (even a cache hit) supersedes any in-flight fetch and pending prefetch.
     chartAborts.get(chart.id)?.abort()
+    chartPrefetch.get(chart.id)?.abort()
+    chartPrefetch.delete(chart.id)
+    const start = startSec ?? 0
+    const end = endSec ?? props.durationSec
+    const cache = props.cacheRegistry.getCache(chart.type)
+
+    const resolved = cache.resolve(start, end, props.durationSec)
+    if (resolved.slice) chart.data = resolved.slice
+    chart.error = null
+    if (resolved.hit || !resolved.fetchWindow) {
+        chart.loading = false
+        chartAborts.delete(chart.id)
+        kickChartPrefetch(chart, start, end)
+        return
+    }
+
     const thisController = new AbortController()
     chartAborts.set(chart.id, thisController)
+    const fetchWindow = resolved.fetchWindow
 
     chart.loading = true
-    chart.error = null
     try {
-        const params: Record<string, number> = { max_points: 2000 }
-        if (startSec !== undefined) params.start_seconds = startSec
-        if (endSec !== undefined) params.end_seconds = endSec
-        chart.data = await getWaveformData(
+        const response = await getWaveformData(
             props.sessionId,
             chart.type,
-            params,
+            buildWaveformParams(fetchWindow, props.durationSec),
             thisController.signal,
         )
+        // Superseded (or unmounted) → never store: a stale response must not land a chunk into a
+        // cache the parent may have cleared on session change (matches useWaveformWindow.runFetch).
+        if (chartAborts.get(chart.id) === thisController) {
+            cache.store(fetchWindow, response, props.durationSec)
+            chart.data = cache.resolve(start, end, props.durationSec).slice
+            kickChartPrefetch(chart, start, end)
+        }
     } catch (err: unknown) {
         if (err instanceof Error && err.name !== 'CanceledError') {
             chart.error = err.message
@@ -166,6 +210,8 @@ function removeChart(idx: number): void {
     if (chart) {
         chartAborts.get(chart.id)?.abort()
         chartAborts.delete(chart.id)
+        chartPrefetch.get(chart.id)?.abort()
+        chartPrefetch.delete(chart.id)
     }
     charts.value.splice(idx, 1)
     chartRefs.value.splice(idx, 1)
@@ -174,6 +220,7 @@ function removeChart(idx: number): void {
 function updateChartType(idx: number, newType: string): void {
     const chart = charts.value[idx]
     if (!chart) return
+    // loadChart's top already aborts+drops the outgoing type's in-flight fetch and prefetch.
     chart.type = newType
     chart.data = null
     chart.error = null
@@ -181,6 +228,9 @@ function updateChartType(idx: number, newType: string): void {
 }
 
 function onZoom(startSec: number, endSec: number): void {
+    // Data swaps no longer rescale; propagate the viewport to every chart explicitly. The origin
+    // chart already sits at this window, so its setScaleX is a no-op (idempotence guard).
+    chartRefs.value.forEach((r) => r?.setScaleX(startSec, endSec))
     for (const chart of charts.value) {
         void loadChart(chart, startSec, endSec)
     }
@@ -192,15 +242,25 @@ onMounted(() => {
     for (const t of types) addChart(t)
 })
 
+onBeforeUnmount(() => {
+    chartAborts.forEach((c) => c.abort())
+    chartPrefetch.forEach((c) => c.abort())
+})
+
 defineExpose({
     addChart,
-    resetZoom() {
+    async resetZoom() {
         for (const chart of charts.value) {
             void loadChart(chart)
         }
+        // resetZoom rescales to the data extent — valid only after the overview slice flushes to
+        // props; loadChart resolves the overview synchronously but the prop update is async.
+        await nextTick()
         chartRefs.value.forEach((r) => r?.resetZoom())
     },
     zoomTo(startSec: number, endSec: number) {
+        // Move every chart's viewport explicitly (data swaps no longer rescale).
+        chartRefs.value.forEach((r) => r?.setScaleX(startSec, endSec))
         for (const chart of charts.value) {
             void loadChart(chart, startSec, endSec)
         }
