@@ -131,6 +131,8 @@ class AppleCrossNightRecord(BaseModel):
             "Why the night contributes no SNORE side to any correlation: "
             "'analysis_not_run' — SNORE analysis never ran for the night; "
             "'analysis_stale' — SNORE analysis is stale / version-mismatched; "
+            "'device_ambiguous' — the night has sessions from more than one "
+            "device and no device_id was pinned to disambiguate; "
             "None — the night carries usable SNORE indices"
         ),
     )
@@ -147,6 +149,9 @@ class AppleCrossAggregate(BaseModel):
     )
     n_analysis_stale: int = Field(
         description="Nights skipped: SNORE analysis stale / version-mismatched"
+    )
+    n_device_ambiguous: int = Field(
+        description="Nights skipped: multiple devices, no device_id pinned"
     )
     n_skipped_no_apple_bd: int = Field(
         description="Nights with no Apple breathing-disturbance value"

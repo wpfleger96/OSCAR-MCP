@@ -60,6 +60,7 @@ async def run_apple_cross_validation(
     return await validator.validate_date_range(
         date_from=body.from_date.isoformat(),
         date_to=body.to_date.isoformat(),
+        device_id=body.device_id,
     )
 
 
