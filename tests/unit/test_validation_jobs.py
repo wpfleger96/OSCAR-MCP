@@ -236,6 +236,18 @@ def test_apple_params_carry_min_pairs():
     assert vreg.get_spec("apple").current_params(None) == {"min_pairs": _MIN_PAIRS}
 
 
+def test_apple_params_include_device_id_only_when_pinned():
+    """device_id changes results, so it enters the dedup key when pinned and is
+    omitted otherwise (keeping the unpinned key identical to pre-pinning)."""
+    spec = vreg.get_spec("apple")
+    assert "device_id" not in spec.current_params(None)
+    assert "device_id" not in spec.current_params({"device_id": None})
+    pinned = spec.current_params({"device_id": 7})
+    assert pinned["device_id"] == 7
+    # A pinned run's params differ from an unpinned run's → they never dedup.
+    assert pinned != spec.current_params(None)
+
+
 def test_events_params_carry_mode():
     assert vreg.get_spec("events").current_params({"mode": "resmed"}) == {
         "mode": "resmed"
@@ -628,6 +640,49 @@ def test_rera_dedup_changed_tunable_forces_new_run(init_db, monkeypatch):
                     date_to=date(2024, 1, 7),
                     engine_identity=_IDENTITY,
                     validator_params=changed,
+                    owner_user_id=None,
+                )
+                is None
+            )
+
+    _run(_check())
+
+
+def test_apple_dedup_distinguishes_device_pinning(init_db):
+    """An unpinned apple run must not be reused for a device-pinned request."""
+
+    async def _check() -> None:
+        from snore.database.session import session_scope
+
+        unpinned = vreg.get_spec("apple").current_params(None)
+        pinned = vreg.get_spec("apple").current_params({"device_id": 7})
+        await _seed_run(validator_type="apple", validator_params_json=unpinned)
+
+        async with session_scope() as db:
+            # Same (unpinned) params → dedup hit.
+            assert (
+                await vjobs.find_reusable_run(
+                    db,
+                    profile_id=1,
+                    validator_type="apple",
+                    date_from=date(2024, 1, 1),
+                    date_to=date(2024, 1, 7),
+                    engine_identity=_IDENTITY,
+                    validator_params=unpinned,
+                    owner_user_id=None,
+                )
+                is not None
+            )
+            # Pinned params → no reuse of the unpinned run.
+            assert (
+                await vjobs.find_reusable_run(
+                    db,
+                    profile_id=1,
+                    validator_type="apple",
+                    date_from=date(2024, 1, 1),
+                    date_to=date(2024, 1, 7),
+                    engine_identity=_IDENTITY,
+                    validator_params=pinned,
                     owner_user_id=None,
                 )
                 is None
