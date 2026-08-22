@@ -10,6 +10,8 @@ Covers three surfaces:
 
 from __future__ import annotations
 
+import csv
+import json
 import uuid
 
 from datetime import UTC, date, datetime, time
@@ -20,6 +22,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.shared.versioning import DayAnalysisStatus, NullReason
+from snore.database.day_manager import DayManager
 from snore.database.models import (
     HealthNightlySummary,
     HealthSample,
@@ -33,7 +36,15 @@ from snore.services.breath.dtos import (
     NightlyRangeSummary,
 )
 from snore.services.breath_service import BreathService
-from snore.validation.apple_cross_report import correlate_night_pairs
+from snore.validation.apple_cross_report import (
+    AppleCrossAggregate,
+    AppleCrossNightRecord,
+    AppleCrossValidationReport,
+    PairCorrelation,
+    correlate_night_pairs,
+    export_apple_cross_report_csv,
+    export_apple_cross_report_json,
+)
 from snore.validation.apple_cross_validator import AppleCrossValidator
 
 _BD_TYPE = "HKQuantityTypeIdentifierAppleSleepingBreathingDisturbances"
@@ -308,6 +319,49 @@ class TestAppleCrossValidator:
         assert agg.n_with_apple_bd == 1
         assert agg.n_skipped_no_apple_bd == 2
 
+    async def test_mixed_version_night_excluded_despite_non_null_indices(
+        self, async_db_session, monkeypatch
+    ):
+        """A MIXED_VERSION (stale) night keeps its indices out of every correlation.
+
+        MIXED_VERSION maps to skip_reason='analysis_stale'.  Even when such a
+        night still carries non-null rera_index / fl / apple_bd (the last run
+        left values behind), the documented invariant is that it contributes no
+        SNORE side to any correlation and is counted in n_analysis_stale.
+        """
+        profile_id = await _make_profile(async_db_session)
+        ok_nights = [date(2024, 10, d) for d in (1, 2, 3)]
+        stale_night = date(2024, 10, 4)
+        summaries = [
+            *(_night(n, rera_index=float(i + 1)) for i, n in enumerate(ok_nights)),
+            _night(
+                stale_night,
+                day_status=DayAnalysisStatus.MIXED_VERSION,
+                rera_index=99.0,  # non-null but must not feed correlation
+                fl_class_ge4_pct=99.0,
+            ),
+        ]
+        _stub_nights(monkeypatch, summaries)
+        for i, n in enumerate(ok_nights):
+            await _seed_apple_bd(async_db_session, profile_id, n, float(i + 1) * 5)
+        # The stale night also has an Apple BD value present.
+        await _seed_apple_bd(async_db_session, profile_id, stale_night, 5.0)
+        await async_db_session.flush()
+
+        report = await AppleCrossValidator(
+            async_db_session, profile_id
+        ).validate_date_range("2024-10-01", "2024-10-04")
+
+        by_date = {r.night_date: r for r in report.nights}
+        assert by_date["2024-10-04"].skip_reason == "analysis_stale"
+
+        agg = report.aggregate
+        assert agg.n_analysis_stale == 1
+        # Only the three OK nights are paired; the stale night is excluded even
+        # though its indices and Apple BD are all non-null.
+        assert agg.rera_vs_apple_bd.n_paired_nights == 3
+        assert agg.rera_vs_apple_bd.rho == pytest.approx(1.0)
+
     async def test_fragmentation_pairs_use_nightly_summary(
         self, async_db_session, monkeypatch
     ):
@@ -419,19 +473,26 @@ class TestAppleCrossValidator:
 
 
 class TestNightDateJoinConvention:
-    def test_noon_split_matches_therapy_date_convention(self):
-        """Pre-noon wall-clock belongs to the previous night; noon onward to today.
+    def test_noon_split_matches_day_manager_across_boundary(self):
+        """apply_noon_split must agree with DayManager.get_day_for_session.
 
-        This is the convention shared by HealthSample.night_date,
-        HealthNightlySummary.night_date, and NightlyAnalysisSummary.therapy_date
-        (DayManager noon split), so the two axes join on identical dates.
+        The Apple axis (HealthSample.night_date / HealthNightlySummary.night_date)
+        and the SNORE axis (NightlyAnalysisSummary.therapy_date) key on two
+        independent copies of the noon cutoff.  Pin that they resolve identical
+        night dates across the boundary so the join can never silently drift.
         """
-        assert apply_noon_split(datetime(2024, 7, 2, 6, 0)) == date(2024, 7, 1)
-        assert apply_noon_split(datetime(2024, 7, 2, 11, 59)) == date(2024, 7, 1)
-        assert apply_noon_split(datetime(2024, 7, 2, 12, 0)) == date(2024, 7, 2)
-        assert apply_noon_split(datetime(2024, 7, 2, 22, 0)) == date(2024, 7, 2)
-        # Boundary constant is noon.
-        assert time(12, 0) == time(12, 0)
+        boundary_datetimes = [
+            datetime(2024, 7, 2, 0, 0, 0),  # midnight → previous night
+            datetime(2024, 7, 2, 11, 59, 59),  # just before noon → previous night
+            datetime(2024, 7, 2, 12, 0, 0),  # noon exactly → today
+            datetime(2024, 7, 2, 12, 0, 1),  # just after noon → today
+            datetime(2024, 7, 2, 22, 0, 0),  # evening → today
+        ]
+        for dt in boundary_datetimes:
+            assert apply_noon_split(dt) == DayManager.get_day_for_session(dt), dt
+
+        # Both copies of the cutoff are the same noon constant.
+        assert time(12, 0) == DayManager.DEFAULT_SPLIT_TIME
 
     async def test_validator_joins_apple_bd_on_shared_night_date(
         self, async_db_session, monkeypatch
@@ -451,6 +512,93 @@ class TestNightDateJoinConvention:
         ).validate_date_range("2024-08-10", "2024-08-10")
 
         assert report.nights[0].apple_breathing_disturbances == pytest.approx(7.5)
+
+
+# ---------------------------------------------------------------------------
+# Report exporters (JSON / CSV)
+# ---------------------------------------------------------------------------
+
+
+def _sample_report() -> AppleCrossValidationReport:
+    """A report with one scored night and one skipped (null-SNORE) night."""
+    return AppleCrossValidationReport(
+        report_date="2024-11-01 08:00:00",
+        date_range_start="2024-11-01",
+        date_range_end="2024-11-02",
+        aggregate=AppleCrossAggregate(
+            total_nights=2,
+            n_analysis_not_run=0,
+            n_analysis_stale=1,
+            n_device_ambiguous=0,
+            n_skipped_no_apple_bd=0,
+            n_with_apple_bd=2,
+            rera_vs_apple_bd=PairCorrelation(
+                n_paired_nights=1, reason="insufficient_pairs"
+            ),
+            fl_vs_apple_bd=PairCorrelation(
+                n_paired_nights=1, reason="insufficient_pairs"
+            ),
+            rera_vs_awake_seconds=PairCorrelation(
+                n_paired_nights=0, reason="insufficient_pairs"
+            ),
+            fl_vs_sleep_efficiency=PairCorrelation(
+                n_paired_nights=0, reason="insufficient_pairs"
+            ),
+        ),
+        nights=[
+            AppleCrossNightRecord(
+                night_date="2024-11-01",
+                rera_index=3.25,
+                fl_class_ge4_pct=12.5,
+                apple_breathing_disturbances=7.0,
+                awake_seconds=None,
+                sleep_efficiency_pct=None,
+                skip_reason=None,
+            ),
+            AppleCrossNightRecord(
+                night_date="2024-11-02",
+                rera_index=None,
+                rera_index_reason="analysis_stale",
+                fl_class_ge4_pct=None,
+                apple_breathing_disturbances=9.0,
+                apple_bd_reason=None,
+                skip_reason="analysis_stale",
+            ),
+        ],
+    )
+
+
+class TestAppleCrossExporters:
+    def test_json_export_round_trips_to_equal_report(self, tmp_path):
+        report = _sample_report()
+        out = tmp_path / "nested" / "report.json"
+
+        export_apple_cross_report_json(report, out)
+
+        loaded = json.loads(out.read_text())
+        rebuilt = AppleCrossValidationReport.model_validate(loaded)
+        assert rebuilt == report
+
+    def test_csv_export_writes_one_row_per_night(self, tmp_path):
+        report = _sample_report()
+        out = tmp_path / "report.csv"
+
+        export_apple_cross_report_csv(report, out)
+
+        with open(out, newline="") as f:
+            rows = list(csv.DictReader(f))
+
+        assert len(rows) == len(report.nights)
+        scored, skipped = rows
+        # Numeric cells are fixed to 4 decimals; None becomes an empty string.
+        assert scored["night_date"] == "2024-11-01"
+        assert scored["rera_index"] == "3.2500"
+        assert scored["apple_breathing_disturbances"] == "7.0000"
+        assert scored["awake_seconds"] == ""
+        assert scored["skip_reason"] == ""
+        assert skipped["rera_index"] == ""
+        assert skipped["rera_index_reason"] == "analysis_stale"
+        assert skipped["skip_reason"] == "analysis_stale"
 
 
 def test_module_imports_numpy_free_of_side_effects():
