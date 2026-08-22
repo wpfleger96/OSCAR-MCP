@@ -10,7 +10,9 @@
             Compare Runs to measure the effect of an algorithm or parameter change.
         </p>
 
-        <Tabs v-model="activeTab">
+        <!-- unmount-on-hide=false keeps every panel's freshly-run report and picked
+             dates alive across tab switches, not just History-loaded runs. -->
+        <Tabs v-model="activeTab" :unmount-on-hide="false">
             <TabsList>
                 <TabsTrigger v-for="t in TABS" :key="t" :value="t">
                     {{ VALIDATOR_LABELS[t] }}
@@ -43,7 +45,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Separator } from '@/components/ui/separator'
@@ -57,7 +59,9 @@ import ValidationRunHistory from '@/components/validation/ValidationRunHistory.v
 import { VALIDATOR_LABELS } from '@/utils/validationMetrics'
 import type { ValidatorType, ValidationRunStatus } from '@/types'
 
-const TABS: ValidatorType[] = ['events', 'fl', 'breaths', 'rera', 'apple']
+// Single source of truth for tab identity/order; the explicit TabsContent blocks
+// below stay because each renders a different panel component.
+const TABS = Object.keys(VALIDATOR_LABELS) as ValidatorType[]
 
 const route = useRoute()
 const router = useRouter()
@@ -88,10 +92,14 @@ function loadRunFor(type: ValidatorType): number | null {
     return pendingLoad.value?.type === type ? pendingLoad.value.runId : null
 }
 
-function onSelectRun(run: ValidationRunStatus): void {
+async function onSelectRun(run: ValidationRunStatus): Promise<void> {
     const type = run.validator_type as ValidatorType
-    pendingLoad.value = { type, runId: run.run_id }
     activeTab.value = type
+    pendingLoad.value = { type, runId: run.run_id }
+    // Clear once the panel's loadRunId watcher has consumed it, so re-selecting the
+    // same run is a fresh null→id transition that re-triggers the load.
+    await nextTick()
+    pendingLoad.value = null
 }
 
 onMounted(() => {

@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import {
     createValidationRun,
     listValidationRuns,
@@ -32,6 +32,9 @@ async function refresh(): Promise<void> {
         const res = await listValidationRuns({ limit: 200, offset: 0 })
         runs.value = res.runs
         listError.value = null
+        // Landing on the page (or returning to it) with a queued/running job must
+        // resume the poll loop, not wait for a manual refresh.
+        ensurePolling()
     } catch (err) {
         listError.value = err instanceof Error ? err.message : 'Failed to load runs'
     } finally {
@@ -75,18 +78,9 @@ function runsForType(type: ValidatorType): ValidationRunStatus[] {
     return runs.value.filter((r) => r.validator_type === type)
 }
 
-function stopPolling(): void {
-    if (pollTimer !== null) {
-        clearTimeout(pollTimer)
-        pollTimer = null
-    }
-}
-
 export function useValidationRuns() {
-    const activeRuns = computed(() => runs.value.filter(isActive))
     return {
         runs,
-        activeRuns,
         loading,
         listError,
         refresh,
@@ -94,8 +88,6 @@ export function useValidationRuns() {
         getDetail,
         remove,
         runsForType,
-        ensurePolling,
-        stopPolling,
         isActive,
     }
 }
