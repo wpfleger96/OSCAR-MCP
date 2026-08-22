@@ -13,6 +13,21 @@ describe('nullReasonLabel', () => {
         expect(nullReasonLabel('some_future_reason')).toBe('some future reason')
     })
 
+    // The six codes below were added alongside the FL/RERA day-view metrics; a
+    // mapped code must resolve to its full sentence, never the prettify fallback.
+    it.each([
+        'primary_mode_mismatch',
+        'smart_ramp_indeterminate',
+        'segments_unknown',
+        'multi_session_ambiguity',
+        'unvalidated_device',
+        'rx_changed_within_epoch',
+    ])('test_mapped_code_%s_resolves_to_full_sentence', (code) => {
+        const label = nullReasonLabel(code)
+        expect(label).not.toBe(code.replace(/_/g, ' '))
+        expect(label?.endsWith('.')).toBe(true)
+    })
+
     it('test_nullish_reason_returns_null', () => {
         expect(nullReasonLabel(null)).toBeNull()
         expect(nullReasonLabel(undefined)).toBeNull()
