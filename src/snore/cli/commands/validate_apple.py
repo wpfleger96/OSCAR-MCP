@@ -30,6 +30,12 @@ def _fmt_r(v: float | None) -> str:
 @click.command()
 @date_range_options_required
 @click.option(
+    "--device-id",
+    type=int,
+    default=None,
+    help="Pin SNORE device id (disambiguates multi-device nights)",
+)
+@click.option(
     "--export",
     type=click.Path(),
     help="Export report to file (.json or .csv)",
@@ -39,6 +45,7 @@ def _fmt_r(v: float | None) -> str:
 def validate_apple(
     date_from: datetime,
     date_to: datetime,
+    device_id: int | None,
     export: str | None,
     db: str | None,
     actor_user: str | None,
@@ -82,6 +89,7 @@ def validate_apple(
                 report = await validator.validate_date_range(
                     date_from.strftime("%Y-%m-%d"),
                     date_to.strftime("%Y-%m-%d"),
+                    device_id=device_id,
                 )
 
                 agg = report.aggregate
@@ -97,6 +105,7 @@ def validate_apple(
                 )
                 console.print(f"Skipped (analysis not run): {agg.n_analysis_not_run}")
                 console.print(f"Skipped (analysis stale):   {agg.n_analysis_stale}")
+                console.print(f"Skipped (device ambiguous): {agg.n_device_ambiguous}")
 
                 corr_table = Table(title="Cross-source Spearman correlations")
                 corr_table.add_column("Metric pair")

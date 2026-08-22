@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.shared.versioning import DayAnalysisStatus
-from snore.services.breath.dtos import NightlyAnalysisSummary
+from snore.services.breath.dtos import DeviceAmbiguityError, NightlyAnalysisSummary
 from snore.services.breath_service import BreathService
 from snore.services.health_service import HealthService
 from snore.validation.apple_cross_report import (
@@ -62,23 +62,33 @@ class AppleCrossValidator:
         self._profile_id = profile_id
 
     async def validate_date_range(
-        self, date_from: str, date_to: str
+        self, date_from: str, date_to: str, device_id: int | None = None
     ) -> AppleCrossValidationReport:
         """Run cross-source validation across an inclusive date range.
 
         Args:
             date_from: Start date (YYYY-MM-DD).
             date_to: End date (YYYY-MM-DD).
+            device_id: Pin the SNORE device to resolve nights against.  When None
+                (the default) and a night has sessions from more than one device,
+                that night degrades to a ``device_ambiguous`` skip rather than
+                aborting the whole range.
         """
         start = date.fromisoformat(date_from)
         end = date.fromisoformat(date_to)
 
-        nights = await self._collect_snore_nights(start, end)
+        nights, ambiguous_dates = await self._collect_snore_nights(
+            start, end, device_id
+        )
         health = HealthService(self._db, self._profile_id)
         apple_bd = await health.get_breathing_disturbance_by_night(start, end)
         fragmentation = await health.get_fragmentation_by_night(start, end)
 
         records = [self._build_record(n, apple_bd, fragmentation) for n in nights]
+        records.extend(
+            self._ambiguous_record(d, apple_bd, fragmentation) for d in ambiguous_dates
+        )
+        records.sort(key=lambda r: r.night_date)
         aggregate = self._aggregate(records, apple_bd)
 
         return AppleCrossValidationReport(
@@ -90,18 +100,63 @@ class AppleCrossValidator:
         )
 
     async def _collect_snore_nights(
-        self, start: date, end: date
-    ) -> list[NightlyAnalysisSummary]:
-        """Page ``get_nightly_range_summary`` over the range in <=90-night windows."""
+        self, start: date, end: date, device_id: int | None
+    ) -> tuple[list[NightlyAnalysisSummary], list[date]]:
+        """Page ``get_nightly_range_summary`` over the range in <=90-night windows.
+
+        Returns ``(resolved_nights, ambiguous_dates)``.  A chunk that raises
+        ``DeviceAmbiguityError`` (only possible when ``device_id`` is None) is
+        retried night-by-night so the ambiguity is isolated to the specific
+        nights that carry multiple devices; every other night is still scored.
+        """
         breath_svc = BreathService(self._db, self._profile_id)
         nights: list[NightlyAnalysisSummary] = []
+        ambiguous: list[date] = []
         cursor = start
         while cursor <= end:
             chunk_end = min(cursor + timedelta(days=_MAX_NIGHTS_PER_CALL - 1), end)
-            summary = await breath_svc.get_nightly_range_summary(cursor, chunk_end)
-            nights.extend(summary.nights)
+            chunk_nights, chunk_ambiguous = await self._resolve_chunk(
+                breath_svc, cursor, chunk_end, device_id
+            )
+            nights.extend(chunk_nights)
+            ambiguous.extend(chunk_ambiguous)
             cursor = chunk_end + timedelta(days=1)
-        return nights
+        return nights, ambiguous
+
+    @staticmethod
+    async def _resolve_chunk(
+        breath_svc: BreathService,
+        start: date,
+        end: date,
+        device_id: int | None,
+    ) -> tuple[list[NightlyAnalysisSummary], list[date]]:
+        """Resolve one chunk, degrading device-ambiguous nights to skips.
+
+        With ``device_id`` pinned, a ``DeviceAmbiguityError`` cannot arise from
+        the pin itself (it selects one device), so any other service error
+        propagates unchanged.
+        """
+        try:
+            summary = await breath_svc.get_nightly_range_summary(
+                start, end, device_id=device_id
+            )
+            return list(summary.nights), []
+        except DeviceAmbiguityError:
+            if device_id is not None:
+                raise
+            nights: list[NightlyAnalysisSummary] = []
+            ambiguous: list[date] = []
+            cursor = start
+            while cursor <= end:
+                try:
+                    single = await breath_svc.get_nightly_range_summary(
+                        cursor, cursor, device_id=None
+                    )
+                    nights.extend(single.nights)
+                except DeviceAmbiguityError:
+                    ambiguous.append(cursor)
+                cursor += timedelta(days=1)
+            return nights, ambiguous
 
     @staticmethod
     def _build_record(
@@ -122,6 +177,28 @@ class AppleCrossValidator:
             awake_seconds=awake,
             sleep_efficiency_pct=efficiency,
             skip_reason=_skip_reason_for(night.day_status),
+        )
+
+    @staticmethod
+    def _ambiguous_record(
+        night_date: date,
+        apple_bd: dict[date, float],
+        fragmentation: dict[date, tuple[float | None, float | None]],
+    ) -> AppleCrossNightRecord:
+        """A device-ambiguous night: null SNORE side, Apple side still joined."""
+        bd = apple_bd.get(night_date)
+        awake, efficiency = fragmentation.get(night_date, (None, None))
+        return AppleCrossNightRecord(
+            night_date=night_date.isoformat(),
+            rera_index=None,
+            rera_index_reason="device_ambiguous",
+            fl_class_ge4_pct=None,
+            fl_class_ge4_pct_reason="device_ambiguous",
+            apple_breathing_disturbances=bd,
+            apple_bd_reason="no_apple_bd" if bd is None else None,
+            awake_seconds=awake,
+            sleep_efficiency_pct=efficiency,
+            skip_reason="device_ambiguous",
         )
 
     @staticmethod
@@ -156,6 +233,9 @@ class AppleCrossValidator:
             ),
             n_analysis_stale=sum(
                 1 for r in records if r.skip_reason == "analysis_stale"
+            ),
+            n_device_ambiguous=sum(
+                1 for r in records if r.skip_reason == "device_ambiguous"
             ),
             n_skipped_no_apple_bd=len(records) - n_with_apple_bd,
             n_with_apple_bd=n_with_apple_bd,

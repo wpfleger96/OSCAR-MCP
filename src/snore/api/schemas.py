@@ -208,6 +208,7 @@ class ReraValidationRequest(BaseModel):
 class AppleCrossValidationRequest(BaseModel):
     from_date: date
     to_date: date
+    device_id: int | None = None
 
     @model_validator(mode="after")
     def validate_date_order(self) -> AppleCrossValidationRequest:
