@@ -1,10 +1,11 @@
 """HTTP-surface tests for the persisted validation-run endpoints.
 
 Covers the paths that resolve entirely through the overridden ``get_db``
-session: unregistered-type rejection, dedup reuse, listing/filtering, detail
-retrieval, ownership isolation, and deletion of a finished run.  The background
-enqueue path (which commits through the global ``session_scope``) is covered at
-unit level in ``tests/unit/test_validation_jobs.py``.
+session: invalid-type rejection, dedup reuse, listing/filtering, detail
+retrieval, ownership isolation, deletion of a finished run, and the synchronous
+``apple`` run end-to-end.  The background enqueue path (which commits through
+the global ``session_scope``) is covered at unit level in
+``tests/unit/test_validation_jobs.py``.
 """
 
 from __future__ import annotations
@@ -79,21 +80,22 @@ def _client(async_db_session: AsyncSession, actor: ActorContext) -> TestClient:
     return make_test_client(async_db_session, actor=actor)
 
 
-def test_unregistered_type_returns_400(
-    async_db_session: AsyncSession, seeded: Any
-) -> None:
+def test_invalid_type_returns_422(async_db_session: AsyncSession, seeded: Any) -> None:
+    # Every ValidatorType Literal value is now registered, so an unknown type is
+    # rejected by request validation (422) before the handler runs. The 400
+    # "unregistered" branch remains as defensive code for a future Literal value
+    # added ahead of its registration.
     actor, _pid, _uid = seeded
     client = _client(async_db_session, actor)
     resp = client.post(
         "/api/v1/validate/runs",
         json={
-            "validator_type": "rera",
+            "validator_type": "bogus",
             "from_date": "2024-01-01",
             "to_date": "2024-01-07",
         },
     )
-    assert resp.status_code == 400
-    assert "rera" in resp.json()["detail"]
+    assert resp.status_code == 422
 
 
 def test_dedup_hit_returns_reused(
@@ -166,3 +168,47 @@ def test_delete_finished_run(
 
     assert client.delete(f"/api/v1/validate/runs/{run_id}").status_code == 204
     assert client.get(f"/api/v1/validate/runs/{run_id}").status_code == 404
+
+
+def test_apple_sync_run_end_to_end(
+    async_db_session: AsyncSession, db_session: Any, seeded: Any
+) -> None:
+    """apple is a SYNC validator: POST computes inline and persists a
+    succeeded, job-less run that GET can immediately read back."""
+    actor, _pid, _uid = seeded
+    client = _client(async_db_session, actor)
+
+    resp = client.post(
+        "/api/v1/validate/runs",
+        json={
+            "validator_type": "apple",
+            "from_date": "2024-01-01",
+            "to_date": "2024-01-07",
+        },
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["validator_type"] == "apple"
+    assert body["state"] == "succeeded"
+    assert body["job_id"] is None  # synchronous run — never queued
+    assert body["reused"] is False
+    # min_pairs tunable stamped into the params half of the dedup key.
+    assert "min_pairs" in body["validator_params"]
+
+    run_id = body["run_id"]
+    detail = client.get(f"/api/v1/validate/runs/{run_id}")
+    assert detail.status_code == 200
+    assert detail.json()["report_json"] is not None
+
+    # A second identical request dedups onto the first succeeded run.
+    again = client.post(
+        "/api/v1/validate/runs",
+        json={
+            "validator_type": "apple",
+            "from_date": "2024-01-01",
+            "to_date": "2024-01-07",
+        },
+    )
+    assert again.status_code == 202
+    assert again.json()["reused"] is True
+    assert again.json()["run_id"] == run_id

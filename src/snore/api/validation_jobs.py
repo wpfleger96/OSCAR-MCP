@@ -254,6 +254,17 @@ def cancel_job(job_id: str) -> bool:
     return result
 
 
+def has_running_jobs() -> bool:
+    """True if any validation run is currently RUNNING.
+
+    Read by the ``/health/busy`` gate so a multi-minute run is not interrupted
+    by a watchtower container replacement.  QUEUED jobs are excluded: they have
+    no in-progress writes, and validation is idempotent (the user re-runs).
+    """
+    with _lock:
+        return any(j.state == ValidationRunState.RUNNING for j in _all_jobs.values())
+
+
 def _reap_terminal() -> None:
     removed = _store.reap(JOB_TTL_SECONDS, terminal_at=lambda job: job.finished_at)
     for jid in removed:

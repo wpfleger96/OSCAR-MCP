@@ -1,12 +1,15 @@
 """Unit tests for the validation-run job queue, registry, and persistence.
 
-Split into three groups:
+Grouped as:
 
 - In-memory state machine (mirrors ``test_analysis_jobs``): no DB.
-- Registry seam: which validator types are wired vs. accepted-but-unregistered.
+- Registry seam: every validator type (``events``/``fl``/``breaths``/``rera``/
+  ``apple``) is wired, with the correct JOB vs. SYNC mode and params.
 - ``validation_runs`` persistence against a real migrated SQLite DB: the
   enqueue → run → persist lifecycle, dedup, orphan recovery, and retention —
   exercised through the exact production ``session_scope()`` code paths.
+- ``rera`` job lifecycle plus a dedup test proving a changed proxy tunable in
+  ``validator_params_json`` forces a fresh run.
 """
 
 from __future__ import annotations
@@ -191,12 +194,15 @@ def test_to_dict_shape():
 # ---------------------------------------------------------------------------
 
 
-def test_registered_types_are_the_three_live_validators():
-    assert vreg.registered_types() == frozenset({"events", "fl", "breaths"})
+def test_all_validator_types_are_registered():
+    assert vreg.registered_types() == frozenset(vreg.VALIDATOR_TYPES)
+    assert vreg.registered_types() == frozenset(
+        {"events", "fl", "breaths", "rera", "apple"}
+    )
 
 
-@pytest.mark.parametrize("vtype", ["events", "fl", "breaths"])
-def test_live_validators_have_specs(vtype):
+@pytest.mark.parametrize("vtype", ["events", "fl", "breaths", "rera"])
+def test_job_validators_have_specs(vtype):
     spec = vreg.get_spec(vtype)
     assert spec is not None
     assert spec.mode is RunMode.JOB
@@ -204,10 +210,30 @@ def test_live_validators_have_specs(vtype):
     assert spec.current_params(None) == spec.current_params(None)
 
 
-@pytest.mark.parametrize("vtype", ["rera", "apple"])
-def test_sibling_validators_accepted_but_unregistered(vtype):
-    assert vtype in vreg.VALIDATOR_TYPES
-    assert vreg.get_spec(vtype) is None
+def test_apple_is_a_sync_validator():
+    spec = vreg.get_spec("apple")
+    assert spec is not None
+    assert spec.mode is RunMode.SYNC
+
+
+def test_rera_params_carry_proxy_tunables():
+    from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
+    from snore.analysis.shared.versioning import RERA_PROXY_ALGO_VERSION
+    from snore.constants import RERAProxyConstants
+
+    assert vreg.get_spec("rera").current_params(None) == {
+        "rera_proxy_algo_version": RERA_PROXY_ALGO_VERSION,
+        "fl_class_threshold": RERAProxyConstants.FL_CLASS_THRESHOLD,
+        "min_fl_run_length": RERAProxyConstants.MIN_FL_RUN_LENGTH,
+        "recovery_amplitude_margin": RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
+        "match_tolerance_seconds": EVENT_MATCH_TOLERANCE_SECONDS,
+    }
+
+
+def test_apple_params_carry_min_pairs():
+    from snore.validation.apple_cross_report import _MIN_PAIRS
+
+    assert vreg.get_spec("apple").current_params(None) == {"min_pairs": _MIN_PAIRS}
 
 
 def test_events_params_carry_mode():
@@ -505,5 +531,106 @@ def test_prune_retention_keeps_newest_per_group(init_db):
         assert await _fetch_run(ids[1]) is not None
         assert await _fetch_run(ids[2]) is not None
         assert await _fetch_run(other) is not None
+
+    _run(_check())
+
+
+# ---------------------------------------------------------------------------
+# 4. rera (JOB) — lifecycle + dedup on a changed proxy tunable
+# ---------------------------------------------------------------------------
+
+_RERA_PARAMS = vreg.get_spec("rera").current_params(None)
+
+
+def test_rera_job_lifecycle(init_db, snapshot_registry):
+    """rera enqueue → _execute_job (stub run) → row SUCCEEDED with report."""
+
+    async def _stub_run(
+        db: Any, profile_id: int, date_from: str, date_to: str, params: Any
+    ) -> _StubReport:
+        return _StubReport(ok=True, n=7)
+
+    vreg.register(
+        ValidatorSpec(
+            validator_type="rera",
+            mode=RunMode.JOB,
+            run=_stub_run,
+            current_params=lambda p: _RERA_PARAMS,
+        )
+    )
+
+    run_id = _run(
+        vjobs.insert_queued_run(
+            job_id="job-rera",
+            profile_id=1,
+            owner_user_id=5,
+            validator_type="rera",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 7),
+            engine_identity=_IDENTITY,
+            validator_params=_RERA_PARAMS,
+        )
+    )
+    job = _enqueue_one(
+        run_id=run_id, job_id="job-rera", owner_user_id=5, validator_type="rera"
+    )
+
+    vjobs._execute_job(job)
+
+    assert job.state == ValidationRunState.SUCCEEDED
+    row = _run(_fetch_run(run_id))
+    assert row.state == "succeeded"
+    assert row.report_json == {"ok": True, "n": 7}
+
+
+def test_rera_dedup_changed_tunable_forces_new_run(init_db, monkeypatch):
+    """A changed RERA-proxy tunable changes validator_params_json → no reuse."""
+
+    async def _check() -> None:
+        from snore.constants import RERAProxyConstants
+        from snore.database.session import session_scope
+
+        # Seed a succeeded rera run stamped with the CURRENT proxy tunables.
+        baseline = vreg.get_spec("rera").current_params(None)
+        await _seed_run(
+            validator_type="rera",
+            validator_params_json=baseline,
+        )
+
+        # Same tunables → dedup hit.
+        async with session_scope() as db:
+            assert (
+                await vjobs.find_reusable_run(
+                    db,
+                    profile_id=1,
+                    validator_type="rera",
+                    date_from=date(2024, 1, 1),
+                    date_to=date(2024, 1, 7),
+                    engine_identity=_IDENTITY,
+                    validator_params=baseline,
+                    owner_user_id=None,
+                )
+                is not None
+            )
+
+        # Bump a proxy tunable → current_params changes → the seeded run no
+        # longer matches, so a fresh run is required.
+        monkeypatch.setattr(RERAProxyConstants, "FL_CLASS_THRESHOLD", 99)
+        changed = vreg.get_spec("rera").current_params(None)
+        assert changed != baseline
+        async with session_scope() as db:
+            assert (
+                await vjobs.find_reusable_run(
+                    db,
+                    profile_id=1,
+                    validator_type="rera",
+                    date_from=date(2024, 1, 1),
+                    date_to=date(2024, 1, 7),
+                    engine_identity=_IDENTITY,
+                    validator_params=changed,
+                    owner_user_id=None,
+                )
+                is None
+            )
 
     _run(_check())
