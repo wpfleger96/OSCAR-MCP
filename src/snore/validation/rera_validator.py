@@ -138,12 +138,32 @@ def score_rera_definition(
 
 
 @dataclass(frozen=True)
-class _ProxyBreath:
+class ProxyBreath:
     """Minimal breath row exposing only the fields the FL-run proxy reads."""
 
     flow_class: int | None
     is_recovery_breath: bool | None
     peak_flow_lpm: float | None
+
+
+def build_proxy_breath_rows(
+    flow_class: Sequence[int | None],
+    is_recovery_breath: Sequence[bool | None],
+    peak_flow_lpm: Sequence[float | None],
+) -> list[ProxyBreath]:
+    """Wrap parallel breath arrays as ``ProxyBreath`` rows.
+
+    The arrays must be ordered by ``breath_number`` and equal length.  Extracted
+    so the offline sweep can build the rows once per session at load time and
+    drive ``iter_fl_run_recoveries`` directly over them, instead of rebuilding
+    them on every (combo × session) call to ``proxy_reras_from_breath_arrays``.
+    """
+    return [
+        ProxyBreath(flow_class=fc, is_recovery_breath=rec, peak_flow_lpm=pk)
+        for fc, rec, pk in zip(
+            flow_class, is_recovery_breath, peak_flow_lpm, strict=True
+        )
+    ]
 
 
 def proxy_reras_from_breath_arrays(
@@ -164,12 +184,7 @@ def proxy_reras_from_breath_arrays(
     must be ordered by ``breath_number`` and equal length.  Tunables default to
     ``RERAProxyConstants`` and are forwarded verbatim.
     """
-    rows = [
-        _ProxyBreath(flow_class=fc, is_recovery_breath=rec, peak_flow_lpm=pk)
-        for fc, rec, pk in zip(
-            flow_class, is_recovery_breath, peak_flow_lpm, strict=True
-        )
-    ]
+    rows = build_proxy_breath_rows(flow_class, is_recovery_breath, peak_flow_lpm)
     return [
         start_offset_s[run_start]
         for run_start, _run_last, _recovery in iter_fl_run_recoveries(

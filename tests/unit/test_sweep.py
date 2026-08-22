@@ -14,12 +14,17 @@ import numpy as np
 import pytest
 
 from snore.validation.fl_validator import auc_severity_vs_flg, score_fl_arrays
+from snore.validation.rera_validator import (
+    build_proxy_breath_rows,
+    proxy_reras_from_breath_arrays,
+)
 from snore.validation.sweep import (
     DEFAULT_GRIDS,
     NOT_SWEEPABLE_NOTICE,
     FlgSessionArrays,
     ProxySessionArrays,
     SweepData,
+    _proxy_starts,
     enumerate_grid,
     evaluate_grid,
     export_sweep_csv,
@@ -155,12 +160,61 @@ def _proxy_session(
         session_id=int(therapy_date.strftime("%Y%m%d")),
         therapy_date=therapy_date,
         duration_hours=duration_hours,
-        flow_class=flow_class,
-        is_recovery_breath=is_recovery,
-        peak_flow_lpm=peak,
+        proxy_rows=build_proxy_breath_rows(flow_class, is_recovery, peak),
         start_offset_s=start_offset,
         machine_starts=machine_starts if machine_starts is not None else [],
     )
+
+
+# ---------------------------------------------------------------------------
+# Proxy caching — the cached-row path must equal the production-parity seam
+# ---------------------------------------------------------------------------
+
+
+class TestProxyCachedRowEquivalence:
+    def test_cached_rows_match_seam_function(self):
+        # Two FL runs: the first ends in an explicit recovery breath, the second
+        # in an amplitude-margin recovery — exercising both recovery branches.
+        flow_class = [4, 5, 1, 2, 6, 6, 1, 3]
+        is_recovery = [False, False, True, False, False, False, False, False]
+        peak = [20.0, 22.0, 40.0, 10.0, 18.0, 19.0, 30.0, 5.0]
+        start_offset = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+        session = ProxySessionArrays(
+            session_id=1,
+            therapy_date=date(2024, 1, 1),
+            duration_hours=8.0,
+            proxy_rows=build_proxy_breath_rows(flow_class, is_recovery, peak),
+            start_offset_s=start_offset,
+            machine_starts=[],
+        )
+        for knobs in (
+            {
+                "fl_class_threshold": 4,
+                "min_fl_run_length": 2,
+                "recovery_amplitude_margin": 0.20,
+            },
+            {
+                "fl_class_threshold": 5,
+                "min_fl_run_length": 1,
+                "recovery_amplitude_margin": 0.30,
+            },
+            {
+                "fl_class_threshold": 4,
+                "min_fl_run_length": 1,
+                "recovery_amplitude_margin": 0.10,
+            },
+        ):
+            cached = _proxy_starts(session, knobs)
+            seam = proxy_reras_from_breath_arrays(
+                flow_class,
+                is_recovery,
+                peak,
+                start_offset,
+                fl_class_threshold=int(knobs["fl_class_threshold"]),
+                min_fl_run_length=int(knobs["min_fl_run_length"]),
+                recovery_amplitude_margin=float(knobs["recovery_amplitude_margin"]),
+            )
+            assert cached == seam
 
 
 # ---------------------------------------------------------------------------

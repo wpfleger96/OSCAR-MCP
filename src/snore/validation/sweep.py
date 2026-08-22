@@ -49,6 +49,7 @@ from snore.analysis.utils import convert_machine_reras
 from snore.constants import RERAProxyConstants
 from snore.database import models
 from snore.database.day_manager import DayManager
+from snore.services.breath.algorithms import iter_fl_run_recoveries
 from snore.services.breath_service import BreathService
 from snore.services.health_service import HealthService
 from snore.validation.alignment import average_waveform_over_breaths
@@ -59,7 +60,8 @@ from snore.validation.fl_validator import (
     auc_severity_vs_flg,
 )
 from snore.validation.rera_validator import (
-    proxy_reras_from_breath_arrays,
+    ProxyBreath,
+    build_proxy_breath_rows,
     score_rera_definition,
 )
 
@@ -131,14 +133,16 @@ class FlgSessionArrays:
 
 @dataclass(frozen=True)
 class ProxySessionArrays:
-    """Proxy breath arrays + reference data for one session (RE / Apple target)."""
+    """Cached proxy breath rows + reference data for one session (RE / Apple).
+
+    ``proxy_rows`` is built once at load time so the grid loop drives
+    ``iter_fl_run_recoveries`` directly, never rebuilding the per-breath rows.
+    """
 
     session_id: int
     therapy_date: date
     duration_hours: float
-    flow_class: list[int | None]
-    is_recovery_breath: list[bool | None]
-    peak_flow_lpm: list[float | None]
+    proxy_rows: list[ProxyBreath]
     start_offset_s: list[float]
     machine_starts: list[float]
 
@@ -274,15 +278,16 @@ def _score_flg_grid(
 
 
 def _proxy_starts(s: ProxySessionArrays, knobs: dict[str, float]) -> list[float]:
-    return proxy_reras_from_breath_arrays(
-        s.flow_class,
-        s.is_recovery_breath,
-        s.peak_flow_lpm,
-        s.start_offset_s,
-        fl_class_threshold=int(knobs["fl_class_threshold"]),
-        min_fl_run_length=int(knobs["min_fl_run_length"]),
-        recovery_amplitude_margin=float(knobs["recovery_amplitude_margin"]),
-    )
+    """Drive the proxy criterion over the cached rows (mirrors the seam exactly)."""
+    return [
+        s.start_offset_s[run_start]
+        for run_start, _run_last, _recovery in iter_fl_run_recoveries(
+            s.proxy_rows,
+            fl_class_threshold=int(knobs["fl_class_threshold"]),
+            min_fl_run_length=int(knobs["min_fl_run_length"]),
+            recovery_amplitude_margin=float(knobs["recovery_amplitude_margin"]),
+        )
+    ]
 
 
 def _chance_precision_floor(sessions: Sequence[ProxySessionArrays]) -> float | None:
@@ -591,9 +596,11 @@ async def _load_proxy_session(
         session_id=session.id,
         therapy_date=DayManager.get_day_for_session(session.start_time),
         duration_hours=(session.duration_seconds or 0) / 3600.0,
-        flow_class=[b.flow_class for b in breath_rows],
-        is_recovery_breath=[b.is_recovery_breath for b in breath_rows],
-        peak_flow_lpm=[b.peak_flow_lpm for b in breath_rows],
+        proxy_rows=build_proxy_breath_rows(
+            [b.flow_class for b in breath_rows],
+            [b.is_recovery_breath for b in breath_rows],
+            [b.peak_flow_lpm for b in breath_rows],
+        ),
         start_offset_s=[b.start_offset_s for b in breath_rows],
         machine_starts=machine_starts,
     )
