@@ -5,12 +5,10 @@ Parses .000 files containing session summary data and statistics.
 Format version 18 (current OSCAR version).
 """
 
-import struct
-
 from pathlib import Path
 from typing import Any
 
-from snore.constants import OSCAR_MAGIC_NUMBER
+from snore.parsers.oscar_header import parse_oscar_header
 from snore.parsers.qdatastream import QDataStreamReader
 from snore.parsers.types import SessionSummary
 
@@ -132,56 +130,14 @@ class OscarSummaryParser:
 
     def _parse_header(self, stream: Any) -> dict[str, Any]:
         """
-        Parse 32-byte header from summary file.
+        Parse 32-byte header from summary file (file type 0).
 
-        Header format:
-        - 4 bytes: magic number (0xC73216AB)
-        - 2 bytes: version (18)
-        - 2 bytes: file type (0 for summary)
-        - 4 bytes: machine ID
-        - 4 bytes: session ID
-        - 8 bytes: first timestamp (ms since epoch)
-        - 8 bytes: last timestamp (ms since epoch)
-
-        Returns:
-            Dictionary with header fields
-
-        Raises:
-            OscarSummaryParseError: If header is invalid
+        Delegates to the shared OSCAR header parser; see
+        ``parse_oscar_header`` for the field layout.
         """
-        header_data = stream.read(32)
-        if len(header_data) != 32:
-            raise OscarSummaryParseError("File too short to contain header")
-
-        (
-            magic,
-            version,
-            file_type,
-            machine_id,
-            session_id,
-            first_timestamp,
-            last_timestamp,
-        ) = struct.unpack("<IHH II qq", header_data)
-
-        if magic != OSCAR_MAGIC_NUMBER:
-            raise OscarSummaryParseError(
-                f"Invalid magic number: 0x{magic:08x} (expected 0x{OSCAR_MAGIC_NUMBER:08x})"
-            )
-
-        if file_type != 0:
-            raise OscarSummaryParseError(
-                f"Invalid file type: {file_type} (expected 0 for summary)"
-            )
-
-        return {
-            "magic": magic,
-            "version": version,
-            "file_type": file_type,
-            "machine_id": machine_id,
-            "session_id": session_id,
-            "first_timestamp": first_timestamp,
-            "last_timestamp": last_timestamp,
-        }
+        return parse_oscar_header(
+            stream, expected_file_type=0, error_cls=OscarSummaryParseError
+        )
 
 
 def parse_summary_file(file_path: Path) -> SessionSummary:
