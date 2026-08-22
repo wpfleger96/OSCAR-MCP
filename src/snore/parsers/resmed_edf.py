@@ -1295,10 +1295,12 @@ class ResmedEDFParser(DeviceParser):
         ``chain_id`` defaults to the lexicographically smallest segment id (which
         is the chronologically first segment) so existing callers remain compatible.
 
-        Delegates to ``_parse_night_session``.
+        Delegates to ``_parse_night_session`` and finalizes statistics so the
+        returned session honors the "complete ``UnifiedSession``" contract that
+        ``_parse_single_session_bundle`` provides on the normal parse path.
         """
         effective_chain_id = chain_id if chain_id is not None else min(segments)
-        return self._parse_night_session(
+        session = self._parse_night_session(
             night_date=night_date,
             chain_id=effective_chain_id,
             segments=segments,
@@ -1307,6 +1309,10 @@ class ResmedEDFParser(DeviceParser):
             str_settings_cache=str_settings_cache,
             str_summaries_cache=str_summaries_cache,
         )
+        if session is None:
+            return None
+        session.finalize_statistics()
+        return session
 
     def _parse_night_session(
         self,
