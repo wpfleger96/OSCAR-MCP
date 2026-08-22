@@ -170,6 +170,75 @@ def _params_breaths(request_params: dict[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# rera — RERA-proxy vs. device RERA validation (ReraValidator)
+# ---------------------------------------------------------------------------
+
+
+async def _run_rera(
+    db: AsyncSession,
+    profile_id: int,
+    date_from: str,
+    date_to: str,
+    params: dict[str, Any],
+) -> BaseModel:
+    from snore.validation import ReraValidator  # noqa: PLC0415
+
+    return await ReraValidator(db, profile_id).validate_date_range(
+        date_from=date_from, date_to=date_to
+    )
+
+
+def _params_rera(request_params: dict[str, Any] | None) -> dict[str, Any]:
+    from snore.analysis.modes.postprocess import (  # noqa: PLC0415
+        EVENT_MATCH_TOLERANCE_SECONDS,
+    )
+    from snore.analysis.shared.versioning import (  # noqa: PLC0415
+        RERA_PROXY_ALGO_VERSION,
+    )
+    from snore.constants import RERAProxyConstants  # noqa: PLC0415
+
+    # The query-time RERA-proxy tunables (breath_service.py) plus the event-match
+    # tolerance — none of these are fingerprinted by AlgorithmIdentity, so a
+    # change to any must force a fresh run.  RERA_PROXY_ALGO_VERSION is versioned
+    # separately from the analysis-time detector.
+    return {
+        "rera_proxy_algo_version": RERA_PROXY_ALGO_VERSION,
+        "fl_class_threshold": RERAProxyConstants.FL_CLASS_THRESHOLD,
+        "min_fl_run_length": RERAProxyConstants.MIN_FL_RUN_LENGTH,
+        "recovery_amplitude_margin": RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
+        "match_tolerance_seconds": EVENT_MATCH_TOLERANCE_SECONDS,
+    }
+
+
+# ---------------------------------------------------------------------------
+# apple — night-level cross-validation vs. Apple Health (AppleCrossValidator)
+# ---------------------------------------------------------------------------
+
+
+async def _run_apple(
+    db: AsyncSession,
+    profile_id: int,
+    date_from: str,
+    date_to: str,
+    params: dict[str, Any],
+) -> BaseModel:
+    from snore.validation import AppleCrossValidator  # noqa: PLC0415
+
+    return await AppleCrossValidator(db, profile_id).validate_date_range(
+        date_from=date_from, date_to=date_to
+    )
+
+
+def _params_apple(request_params: dict[str, Any] | None) -> dict[str, Any]:
+    from snore.validation.apple_cross_report import _MIN_PAIRS  # noqa: PLC0415
+
+    # Night-level correlation over already-computed nightly summaries; the only
+    # query-time knob is the minimum paired-night count below which the Spearman
+    # correlation is reported as insufficient rather than computed.
+    return {"min_pairs": _MIN_PAIRS}
+
+
 register(
     ValidatorSpec(
         validator_type="events",
@@ -192,5 +261,21 @@ register(
         mode=RunMode.JOB,
         run=_run_breaths,
         current_params=_params_breaths,
+    )
+)
+register(
+    ValidatorSpec(
+        validator_type="rera",
+        mode=RunMode.JOB,
+        run=_run_rera,
+        current_params=_params_rera,
+    )
+)
+register(
+    ValidatorSpec(
+        validator_type="apple",
+        mode=RunMode.SYNC,
+        run=_run_apple,
+        current_params=_params_apple,
     )
 )
