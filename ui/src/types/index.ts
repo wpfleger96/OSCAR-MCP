@@ -125,10 +125,42 @@ export type VacuumResult = Schemas['VacuumResult']
 export type ResetResult = Schemas['ResetResult']
 export type DeleteDataResult = Schemas['DeleteDataResult']
 
-// Validation
+// Validation — events (apnea/hypopnea)
 export type ValidationReport = Schemas['ValidationReport']
 export type AggregateMetrics = Schemas['AggregateMetrics']
 export type SessionValidation = Schemas['SessionValidation']
+
+// Validation — FL signal
+export type FlValidationReport = Schemas['FlValidationReport']
+export type FlAggregateMetrics = Schemas['FlAggregateMetrics']
+export type FlSessionValidation = Schemas['FlSessionValidation']
+
+// Validation — breath trends
+export type BreathTrendsValidationReport = Schemas['BreathTrendsValidationReport']
+export type BreathTrendsAggregateMetrics = Schemas['BreathTrendsAggregateMetrics']
+export type BreathTrendsSessionValidation = Schemas['BreathTrendsSessionValidation']
+export type ChannelComparison = Schemas['ChannelComparison']
+export type ChannelAggregateMetrics = Schemas['ChannelAggregateMetrics']
+
+// Validation — RERA proxy vs machine RE
+export type ReraValidationReport = Schemas['ReraValidationReport']
+export type ReraAggregateMetrics = Schemas['ReraAggregateMetrics']
+export type ReraSessionValidation = Schemas['ReraSessionValidation']
+
+// Validation — Apple Health cross-source correlation
+export type AppleCrossValidationReport = Schemas['AppleCrossValidationReport']
+export type AppleCrossAggregate = Schemas['AppleCrossAggregate']
+export type AppleCrossNightRecord = Schemas['AppleCrossNightRecord']
+export type PairCorrelation = Schemas['PairCorrelation']
+
+// Persisted validation runs
+export type ValidationRunStatus = Schemas['ValidationRunStatus']
+export type ValidationRunDetail = Schemas['ValidationRunDetail']
+export type ValidationRunsListResponse = Schemas['ValidationRunsListResponse']
+export type ValidationRunRequest = Schemas['ValidationRunRequest']
+// ValidatorType is a bare Literal on the backend, so openapi-typescript inlines
+// it rather than emitting a named schema — derive it from the request field.
+export type ValidatorType = ValidationRunRequest['validator_type']
 
 // Analysis jobs (background queue — not in OpenAPI spec)
 export type { AnalysisJobInfo } from '@/api/analysis'
