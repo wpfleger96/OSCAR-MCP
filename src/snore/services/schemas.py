@@ -236,6 +236,10 @@ class SessionStatistics(BaseModel):
     usage_hours: float | None = None
     ahi: float | None = None
     rei: float | None = None
+    ahi_device: float | None = None
+    oai_device: float | None = None
+    cai_device: float | None = None
+    hi_device: float | None = None
     oai: float | None = None
     cai: float | None = None
     hi: float | None = None

@@ -63,12 +63,14 @@ from snore.analysis.types import (
     AnalysisEvent,
     AnalysisResult,
     ComputedBreath,
+    _machine_ahi_rdi,
 )
 from snore.constants import BreathSegmentationConstants as BSC
 from snore.constants import FlowLimitationConstants as FLC
 from snore.constants import PatternDetectionConstants as PDC
 from snore.constants import PulseChangeConstants as PCC
 from snore.database import models
+from snore.therapy_hours import TherapyHoursBasis, therapy_hours
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ __all__ = [
 ]
 
 _RAMP_KEYS: frozenset[str] = frozenset({"ramp_enabled", "ramp_time", "smart_ramp"})
+
 
 # Optional waveform channels fetched by ``load_session_inputs_raw``:
 # (waveform_type, log level on absence, log message template).
@@ -585,7 +588,14 @@ class AnalysisService:
         session_id = inputs.session_id
         primary_mode = inputs.primary_mode
 
-        session_duration_hours = len(timestamps) / sample_rate / 3600
+        session_duration_hours = (
+            therapy_hours(
+                TherapyHoursBasis.WAVEFORM_COVERAGE,
+                sample_count=len(timestamps),
+                sample_rate=sample_rate,
+            )
+            or 0.0
+        )
         logger.info(
             f"Loaded {len(timestamps)} flow samples at {sample_rate}Hz "
             f"({session_duration_hours:.1f} hours)"
@@ -697,11 +707,17 @@ class AnalysisService:
                 logger.error(f"Failed to run mode '{mode_name}': {e}")
                 continue
 
+        machine_ahi, machine_rdi = _machine_ahi_rdi(
+            inputs.machine_events, session_duration_hours
+        )
+
         summary = AnalysisResult(
             session_id=session_id,
             session_duration_hours=session_duration_hours,
             total_breaths=len(breaths),
             machine_events=inputs.machine_events,
+            machine_ahi=machine_ahi,
+            machine_rdi=machine_rdi,
             mode_results=mode_results,
             flow_analysis=flow_analysis.model_dump(),
             csr_detection=csr_detection.model_dump() if csr_detection else None,
@@ -836,7 +852,7 @@ class AnalysisService:
         if not analysis:
             return None
 
-        return AnalysisResult.model_validate(analysis.programmatic_result_json)
+        return AnalysisResult.from_stored_json(analysis.programmatic_result_json)
 
     async def store_result(
         self, computation: AnalysisComputation, processing_time_ms: int

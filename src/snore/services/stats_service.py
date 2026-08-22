@@ -188,20 +188,27 @@ class StatsService(ProfileScopedService):
         ]
         ahi_trend_direction = calculate_ahi_trend_direction(weekly_ahi_values)
 
+        # Averages are usage-weighted by Day.total_therapy_hours; min/max stay
+        # over the raw per-day values.
+        day_means = usage_weighted_means(
+            day_records,
+            {
+                "pressure": "pressure_median",
+                "leak": "leak_median",
+                "spo2": "spo2_mean",
+            },
+            lambda d: d.total_therapy_hours,
+        )
+        avg_pressure = day_means["pressure"]
+        avg_leak = day_means["leak"]
+        avg_spo2 = day_means["spo2"]
+
         pressure_values = [
             d.pressure_median for d in day_records if d.pressure_median is not None
         ]
-        avg_pressure = (
-            sum(pressure_values) / len(pressure_values) if pressure_values else None
-        )
         min_pressure = min(pressure_values) if pressure_values else None
         max_pressure = max(pressure_values) if pressure_values else None
 
-        leak_values = [d.leak_median for d in day_records if d.leak_median is not None]
-        avg_leak = sum(leak_values) / len(leak_values) if leak_values else None
-
-        spo2_values = [d.spo2_mean for d in day_records if d.spo2_mean is not None]
-        avg_spo2 = sum(spo2_values) / len(spo2_values) if spo2_values else None
         spo2_mins = [d.spo2_min for d in day_records if d.spo2_min is not None]
         min_spo2 = min(spo2_mins) if spo2_mins else None
 

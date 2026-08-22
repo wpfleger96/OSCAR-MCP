@@ -13,6 +13,8 @@ from sqlalchemy.orm import joinedload
 from snore.database.models import Day, Statistics
 from snore.database.models import Session as SessionModel
 from snore.metrics import DAY_METRIC_STAT_COLUMNS, DayAgg
+from snore.therapy_hours import TherapyHoursBasis, therapy_hours
+from snore.utils.stats import weighted_mean
 
 
 class DayManager:
@@ -109,7 +111,12 @@ class DayManager:
         """
         if stats is not None and stats.usage_hours is not None:
             return stats.usage_hours
-        return (session.duration_seconds or 0) / 3600
+        return (
+            therapy_hours(
+                TherapyHoursBasis.SESSION_SPAN, span_seconds=session.duration_seconds
+            )
+            or 0.0
+        )
 
     @classmethod
     def _weighted_average(
@@ -121,19 +128,14 @@ class DayManager:
 
         stat_pairs must be pre-aligned: each tuple is the Statistics row and its
         owning SessionModel. Weights prefer usage_hours over session span; entries
-        with zero effective hours are excluded so they cannot distort the average.
+        with zero effective hours contribute nothing (weighted_mean drops zero
+        weight), so they cannot distort the average.
         """
-        values = [
+        return weighted_mean(
             (getattr(s, attr), cls._effective_session_hours(s, sess))
             for s, sess in stat_pairs
             if getattr(s, attr) is not None
-        ]
-        # Zero-weight entries (known-zero usage) cannot contribute to a rate average.
-        values = [(v, w) for v, w in values if w > 0]
-        if not values:
-            return None
-        total_weight = sum(w for _, w in values)
-        return float(sum(v * w for v, w in values) / total_weight)
+        )
 
     @classmethod
     async def aggregate_day_statistics(cls, day: Day, db_session: AsyncSession) -> None:

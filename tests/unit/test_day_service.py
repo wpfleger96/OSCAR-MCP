@@ -31,7 +31,7 @@ async def _create_day(
         oai=0.1,
         cai=0.2,
         hi=0.3,
-        pressure_mean=10.0,
+        pressure_median=10.0,
         leak_median=5.0,
         spo2_mean=96.5,
     )

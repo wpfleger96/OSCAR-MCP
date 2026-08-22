@@ -160,7 +160,7 @@ class WaveformService(ProfileScopedService):
 
         if analysis_row is None:
             return None
-        return _AnalysisResult.model_validate(analysis_row.programmatic_result_json)
+        return _AnalysisResult.from_stored_json(analysis_row.programmatic_result_json)
 
     async def compare_events(
         self,

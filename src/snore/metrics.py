@@ -1,6 +1,6 @@
 """Drift-guard registry for the session/day metric set.
 
-The 74-field metric vocabulary is declared in several places (unified parser
+The 78-field metric vocabulary is declared in several places (unified parser
 model, ORM ``Statistics``, services schema, export lists, day aggregation).
 This leaf module (stdlib-only) does not collapse those declarations into one:
 adding a session metric still requires parallel edits to the ORM ``Statistics``
@@ -56,6 +56,11 @@ SESSION_METRICS: tuple[MetricSpec, ...] = (
     _m("cai"),
     _m("hi"),
     _m("rei"),
+    # Device-reported (STR) indices, kept alongside the computed ones above
+    _m("ahi_device"),
+    _m("oai_device"),
+    _m("cai_device"),
+    _m("hi_device"),
     # Pressure
     _m("pressure_min"),
     _m("pressure_max"),

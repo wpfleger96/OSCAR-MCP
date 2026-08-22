@@ -464,3 +464,139 @@ class TestSpo2MaxGuard:
 
         assert stats.spo2_max == pytest.approx(97.0)  # guarded
         assert stats.spo2_median == pytest.approx(95.0)  # unaffected
+
+
+# ---------------------------------------------------------------------------
+# Device-reported indices: STR map retargeting verified end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceIndexMapRetargeting:
+    """Parsing a real STR file routes AHI/OAI/CAI/HI into the ``*_device`` keys.
+
+    This is the end-to-end guard the ``setattr``-based ``TestDeviceIndexColumns``
+    cannot provide: it exercises ``STR_SUMMARY_SIGNALS`` itself, so a regression
+    that retargets these four entries back to ``ahi``/``oai``/``cai``/``hi``
+    (the event-computed columns) makes it fail. The summaries dict must carry
+    the values under the ``*_device`` keys and never under the bare index keys,
+    because ``finalize_statistics`` owns the bare keys and STR must not feed them.
+    """
+
+    def test_ahi_maps_to_ahi_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"AHI": 15.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["ahi_device"] == pytest.approx(15.0, rel=1e-3)
+        assert "ahi" not in summaries[_DATE_0]
+
+    def test_oai_maps_to_oai_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"OAI": 8.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["oai_device"] == pytest.approx(8.0, rel=1e-3)
+        assert "oai" not in summaries[_DATE_0]
+
+    def test_cai_maps_to_cai_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"CAI": 4.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["cai_device"] == pytest.approx(4.0, rel=1e-3)
+        assert "cai" not in summaries[_DATE_0]
+
+    def test_hi_maps_to_hi_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"HI": 3.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["hi_device"] == pytest.approx(3.0, rel=1e-3)
+        assert "hi" not in summaries[_DATE_0]
+
+    def test_all_four_indices_land_in_device_columns_together(self, parser, tmp_path):
+        """A single STR file with all four indices routes every one to ``*_device``."""
+        edf = _make_str_edf(tmp_path, {"AHI": 15.0, "OAI": 8.0, "CAI": 4.0, "HI": 3.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        day = summaries[_DATE_0]
+        assert day["ahi_device"] == pytest.approx(15.0, rel=1e-3)
+        assert day["oai_device"] == pytest.approx(8.0, rel=1e-3)
+        assert day["cai_device"] == pytest.approx(4.0, rel=1e-3)
+        assert day["hi_device"] == pytest.approx(3.0, rel=1e-3)
+        # None of the event-computed keys are populated from STR.
+        assert not {"ahi", "oai", "cai", "hi"} & day.keys()
+
+
+# ---------------------------------------------------------------------------
+# Device-reported indices preserved alongside the computed ones
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceIndexColumns:
+    """STR AHI/OAI/CAI/HI land in ``*_device`` columns and survive finalize.
+
+    The parser applies STR summaries via ``setattr`` and then calls
+    ``finalize_statistics``, which recomputes ``ahi/oai/cai/hi`` from events.
+    Retargeting the four STR map entries to ``*_device`` keeps both values:
+    finalize must not clobber the device columns, and STR must not clobber the
+    computed indices.
+    """
+
+    def test_device_indices_and_computed_indices_coexist(self, parser):
+        """STR values populate ``*_device``; finalize computes the plain columns."""
+        from snore.parsers.unified import (
+            DeviceInfo,
+            RespiratoryEvent,
+            RespiratoryEventType,
+            UnifiedSession,
+        )
+
+        # A 2-hour session with 2 OA + 1 CA + 1 H → computed AHI = 4 / 2h = 2.0,
+        # OAI = 1.0, CAI = 0.5, HI = 0.5 — all distinct from the STR values below.
+        start = datetime(2025, 6, 1, 23, 0, 0)
+        end = start + timedelta(hours=2)
+        session = UnifiedSession(
+            device_info=DeviceInfo(
+                manufacturer="ResMed",
+                model="AirSense 11 AutoSet",
+                serial_number="TEST002",
+            ),
+            start_time=start,
+            end_time=end,
+        )
+        for minute, event_type in (
+            (10, RespiratoryEventType.OBSTRUCTIVE_APNEA),
+            (20, RespiratoryEventType.OBSTRUCTIVE_APNEA),
+            (30, RespiratoryEventType.CENTRAL_APNEA),
+            (40, RespiratoryEventType.HYPOPNEA),
+        ):
+            session.add_event(
+                RespiratoryEvent(
+                    event_type=event_type,
+                    start_time=start + timedelta(minutes=minute),
+                    duration_seconds=15.0,
+                )
+            )
+
+        # STR device-reported indices, applied via the same setattr path as
+        # _parse_session_group, before finalize recomputes from events.
+        str_summary = {
+            "ahi_device": 15.0,
+            "oai_device": 8.0,
+            "cai_device": 4.0,
+            "hi_device": 3.0,
+        }
+        stats = session.statistics
+        for stat_name, value in str_summary.items():
+            if hasattr(stats, stat_name):
+                setattr(stats, stat_name, value)
+
+        session.finalize_statistics()
+
+        # Device columns retain the STR values (finalize did not clobber them).
+        assert stats.ahi_device == pytest.approx(15.0)
+        assert stats.oai_device == pytest.approx(8.0)
+        assert stats.cai_device == pytest.approx(4.0)
+        assert stats.hi_device == pytest.approx(3.0)
+        # Plain columns hold the event-derived values (STR did not clobber them).
+        assert stats.ahi == pytest.approx(2.0)
+        assert stats.oai == pytest.approx(1.0)
+        assert stats.cai == pytest.approx(0.5)
+        assert stats.hi == pytest.approx(0.5)

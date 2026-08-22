@@ -284,11 +284,12 @@ class ResmedEDFParser(DeviceParser):
         ("SpO2.50",): "spo2_median",
         ("SpO2.95",): "spo2_95th",
         ("SpO2.Max",): "spo2_max",
-        # Apnea indices
-        ("AHI", "AHI"): "ahi",
-        ("OAI", "OAI"): "oai",
-        ("CAI", "CAI"): "cai",
-        ("HI", "HI"): "hi",
+        # Apnea indices — device-reported values kept in dedicated *_device
+        # columns; finalize_statistics recomputes ahi/oai/cai/hi from events.
+        ("AHI", "AHI"): "ahi_device",
+        ("OAI", "OAI"): "oai_device",
+        ("CAI", "CAI"): "cai_device",
+        ("HI", "HI"): "hi_device",
         ("AI",): "ai",
         ("UAI",): "uai",
         # APAP-only stats
