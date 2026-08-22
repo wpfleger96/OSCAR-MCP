@@ -2,7 +2,7 @@ import uuid
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +22,7 @@ from snore.api.schemas import (
     ValidatorType,
 )
 from snore.api.validation_registry import RunMode, engine_identity, get_spec
-from snore.services.breath.dtos import DeviceNotOwnedError
+from snore.services.breath.dtos import DeviceAmbiguityError, DeviceNotOwnedError
 from snore.validation import (
     AppleCrossValidationReport,
     AppleCrossValidator,
@@ -140,6 +140,7 @@ def _row_to_status(row: Any) -> ValidationRunStatus:
 async def create_validation_run(
     body: ValidationRunRequest,
     actor: RequireWritable,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> ValidationRunStatus:
     spec = get_spec(body.validator_type)
@@ -150,7 +151,12 @@ async def create_validation_run(
         )
 
     identity = engine_identity()
-    params = spec.current_params(body.params)
+    try:
+        params = spec.current_params(body.params)
+    except ValueError as exc:
+        # A malformed knob (e.g. a non-integer apple device_id) is a request
+        # error, not a server fault — reject it before anything is enqueued.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if not body.force:
         existing = await validation_jobs.find_reusable_run(
@@ -166,16 +172,39 @@ async def create_validation_run(
         if existing is not None:
             status = _row_to_status(existing)
             status.reused = True
+            response.status_code = 200  # already terminal — nothing was queued
             return status
 
-    if spec.mode == RunMode.SYNC:
-        report = await spec.run(
+        # Collapse a duplicate request onto an already QUEUED/RUNNING run rather
+        # than enqueueing a second identical job.
+        inflight = await validation_jobs.find_inflight_run(
             db,
-            actor.profile_id,
-            body.from_date.isoformat(),
-            body.to_date.isoformat(),
-            params,
+            profile_id=actor.profile_id,
+            validator_type=body.validator_type,
+            date_from=body.from_date,
+            date_to=body.to_date,
+            engine_identity=identity,
+            validator_params=params,
+            owner_user_id=actor.user_id,
         )
+        if inflight is not None:
+            return _row_to_status(inflight)
+
+    if spec.mode == RunMode.SYNC:
+        try:
+            report = await spec.run(
+                db,
+                actor.profile_id,
+                body.from_date.isoformat(),
+                body.to_date.isoformat(),
+                params,
+            )
+        except DeviceNotOwnedError as exc:
+            raise HTTPException(
+                status_code=404, detail="device_id not found for this profile"
+            ) from exc
+        except DeviceAmbiguityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         run = await validation_jobs.create_sync_run(
             db,
             profile_id=actor.profile_id,
@@ -187,6 +216,7 @@ async def create_validation_run(
             validator_params=params,
             report_json=report.model_dump(mode="json"),
         )
+        response.status_code = 200  # computed inline and already succeeded
         return _row_to_status(run)
 
     job_id = uuid.uuid4().hex
@@ -216,6 +246,7 @@ async def create_validation_run(
         raise HTTPException(
             status_code=429, detail="Validation queue is full; try again later"
         )
+    # Left at the router default 202: a job was queued and is not yet terminal.
     return ValidationRunStatus.model_validate(job.to_dict())
 
 
@@ -226,6 +257,8 @@ async def list_validation_runs(
     validator_type: Annotated[ValidatorType | None, Query()] = None,
     db: AsyncSession = Depends(get_db),
 ) -> ValidationRunsListResponse:
+    from sqlalchemy.orm import defer  # noqa: PLC0415
+
     from snore.api.jobs import merge_job_lists  # noqa: PLC0415
     from snore.database import models  # noqa: PLC0415
 
@@ -238,6 +271,8 @@ async def list_validation_runs(
         in_memory.append(ValidationRunStatus.model_validate(job.to_dict()))
 
     terminal_states = [s.value for s in validation_jobs.TERMINAL_STATES]
+    # The list schema carries no report; defer the (potentially large) report
+    # blob so a poll does not eagerly load up to a page of them only to discard.
     stmt = (
         select(models.ValidationRun)
         .where(
@@ -247,6 +282,7 @@ async def list_validation_runs(
             ),
             models.ValidationRun.state.in_(terminal_states),
         )
+        .options(defer(models.ValidationRun.report_json))
         .order_by(models.ValidationRun.created_at.desc())
     )
     if validator_type is not None:
@@ -286,6 +322,7 @@ async def get_validation_run(
 async def delete_validation_run(
     run_id: int,
     actor: RequireWritable,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> None:
     from sqlalchemy import delete as sa_delete  # noqa: PLC0415
@@ -297,7 +334,8 @@ async def delete_validation_run(
     row = owned_or_404(row, actor.user_id, not_found_detail="Validation run not found")
 
     # A still-running (or queued) run is cancelled rather than deleted so the
-    # worker's terminal write does not resurrect a half-deleted row.
+    # worker's terminal write does not resurrect a half-deleted row.  The row
+    # persists as ``cancelled`` — 202 Accepted, not 204 No Content.
     job_id = row.job_id
     job = validation_jobs.get_job(job_id) if job_id is not None else None
     if job_id is not None and job is not None and not job.is_terminal:
@@ -306,8 +344,14 @@ async def delete_validation_run(
             job_id,
             already_detail="Validation run is already finished",
         )
+        response.status_code = 202
         return
 
+    # Terminal (or job-less) run: delete the row and forget its in-memory twin,
+    # or the merged list would resurrect the just-deleted run from memory until
+    # the TTL reaper runs.
     await db.execute(
         sa_delete(models.ValidationRun).where(models.ValidationRun.id == run_id)
     )
+    if job_id is not None:
+        validation_jobs.forget(job_id)
