@@ -1104,6 +1104,8 @@ class ImportJobRecord(Base):
     analysis_queued: Mapped[bool | None] = mapped_column(Boolean)
     spool_dir_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    # None until the job reaches RUNNING; set once when it starts executing.
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     # None for non-terminal states; set when the job reaches terminal state.
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)

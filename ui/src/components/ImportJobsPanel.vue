@@ -42,8 +42,10 @@
                         >
                     </div>
                     <div class="job-timestamp">
-                        <span v-if="job.finished_at">{{ formatTimestamp(job.finished_at) }}</span>
-                        <span v-else>{{ formatTimestamp(job.created_at) }}</span>
+                        <span v-if="job.finished_at">{{
+                            formatRelativeTime(job.finished_at)
+                        }}</span>
+                        <span v-else>{{ formatRelativeTime(job.created_at) }}</span>
                     </div>
                     <div
                         v-if="job.stage === 'done' && job.import_result"
@@ -98,6 +100,7 @@ import { Loader2, Clock, X, AlertTriangle } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import type { PipelineJobStatus } from '@/types'
 import { ACTIVE_PIPELINE_STAGES } from '@/api/importJobs'
+import { formatRelativeTime } from '@/utils/formatting'
 
 defineProps<{ jobs: PipelineJobStatus[] }>()
 const emit = defineEmits<{ cancel: [job: PipelineJobStatus] }>()
@@ -159,23 +162,6 @@ function detailText(job: PipelineJobStatus): string | null {
 
 function detailClass(stage: string): string {
     return stage === 'failed' || stage === 'analysis_failed' ? 'job-error' : ''
-}
-
-function formatTimestamp(iso: string): string {
-    const d = new Date(iso)
-    if (isNaN(d.getTime())) return '—'
-    const diffMs = Date.now() - d.getTime()
-    const diffMin = Math.floor(diffMs / 60_000)
-    if (diffMin < 1) return 'just now'
-    if (diffMin < 60) return `${diffMin}m ago`
-    const diffH = Math.floor(diffMin / 60)
-    if (diffH < 24) return `${diffH}h ago`
-    return d.toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    })
 }
 </script>
 

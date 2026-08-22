@@ -313,7 +313,7 @@ class HealthImportResultSummary(BaseModel):
 class PipelineJobStatus(BaseModel):
     """Stitched view of one import job and its downstream analysis job.
 
-    created_at and finished_at are ISO 8601 UTC datetime strings.
+    created_at, started_at, and finished_at are ISO 8601 UTC datetime strings.
     """
 
     job_id: str
@@ -322,6 +322,7 @@ class PipelineJobStatus(BaseModel):
     stage: str
     file_count: int
     created_at: str
+    started_at: str | None
     finished_at: str | None
     progress_message: str | None
     sessions_imported: int | None

@@ -99,6 +99,7 @@ async def _upsert_job_record(job: ImportJob) -> None:
         "analysis_queued": job.analysis_queued,
         "spool_dir_path": spool_dir_path,
         "created_at": job.created_at_wall,
+        "started_at": job.started_at_wall,
         "finished_at": finished,
         "updated_at": now,
     }
@@ -113,6 +114,7 @@ async def _upsert_job_record(job: ImportJob) -> None:
             "error_message",
             "analysis_queued",
             "spool_dir_path",
+            "started_at",
             "finished_at",
             "updated_at",
         ],

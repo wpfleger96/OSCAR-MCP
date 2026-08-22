@@ -361,6 +361,23 @@ def test_to_dict_fields_and_no_profile_id():
     assert d["eta_seconds"] is None
 
 
+def test_to_dict_timestamps_are_wall_clock_epoch():
+    """created_at/started_at/finished_at must serialize as wall-clock epoch
+    seconds, not time.monotonic() — the UI multiplies by 1000 for ``new Date``,
+    so a monotonic value would render as a 1970-era date (see PR #290)."""
+    job = _enqueue_one()
+    job.try_start()
+    job.finish(succeeded=True)
+
+    d = job.to_dict()
+    now = time.time()
+    # A just-created/started/finished job's timestamps are within seconds of now;
+    # a monotonic value (seconds since boot) would be off by years.
+    assert abs(float(d["created_at"]) - now) < 60
+    assert abs(float(d["started_at"]) - now) < 60
+    assert abs(float(d["finished_at"]) - now) < 60
+
+
 # ---------------------------------------------------------------------------
 # 9. _get_analysis_workers reads config and falls back gracefully
 # ---------------------------------------------------------------------------

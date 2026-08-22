@@ -25,17 +25,25 @@
                     >
                 </div>
                 <div class="job-info">
-                    <span class="job-label">{{ jobLabel(job) }}</span>
-                    <span
-                        v-if="job.state === 'running' && job.progress_total > 0"
-                        class="job-progress"
-                    >
-                        {{ job.progress_completed }}/{{ job.progress_total }} sessions
-                    </span>
-                    <span v-else-if="job.state === 'queued'" class="job-progress">Queued</span>
-                    <span v-else-if="job.state === 'failed'" class="job-progress job-error">{{
-                        job.error_message
-                    }}</span>
+                    <div class="job-main-row">
+                        <span class="job-label">{{ jobLabel(job) }}</span>
+                        <span
+                            v-if="job.state === 'running' && job.progress_total > 0"
+                            class="job-progress"
+                        >
+                            {{ job.progress_completed }}/{{ job.progress_total }} sessions
+                        </span>
+                        <span v-else-if="job.state === 'queued'" class="job-progress">Queued</span>
+                        <span v-else-if="job.state === 'failed'" class="job-progress job-error">{{
+                            job.error_message
+                        }}</span>
+                    </div>
+                    <div v-if="job.finished_at || job.created_at" class="job-timestamp">
+                        <span v-if="job.finished_at">{{
+                            formatRelativeTime(job.finished_at)
+                        }}</span>
+                        <span v-else>{{ formatRelativeTime(job.created_at) }}</span>
+                    </div>
                 </div>
                 <Button
                     v-if="job.state === 'queued' || job.state === 'running'"
@@ -55,6 +63,7 @@
 import { Loader2, Clock, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import type { AnalysisJobInfo } from '@/api/analysis'
+import { formatRelativeTime } from '@/utils/formatting'
 
 defineProps<{ jobs: AnalysisJobInfo[] }>()
 const emit = defineEmits<{ cancel: [jobId: string] }>()
@@ -69,7 +78,7 @@ function jobLabel(job: AnalysisJobInfo): string {
 <style scoped>
 .job-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 0.75rem;
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--color-border);
@@ -80,8 +89,20 @@ function jobLabel(job: AnalysisJobInfo): string {
 .job-info {
     flex: 1;
     display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.job-main-row {
+    display: flex;
     align-items: center;
     gap: 0.75rem;
-    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.job-timestamp {
+    font-size: 0.75rem;
+    color: var(--color-muted-foreground);
 }
 </style>
