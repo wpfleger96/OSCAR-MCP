@@ -2728,6 +2728,16 @@ class ResmedEDFParser(DeviceParser):
                 return None
             return v - 1 if series11 else v
 
+        def _s10_or_bl(s10_key: str, bl_key: str) -> str:
+            """Return the S10 bare-signal key when present, else the S.BL.* key.
+
+            S10 bilevel prefers bare ``S.*`` timing/rise signals and falls back
+            to ``S.BL.*`` only when the bare signal is absent (OSCAR :2347-2392).
+            Returns the key so the caller applies ``values.get``/``_nn`` to it
+            exactly as it would to a single signal.
+            """
+            return s10_key if values.get(s10_key) is not None else bl_key
+
         def _apply_timing(
             ti_max_v: float | None,
             ti_min_v: float | None,
@@ -2979,41 +2989,13 @@ class ResmedEDFParser(DeviceParser):
                 # S10: prefer bare S.* timing signals (OSCAR :2347-2392);
                 # fall back to S.BL.* if bare key absent (defensive — real S10
                 # devices emit bare signals, but older/unknown firmware may not).
-                ti_max_v = (
-                    values.get("s10_ti_max")
-                    if values.get("s10_ti_max") is not None
-                    else values.get("bl_ti_max")
-                )
-                ti_min_v = (
-                    values.get("s10_ti_min")
-                    if values.get("s10_ti_min") is not None
-                    else values.get("bl_ti_min")
-                )
-                trigger_v = (
-                    _nn("s10_trigger")
-                    if values.get("s10_trigger") is not None
-                    else _nn("bl_trigger")
-                )
-                cycle_v = (
-                    _nn("s10_cycle")
-                    if values.get("s10_cycle") is not None
-                    else _nn("bl_cycle")
-                )
-                rise_enable_norm = (
-                    _nn("s10_rise_enable")
-                    if values.get("s10_rise_enable") is not None
-                    else _nn("bl_rise_enable")
-                )
-                rise_time_v = (
-                    values.get("s10_rise_time")
-                    if values.get("s10_rise_time") is not None
-                    else values.get("bl_rise_time")
-                )
-                easy_breathe_v = (
-                    _nn("s10_easy_breathe")
-                    if values.get("s10_easy_breathe") is not None
-                    else _nn("bl_easy_breathe")
-                )
+                ti_max_v = values.get(_s10_or_bl("s10_ti_max", "bl_ti_max"))
+                ti_min_v = values.get(_s10_or_bl("s10_ti_min", "bl_ti_min"))
+                trigger_v = _nn(_s10_or_bl("s10_trigger", "bl_trigger"))
+                cycle_v = _nn(_s10_or_bl("s10_cycle", "bl_cycle"))
+                rise_enable_norm = _nn(_s10_or_bl("s10_rise_enable", "bl_rise_enable"))
+                rise_time_v = values.get(_s10_or_bl("s10_rise_time", "bl_rise_time"))
+                easy_breathe_v = _nn(_s10_or_bl("s10_easy_breathe", "bl_easy_breathe"))
 
             if ipap is not None and epap is not None:
                 ps = round(ipap - epap, 2)
