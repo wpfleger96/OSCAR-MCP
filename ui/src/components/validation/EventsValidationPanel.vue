@@ -3,8 +3,8 @@
         validator-type="events"
         :params="{ mode }"
         :load-run-id="loadRunId"
+        :filename-base="fileStem()"
         @update:report="rawReport = $event"
-        @download-json="onDownloadJson"
         @download-csv="onDownloadCsv"
     >
         <template #controls>
@@ -152,14 +152,14 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { formatDateShort } from '@/utils/formatting'
-import { downloadJson, downloadCsv } from '@/utils/download'
+import { downloadCsv } from '@/utils/download'
 import type { ValidationReport, SessionValidation } from '@/types'
 
 defineProps<{ loadRunId?: number | null }>()
 
 const mode = ref<'aasm' | 'aasm_relaxed' | 'resmed'>('aasm')
 const rawReport = ref<Record<string, unknown> | null>(null)
-const report = computed(() => rawReport.value as unknown as ValidationReport | null)
+const report = computed(() => rawReport.value as ValidationReport | null)
 
 function ratioPct(value: number | null | undefined): number | null {
     return value != null ? value * 100 : null
@@ -176,10 +176,6 @@ function isLowSensitivity(session: SessionValidation): boolean {
 function fileStem(): string {
     const r = report.value
     return r ? `events-validation-${r.date_range_start}-${r.date_range_end}` : 'events-validation'
-}
-
-function onDownloadJson(): void {
-    if (report.value) downloadJson(report.value, `${fileStem()}.json`)
 }
 
 function onDownloadCsv(): void {

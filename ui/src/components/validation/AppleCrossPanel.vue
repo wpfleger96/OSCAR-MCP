@@ -4,8 +4,8 @@
         :load-run-id="loadRunId"
         experimental
         experimental-note="Apple Watch sleep signals are a genuinely independent second axis for SNORE's experimental FL/RERA indices. Correlations are noisy validity checks, not calibration."
+        :filename-base="fileStem()"
         @update:report="rawReport = $event"
-        @download-json="onDownloadJson"
         @download-csv="onDownloadCsv"
     >
         <template #default>
@@ -15,9 +15,9 @@
                         v-for="corr in CORRELATIONS"
                         :key="corr.key"
                         :label="corr.label"
-                        :value="report.aggregate[corr.key].rho"
+                        :value="report.aggregate[corr.key]?.rho"
                         :decimals="3"
-                        :reason="report.aggregate[corr.key].reason"
+                        :reason="report.aggregate[corr.key]?.reason"
                         :glossary-key="corr.glossaryKey"
                     />
                 </div>
@@ -118,7 +118,7 @@ import {
     TableRow,
 } from '@/components/ui/table'
 import { formatDateMonthDay, nullReasonLabel } from '@/utils/formatting'
-import { downloadJson, downloadCsv } from '@/utils/download'
+import { downloadCsv } from '@/utils/download'
 import type { AppleCrossValidationReport } from '@/types'
 
 defineProps<{ loadRunId?: number | null }>()
@@ -137,7 +137,7 @@ const CORRELATIONS: { key: CorrKey; label: string; glossaryKey: string }[] = [
 ]
 
 const rawReport = ref<Record<string, unknown> | null>(null)
-const report = computed(() => rawReport.value as unknown as AppleCrossValidationReport | null)
+const report = computed(() => rawReport.value as AppleCrossValidationReport | null)
 
 function num(v: number | null | undefined, decimals: number): string {
     return v != null ? v.toFixed(decimals) : '—'
@@ -146,10 +146,6 @@ function num(v: number | null | undefined, decimals: number): string {
 function fileStem(): string {
     const r = report.value
     return r ? `apple-cross-${r.date_range_start}-${r.date_range_end}` : 'apple-cross'
-}
-
-function onDownloadJson(): void {
-    if (report.value) downloadJson(report.value, `${fileStem()}.json`)
 }
 
 function onDownloadCsv(): void {

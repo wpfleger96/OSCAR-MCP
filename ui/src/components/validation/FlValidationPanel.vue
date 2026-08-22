@@ -4,8 +4,8 @@
         :load-run-id="loadRunId"
         experimental
         experimental-note="SNORE's flow-limitation classes are validated against the device's own FLG signal, which is itself a proprietary index — agreement is a consistency check, not a ground-truth comparison."
+        :filename-base="fileStem()"
         @update:report="rawReport = $event"
-        @download-json="onDownloadJson"
         @download-csv="onDownloadCsv"
     >
         <template #default>
@@ -95,18 +95,11 @@
                                 class="even:bg-muted/50"
                             >
                                 <TableCell>
-                                    <RouterLink
-                                        :to="`/sessions/${s.session_id}/analysis`"
-                                        class="text-primary hover:underline"
-                                    >
-                                        {{ formatDateShort(s.date) }}
-                                    </RouterLink>
-                                    <span
-                                        v-if="s.skipped_reason"
-                                        class="ml-1 text-xs text-muted-foreground"
-                                        :title="nullReasonLabel(s.skipped_reason) ?? undefined"
-                                        >(skipped)</span
-                                    >
+                                    <SessionDateCell
+                                        :session-id="s.session_id"
+                                        :date="s.date"
+                                        :skipped-reason="s.skipped_reason"
+                                    />
                                 </TableCell>
                                 <TableCell>{{ s.n_breaths_compared }}</TableCell>
                                 <TableCell>{{ num(s.spearman_flattening_r) }}</TableCell>
@@ -125,10 +118,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { RouterLink } from 'vue-router'
 import StatCard from '@/components/StatCard.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import ValidationPanelShell from '@/components/validation/ValidationPanelShell.vue'
+import SessionDateCell from '@/components/validation/SessionDateCell.vue'
 import {
     Table,
     TableBody,
@@ -137,14 +130,13 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { formatDateShort, nullReasonLabel } from '@/utils/formatting'
-import { downloadJson, downloadCsv } from '@/utils/download'
+import { downloadCsv } from '@/utils/download'
 import type { FlValidationReport } from '@/types'
 
 defineProps<{ loadRunId?: number | null }>()
 
 const rawReport = ref<Record<string, unknown> | null>(null)
-const report = computed(() => rawReport.value as unknown as FlValidationReport | null)
+const report = computed(() => rawReport.value as FlValidationReport | null)
 
 function num(v: number | null | undefined): string {
     return v != null ? v.toFixed(3) : '—'
@@ -153,10 +145,6 @@ function num(v: number | null | undefined): string {
 function fileStem(): string {
     const r = report.value
     return r ? `fl-validation-${r.date_range_start}-${r.date_range_end}` : 'fl-validation'
-}
-
-function onDownloadJson(): void {
-    if (report.value) downloadJson(report.value, `${fileStem()}.json`)
 }
 
 function onDownloadCsv(): void {

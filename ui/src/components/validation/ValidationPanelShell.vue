@@ -56,22 +56,24 @@
             {{ error }}
         </div>
 
-        <ValidationJobsBanner v-if="typeRuns.length > 0" :runs="typeRuns" @cancel="handleCancel" />
+        <ValidationJobsBanner
+            v-if="activeTypeRuns.length > 0"
+            :runs="activeTypeRuns"
+            @cancel="handleCancel"
+        />
 
         <div v-if="reportLoading" class="py-8 text-center">
             <Loader2 class="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
         </div>
 
-        <slot v-else-if="report" :report="report" :run="loadedRun" />
+        <slot v-else-if="report" />
 
         <p v-else class="py-8 text-center text-sm text-muted-foreground">
             Run a validation or pick a past run from History to see results here.
         </p>
 
         <div v-if="report" class="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" @click="emit('download-json')">
-                Download JSON
-            </Button>
+            <Button variant="outline" size="sm" @click="downloadReportJson"> Download JSON </Button>
             <Button variant="outline" size="sm" @click="emit('download-csv')">
                 Download CSV
             </Button>
@@ -88,7 +90,8 @@ import { Loader2, AlertTriangle, FlaskConical, RotateCcw } from '@lucide/vue'
 import { useAuth } from '@/composables/useAuth'
 import { useAvailableDates } from '@/composables/useAvailableDates'
 import { useValidationRuns } from '@/composables/useValidationRuns'
-import type { ValidatorType, ValidationRunStatus } from '@/types'
+import { downloadJson } from '@/utils/download'
+import type { ValidatorType } from '@/types'
 
 const props = defineProps<{
     validatorType: ValidatorType
@@ -97,11 +100,12 @@ const props = defineProps<{
     loadRunId?: number | null
     experimental?: boolean
     experimentalNote?: string
+    // Base filename (no extension) for the JSON download this shell owns.
+    filenameBase: string
 }>()
 
 const emit = defineEmits<{
     'update:report': [value: Record<string, unknown> | null]
-    'download-json': []
     'download-csv': []
 }>()
 
@@ -116,7 +120,6 @@ const error = ref<string | null>(null)
 const reusedNotice = ref(false)
 
 const report = ref<Record<string, unknown> | null>(null)
-const loadedRun = ref<ValidationRunStatus | null>(null)
 const loadedRunId = ref<number | null>(null)
 const trackedRunId = ref<number | null>(null)
 const reportLoading = ref(false)
@@ -126,8 +129,10 @@ const reportLoading = ref(false)
 // so the parent's v-if never lags a tick behind the shell showing the slot.
 watch(report, (value) => emit('update:report', value), { flush: 'sync' })
 
-// Active + recently-finished runs for this validator type, newest first.
-const typeRuns = computed(() => store.runsForType(props.validatorType))
+// Only in-flight runs for this validator type: the banner tracks live progress,
+// while terminal runs live in the History table (feeding the full list here would
+// duplicate History and grow unbounded).
+const activeTypeRuns = computed(() => store.runsForType(props.validatorType).filter(store.isActive))
 
 async function loadReport(runId: number): Promise<void> {
     reportLoading.value = true
@@ -135,7 +140,6 @@ async function loadReport(runId: number): Promise<void> {
     try {
         const detail = await store.getDetail(runId)
         report.value = detail.report_json ?? null
-        loadedRun.value = detail
         loadedRunId.value = runId
     } catch (err) {
         error.value = err instanceof Error ? err.message : 'Failed to load run report'
@@ -167,7 +171,6 @@ async function handleRun(force = false): Promise<void> {
         } else {
             // Background job: clear stale results; the poll watcher loads it on success.
             report.value = null
-            loadedRun.value = null
             loadedRunId.value = null
         }
     } catch (err) {
@@ -187,6 +190,12 @@ async function handleCancel(runId: number): Promise<void> {
     }
 }
 
+// The JSON export is identical across validators, so the shell owns it; panels only
+// declare the filename base and keep their per-validator CSV shaping.
+function downloadReportJson(): void {
+    if (report.value) downloadJson(report.value, `${props.filenameBase}.json`)
+}
+
 // When a tracked background run reaches a terminal state, load or surface it.
 watch(
     () => store.runs.value,
@@ -194,7 +203,7 @@ watch(
         if (trackedRunId.value == null) return
         const run = runs.find((r) => r.run_id === trackedRunId.value)
         if (!run) return
-        if (run.state === 'succeeded' && loadedRunId.value !== run.run_id) {
+        if (run.state === 'succeeded' && loadedRunId.value !== run.run_id && !reportLoading.value) {
             void loadReport(run.run_id)
         } else if (run.state === 'failed') {
             error.value = run.error_message ?? 'Validation run failed'

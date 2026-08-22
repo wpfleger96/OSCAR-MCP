@@ -4,8 +4,8 @@
         :load-run-id="loadRunId"
         experimental
         experimental-note="SNORE's RERA proxy is an experimental trend instrument, not a validated event count. It is scored against the device's machine-flagged RE events, which the device reports extremely conservatively."
+        :filename-base="fileStem()"
         @update:report="rawReport = $event"
-        @download-json="onDownloadJson"
         @download-csv="onDownloadCsv"
     >
         <template #default>
@@ -31,38 +31,33 @@
                 <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
                     <StatCard
                         label="Proxy Sensitivity"
-                        :value="ratioPct(report.aggregate.mean_proxy_sensitivity)"
-                        unit="%"
-                        :decimals="1"
+                        :value="report.aggregate.mean_proxy_sensitivity"
+                        :display="formatPercent(report.aggregate.mean_proxy_sensitivity)"
                         glossary-key="sensitivity"
                     />
                     <StatCard
                         label="Proxy Precision"
-                        :value="ratioPct(report.aggregate.mean_proxy_precision)"
-                        unit="%"
-                        :decimals="2"
+                        :value="report.aggregate.mean_proxy_precision"
+                        :display="formatPercent(report.aggregate.mean_proxy_precision, 2)"
                         glossary-key="precision"
                     />
                     <StatCard
                         label="Chance Precision Floor"
-                        :value="ratioPct(report.aggregate.chance_precision_floor)"
-                        unit="%"
-                        :decimals="2"
+                        :value="report.aggregate.chance_precision_floor"
+                        :display="formatPercent(report.aggregate.chance_precision_floor, 2)"
                         glossary-key="chance_floor"
                         :reason="floorReason"
                     />
                     <StatCard
                         label="Amplitude Sensitivity"
-                        :value="ratioPct(report.aggregate.mean_amplitude_sensitivity)"
-                        unit="%"
-                        :decimals="1"
+                        :value="report.aggregate.mean_amplitude_sensitivity"
+                        :display="formatPercent(report.aggregate.mean_amplitude_sensitivity)"
                         glossary-key="sensitivity"
                     />
                     <StatCard
                         label="Amplitude Precision"
-                        :value="ratioPct(report.aggregate.mean_amplitude_precision)"
-                        unit="%"
-                        :decimals="2"
+                        :value="report.aggregate.mean_amplitude_precision"
+                        :display="formatPercent(report.aggregate.mean_amplitude_precision, 2)"
                         glossary-key="precision"
                     />
                     <StatCard
@@ -143,24 +138,22 @@
                                 "
                             >
                                 <TableCell>
-                                    <RouterLink
-                                        :to="`/sessions/${s.session_id}/analysis`"
-                                        class="text-primary hover:underline"
-                                    >
-                                        {{ formatDateShort(s.date) }}
-                                    </RouterLink>
-                                    <span
-                                        v-if="s.skipped_reason"
-                                        class="ml-1 text-xs"
-                                        :title="nullReasonLabel(s.skipped_reason) ?? undefined"
-                                        >({{ s.skipped_reason }})</span
-                                    >
+                                    <SessionDateCell
+                                        :session-id="s.session_id"
+                                        :date="s.date"
+                                        :skipped-reason="s.skipped_reason"
+                                        show-reason
+                                    />
                                 </TableCell>
                                 <TableCell>{{ s.machine_re_count }}</TableCell>
                                 <TableCell>{{ s.amplitude_rera_count }}</TableCell>
                                 <TableCell>{{ s.proxy_rera_count }}</TableCell>
-                                <TableCell>{{ pct(s.proxy_sensitivity) }}</TableCell>
-                                <TableCell>{{ pct(s.proxy_precision) }}</TableCell>
+                                <TableCell>{{
+                                    formatPercent(s.proxy_sensitivity) ?? '—'
+                                }}</TableCell>
+                                <TableCell>{{
+                                    formatPercent(s.proxy_precision, 2) ?? '—'
+                                }}</TableCell>
                             </TableRow>
                         </TableBody>
                     </Table>
@@ -172,10 +165,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { RouterLink } from 'vue-router'
 import StatCard from '@/components/StatCard.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import ValidationPanelShell from '@/components/validation/ValidationPanelShell.vue'
+import SessionDateCell from '@/components/validation/SessionDateCell.vue'
 import {
     Table,
     TableBody,
@@ -184,22 +177,14 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { formatDateShort, nullReasonLabel } from '@/utils/formatting'
-import { downloadJson, downloadCsv } from '@/utils/download'
+import { formatPercent } from '@/utils/formatting'
+import { downloadCsv } from '@/utils/download'
 import type { ReraValidationReport } from '@/types'
 
 defineProps<{ loadRunId?: number | null }>()
 
 const rawReport = ref<Record<string, unknown> | null>(null)
-const report = computed(() => rawReport.value as unknown as ReraValidationReport | null)
-
-function ratioPct(value: number | null | undefined): number | null {
-    return value != null ? value * 100 : null
-}
-
-function pct(value: number | null | undefined): string {
-    return value != null ? `${(value * 100).toFixed(1)}%` : '—'
-}
+const report = computed(() => rawReport.value as ReraValidationReport | null)
 
 const atFloor = computed<boolean>(() => {
     const agg = report.value?.aggregate
@@ -226,10 +211,6 @@ const floorVerdict = computed<string>(() => {
 function fileStem(): string {
     const r = report.value
     return r ? `rera-validation-${r.date_range_start}-${r.date_range_end}` : 'rera-validation'
-}
-
-function onDownloadJson(): void {
-    if (report.value) downloadJson(report.value, `${fileStem()}.json`)
 }
 
 function onDownloadCsv(): void {

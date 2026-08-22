@@ -2,8 +2,8 @@
     <ValidationPanelShell
         validator-type="breaths"
         :load-run-id="loadRunId"
+        :filename-base="fileStem()"
         @update:report="rawReport = $event"
-        @download-json="onDownloadJson"
         @download-csv="onDownloadCsv"
     >
         <template #default>
@@ -55,18 +55,11 @@
                                 class="even:bg-muted/50"
                             >
                                 <TableCell>
-                                    <RouterLink
-                                        :to="`/sessions/${s.session_id}/analysis`"
-                                        class="text-primary hover:underline"
-                                    >
-                                        {{ formatDateShort(s.date) }}
-                                    </RouterLink>
-                                    <span
-                                        v-if="s.skipped_reason"
-                                        class="ml-1 text-xs text-muted-foreground"
-                                        :title="nullReasonLabel(s.skipped_reason) ?? undefined"
-                                        >(skipped)</span
-                                    >
+                                    <SessionDateCell
+                                        :session-id="s.session_id"
+                                        :date="s.date"
+                                        :skipped-reason="s.skipped_reason"
+                                    />
                                 </TableCell>
                                 <TableCell>{{ s.n_breaths }}</TableCell>
                                 <TableCell v-for="ch in CHANNELS" :key="ch.key">
@@ -83,10 +76,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { RouterLink } from 'vue-router'
 import StatCard from '@/components/StatCard.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import ValidationPanelShell from '@/components/validation/ValidationPanelShell.vue'
+import SessionDateCell from '@/components/validation/SessionDateCell.vue'
 import {
     Table,
     TableBody,
@@ -95,8 +88,7 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table'
-import { formatDateShort, nullReasonLabel } from '@/utils/formatting'
-import { downloadJson, downloadCsv } from '@/utils/download'
+import { downloadCsv } from '@/utils/download'
 import type { BreathTrendsValidationReport, BreathTrendsSessionValidation } from '@/types'
 
 defineProps<{ loadRunId?: number | null }>()
@@ -110,7 +102,7 @@ const CHANNELS: { key: ChannelKey; label: string }[] = [
 ]
 
 const rawReport = ref<Record<string, unknown> | null>(null)
-const report = computed(() => rawReport.value as unknown as BreathTrendsValidationReport | null)
+const report = computed(() => rawReport.value as BreathTrendsValidationReport | null)
 
 function channelSpearman(s: BreathTrendsSessionValidation, key: ChannelKey): string {
     const ch = s.channels?.[key]
@@ -121,10 +113,6 @@ function channelSpearman(s: BreathTrendsSessionValidation, key: ChannelKey): str
 function fileStem(): string {
     const r = report.value
     return r ? `breaths-validation-${r.date_range_start}-${r.date_range_end}` : 'breaths-validation'
-}
-
-function onDownloadJson(): void {
-    if (report.value) downloadJson(report.value, `${fileStem()}.json`)
 }
 
 function onDownloadCsv(): void {
