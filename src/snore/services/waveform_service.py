@@ -7,13 +7,8 @@ from typing import Any
 import numpy as np
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.analysis.data.waveform_loader import (
-    WaveformLoader,
-    deserialize_waveform_blob,
-    fetch_waveform_blob,
-)
+from snore.analysis.data.waveform_loader import deserialize_waveform_blob
 from snore.database import models
 from snore.exceptions import NotFoundError
 from snore.services._base import ProfileScopedService, require_owned_session
@@ -24,7 +19,7 @@ from snore.services.schemas import (
     WaveformInfo,
 )
 
-__all__ = ["WaveformService"]
+__all__ = ["WaveformService", "clear_waveform_array_cache"]
 
 # Byte cap for the deserialized-array cache below.  A full night of 25 Hz flow
 # is ~5.8 MB (float32 timestamps + values); 64 MB holds ~11 such channels.
@@ -87,17 +82,22 @@ class _WaveformArrayCache:
 _waveform_array_cache = _WaveformArrayCache()
 
 
-def _reset_waveform_array_cache() -> None:
-    """Clear the module-level array cache. Test hook; not part of the public API."""
+def clear_waveform_array_cache() -> None:
+    """Drop every entry in the module-level deserialized-array cache.
+
+    The cache is keyed by ``Waveform.id``, but that row id is a bare SQLite
+    rowid alias (no ``sqlite_autoincrement``), so SQLite *reuses* an id after the
+    max row is deleted or the table is emptied.  A reused id would otherwise
+    serve the deleted row's arrays — even to a different profile, since the
+    per-request ownership check validates session→profile, not cache-entry→row.
+    Id-keying alone therefore cannot detect a delete→re-import; every code path
+    that deletes waveform rows MUST call this so a reused id starts cold.
+    """
     _waveform_array_cache.clear()
 
 
 class WaveformService(ProfileScopedService):
     """Service for waveform listing and loading operations."""
-
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        super().__init__(db_session, profile_id)
-        self._loader = WaveformLoader(db_session)
 
     async def _assert_session_owned(self, session_id: int) -> None:
         """Raise NotFoundError if session_id doesn't belong to this profile."""
@@ -147,14 +147,14 @@ class WaveformService(ProfileScopedService):
 
     async def _fetch_waveform_metadata(
         self, session_id: int, waveform_type: str
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Light query for a Waveform row's scalar metadata, WITHOUT the blob.
 
         Selects only scalar columns so warm-cache requests never page the ~MB
-        ``data_blob``.  The returned dict mirrors :func:`fetch_waveform_blob`'s
-        ``metadata_scalars`` key-for-key, keeping :meth:`get_waveform_data`'s
-        return contract identical whether arrays come from the cache or a fresh
-        deserialize.
+        ``data_blob``.  The returned dict mirrors ``fetch_waveform_blob``'s
+        ``metadata_scalars`` key-for-key (including ``waveform_id`` and
+        ``sample_count``), keeping :meth:`get_waveform_data`'s return contract
+        identical whether arrays come from the cache or a fresh deserialize.
 
         Raises:
             ValueError: If the waveform row is not found.
@@ -202,7 +202,7 @@ class WaveformService(ProfileScopedService):
             "mean_value": mean_value,
             "sample_count": sample_count,
         }
-        return sample_count or 0, metadata
+        return metadata
 
     async def get_waveform_data(
         self,
@@ -219,8 +219,9 @@ class WaveformService(ProfileScopedService):
 
         1. **I/O phase**: ``_assert_session_owned`` (ownership check, always
            first — the cache never bypasses it) then a light metadata-only query.
-           On a cache miss this phase also issues ``fetch_waveform_blob`` for the
-           raw bytes.  The injected session is used only here.
+           On a cache miss this phase also reads the ``data_blob`` by row id (the
+           metadata query already resolved it).  The injected session is used
+           only here.
         2. **Compute phase** (``deserialize_waveform_blob``): converts raw bytes to
            numpy arrays.  No DB session access occurs here.
 
@@ -228,9 +229,9 @@ class WaveformService(ProfileScopedService):
         :class:`_WaveformArrayCache`), so a warm request skips both the ~MB blob
         fetch and the deserialize.  Metadata always comes from the fresh light
         query, so unit/sample_rate/etc. stay current.  Cached arrays are marked
-        read-only; the windowing mask below produces an independent copy, and the
+        read-only; the windowing slice below is a read-only view of them, and the
         no-window/no-downsample path returns the read-only arrays directly (the
-        router only reads them via ``.tolist()``).
+        router only reads them via ``.tolist()``; LTTB allocates its own output).
 
         Args:
             session_id: Database session ID
@@ -250,7 +251,7 @@ class WaveformService(ProfileScopedService):
         # profile that does not own its session.
         await self._assert_session_owned(session_id)
         try:
-            _, metadata = await self._fetch_waveform_metadata(session_id, waveform_type)
+            metadata = await self._fetch_waveform_metadata(session_id, waveform_type)
         except ValueError as e:
             raise NotFoundError(str(e)) from e
 
@@ -260,16 +261,25 @@ class WaveformService(ProfileScopedService):
         waveform_id = metadata["waveform_id"]
         cached = _waveform_array_cache.get(waveform_id)
         if cached is None:
-            # The row can vanish between the metadata query and this fetch
-            # (concurrent delete); surface that as the same 404 as a miss above.
-            try:
-                data_blob, blob_sample_count, _ = await fetch_waveform_blob(
-                    self.db_session, session_id, waveform_type
+            # Fetch only the blob, keyed by the id the metadata query already
+            # resolved — no second scalar-column round trip.  The row can vanish
+            # between the two queries (concurrent delete); surface that as the
+            # same 404 as a metadata miss above.
+            blob_row = (
+                await self.db_session.execute(
+                    select(models.Waveform.data_blob).where(
+                        models.Waveform.id == waveform_id
+                    )
                 )
-            except ValueError as e:
-                raise NotFoundError(str(e)) from e
-            timestamps, values = deserialize_waveform_blob(data_blob, blob_sample_count)
-            # Freeze so a caller (or the windowing mask, which copies anyway)
+            ).first()
+            if blob_row is None:
+                raise NotFoundError(
+                    f"Waveform not found: session_id={session_id}, type={waveform_type}"
+                )
+            timestamps, values = deserialize_waveform_blob(
+                blob_row[0], metadata["sample_count"] or 0
+            )
+            # Freeze so a caller (or a windowing view, which shares this buffer)
             # can never mutate the shared cached arrays.
             timestamps.flags.writeable = False
             values.flags.writeable = False
@@ -278,13 +288,23 @@ class WaveformService(ProfileScopedService):
             timestamps, values = cached
 
         if start_seconds is not None or end_seconds is not None:
-            mask = np.ones(len(timestamps), dtype=bool)
-            if start_seconds is not None:
-                mask &= timestamps >= start_seconds
-            if end_seconds is not None:
-                mask &= timestamps <= end_seconds
-            timestamps = timestamps[mask]
-            values = values[mask]
+            # Timestamps are ascending, so bound the window with binary search
+            # instead of a full-length boolean mask.  ``left``/``right`` reproduce
+            # the old inclusive mask exactly: lo is the first ts >= start, hi is
+            # one past the last ts <= end.  Both bounds one-sided or absent (0 /
+            # len) and empty results (lo >= hi) fall out naturally.
+            lo = (
+                int(np.searchsorted(timestamps, start_seconds, side="left"))
+                if start_seconds is not None
+                else 0
+            )
+            hi = (
+                int(np.searchsorted(timestamps, end_seconds, side="right"))
+                if end_seconds is not None
+                else len(timestamps)
+            )
+            timestamps = timestamps[lo:hi]
+            values = values[lo:hi]
 
         if max_points and len(timestamps) > max_points:
             timestamps, values = lttb_downsample(timestamps, values, max_points)

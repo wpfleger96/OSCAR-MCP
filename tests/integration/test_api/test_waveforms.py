@@ -108,6 +108,73 @@ class TestGetWaveform:
         )
         assert response.status_code == 200
 
+    def test_get_waveform_negative_start_rejected(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        _seed_waveform(db_session, session.id)
+        response = api_client.get(
+            f"/api/v1/sessions/{session.id}/waveforms/flow",
+            params={"start_seconds": -1.0},
+        )
+        assert response.status_code == 422
+
+    def test_get_waveform_negative_end_rejected(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        _seed_waveform(db_session, session.id)
+        response = api_client.get(
+            f"/api/v1/sessions/{session.id}/waveforms/flow",
+            params={"end_seconds": -0.5},
+        )
+        assert response.status_code == 422
+
+    def test_get_waveform_nan_start_rejected(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        _seed_waveform(db_session, session.id)
+        response = api_client.get(
+            f"/api/v1/sessions/{session.id}/waveforms/flow",
+            params={"start_seconds": "nan"},
+        )
+        assert response.status_code == 422
+
+    def test_get_waveform_inf_end_rejected(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        _seed_waveform(db_session, session.id)
+        response = api_client.get(
+            f"/api/v1/sessions/{session.id}/waveforms/flow",
+            params={"end_seconds": "inf"},
+        )
+        assert response.status_code == 422
+
+    def test_get_waveform_valid_window_accepted(
+        self, api_client, db_session, test_device, test_session_factory
+    ):
+        session = test_session_factory(
+            test_device.id, start_time=datetime(2024, 1, 1, 22, 0)
+        )
+        _seed_waveform(db_session, session.id)
+        response = api_client.get(
+            f"/api/v1/sessions/{session.id}/waveforms/flow",
+            params={"start_seconds": 5.0, "end_seconds": 20.0},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["returned_samples"] > 0
+
 
 class TestWaveformCompare:
     def test_compare_no_analysis_returns_404(

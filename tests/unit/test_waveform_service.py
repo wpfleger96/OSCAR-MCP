@@ -7,11 +7,13 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from snore.database.models import Device, Session, Waveform
+from snore.database.models import Device, Profile, Session, User, Waveform
 from snore.exceptions import NotFoundError
 from snore.services import waveform_service as waveform_service_module
+from snore.services.session_service import SessionService
 from snore.services.waveform_service import WaveformService
 
 
@@ -706,25 +708,28 @@ class TestWaveformArrayCache:
     async def test_warm_request_skips_blob_fetch(
         self, async_db_session, async_test_device, monkeypatch
     ):
-        """Second request for the same row does not re-read the blob."""
+        """Second request for the same row does not re-read/deserialize the blob."""
         session = await _seed_session(async_db_session, async_test_device, "skip")
         await _seed_waveform(async_db_session, session.id)
         service = WaveformService(async_db_session, profile_id=1)
 
+        # Deserialization happens only on a cold miss (the warm hit reuses the
+        # cached arrays and never reads the blob), so its call count is a proxy
+        # for whether the blob was fetched.
         calls = 0
-        real_fetch = waveform_service_module.fetch_waveform_blob
+        real_deser = waveform_service_module.deserialize_waveform_blob
 
-        async def counting_fetch(*args, **kwargs):
+        def counting_deser(*args, **kwargs):
             nonlocal calls
             calls += 1
-            return await real_fetch(*args, **kwargs)
+            return real_deser(*args, **kwargs)
 
         monkeypatch.setattr(
-            waveform_service_module, "fetch_waveform_blob", counting_fetch
+            waveform_service_module, "deserialize_waveform_blob", counting_deser
         )
 
         await service.get_waveform_data(session.id, "flow")
-        assert calls == 1  # cold miss reads the blob once
+        assert calls == 1  # cold miss reads and deserializes the blob once
         await service.get_waveform_data(session.id, "flow")
         assert calls == 1  # warm hit does not touch the blob
 
@@ -769,15 +774,15 @@ class TestWaveformArrayCache:
         service = WaveformService(async_db_session, profile_id=1)
 
         calls = 0
-        real_fetch = waveform_service_module.fetch_waveform_blob
+        real_deser = waveform_service_module.deserialize_waveform_blob
 
-        async def counting_fetch(*args, **kwargs):
+        def counting_deser(*args, **kwargs):
             nonlocal calls
             calls += 1
-            return await real_fetch(*args, **kwargs)
+            return real_deser(*args, **kwargs)
 
         monkeypatch.setattr(
-            waveform_service_module, "fetch_waveform_blob", counting_fetch
+            waveform_service_module, "deserialize_waveform_blob", counting_deser
         )
 
         await service.get_waveform_data(session_a.id, "flow")  # cache A
@@ -799,3 +804,58 @@ class TestWaveformArrayCache:
         intruder = WaveformService(async_db_session, profile_id=999)
         with pytest.raises(NotFoundError):
             await intruder.get_waveform_data(session.id, "flow")
+
+    async def test_reused_rowid_after_delete_served_fresh(self, async_db_session):
+        """delete_sessions clears the cache so a reused rowid serves the NEW row.
+
+        Complements ``test_replaced_row_served_fresh`` (which keeps a decoy max
+        row so no id is reused): here the cached waveform holds the max rowid and
+        is removed via the real deletion path, so SQLite reuses its id for the
+        next insert — the case id-keying alone cannot distinguish.
+        """
+        # Enable FK enforcement as the FIRST statement, before any transaction
+        # begins (SQLite ignores this pragma mid-transaction), so the Core DELETE
+        # in delete_sessions cascades to the session's waveforms and frees the
+        # rowid.  Seed the profile/device manually for the same reason — the
+        # shared fixtures would open the transaction first.
+        await async_db_session.execute(text("PRAGMA foreign_keys=ON"))
+
+        user = User(canonical_email="reuse@example.com", role="admin")
+        async_db_session.add(user)
+        await async_db_session.flush()
+        profile = Profile(user_id=user.id, name="Reuse")
+        async_db_session.add(profile)
+        await async_db_session.flush()
+        device = Device(
+            profile_id=profile.id,
+            manufacturer="M",
+            model="X",
+            serial_number="SN_REUSE",
+        )
+        async_db_session.add(device)
+        await async_db_session.flush()
+
+        session = await _seed_session(async_db_session, device, "reuse")
+        old_wf = await _seed_waveform(async_db_session, session.id)
+        old_id = old_wf.id
+
+        service = WaveformService(async_db_session, profile_id=profile.id)
+        _, cold_vals, _ = await service.get_waveform_data(session.id, "flow")
+        assert not np.allclose(cold_vals, 42.0)  # warm the cache with sin data
+
+        deleted = await SessionService(
+            async_db_session, profile_id=profile.id
+        ).delete_sessions([session.id])
+        assert deleted == 1
+        # The Core DELETE leaves the now-deleted row in the ORM identity map;
+        # drop it so the reused-id insert below does not collide with it.
+        async_db_session.expunge(old_wf)
+
+        new_session = await _seed_session(async_db_session, device, "reuse2")
+        new_wf = await _seed_waveform(
+            async_db_session, new_session.id, blob=_constant_blob(1000, 42.0)
+        )
+        assert new_wf.id == old_id  # SQLite reused the freed max rowid
+
+        _, fresh_vals, _ = await service.get_waveform_data(new_session.id, "flow")
+        np.testing.assert_allclose(fresh_vals, 42.0)

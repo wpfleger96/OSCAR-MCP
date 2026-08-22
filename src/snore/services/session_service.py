@@ -25,6 +25,7 @@ from snore.services.schemas import (
     SessionSetting,
     SessionStatistics,
 )
+from snore.services.waveform_service import clear_waveform_array_cache
 from snore.utils.db_chunk import iter_id_chunks
 
 __all__ = ["SessionService"]
@@ -398,6 +399,11 @@ class SessionService(ProfileScopedService):
                 )
             )
             deleted += cursor.rowcount or 0
+
+        # Deleting sessions cascades to their waveform rows, freeing SQLite
+        # rowids that a later import can reuse.  Drop the id-keyed array cache so
+        # a reused id never serves a deleted row's arrays.
+        clear_waveform_array_cache()
 
         for chunk in iter_id_chunks(list(day_ids)):
             days = (

@@ -59,7 +59,7 @@ def _reset_waveform_array_cache():
     row that happens to reuse that id — an isolation artifact that never occurs
     in production (one process serves one database).
     """
-    from snore.services.waveform_service import _reset_waveform_array_cache as _reset
+    from snore.services.waveform_service import clear_waveform_array_cache as _reset
 
     _reset()
     yield
