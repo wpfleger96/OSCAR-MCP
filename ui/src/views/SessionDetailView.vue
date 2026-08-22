@@ -152,6 +152,8 @@
                 :events="events"
                 :initial-types="[selectedType]"
                 :start-epoch="startEpoch"
+                :cache-registry="cacheRegistry"
+                :duration-sec="fullDuration"
                 @zoom="handleZoom"
             />
         </div>
@@ -1005,7 +1007,9 @@ import { getSession } from '@/api/sessions'
 import { getSessionEvents } from '@/api/events'
 import { getDay } from '@/api/days'
 import { getHealthNight } from '@/api/health'
-import { useWaveformData } from '@/composables/useWaveformData'
+import { useWaveformWindow } from '@/composables/useWaveformWindow'
+import { createWaveformCacheRegistry } from '@/utils/waveformCache'
+import { MIN_ZOOM_WINDOW_SEC } from '@/constants/waveform'
 import {
     useAvailableDates,
     strToCalendarDate,
@@ -1136,13 +1140,28 @@ const {
 } = useAvailableDates()
 
 const sessionIdRef = toRef(props, 'sessionId')
+
+// Declared above the composable call: useWaveformWindow captures fullDuration, and
+// const bindings would be in the temporal dead zone if defined further down.
+const startEpoch = computed(() => {
+    if (!session.value) return 0
+    const ms = new Date(session.value.start_time).getTime()
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
+})
+
+const fullDuration = computed(() => (session.value ? session.value.duration_hours * 3600 : 0))
+
+// One registry per mounted view; shared by the single-mode composable and every multi-mode
+// chart, persists across type switches and mode toggles, cleared only on session change.
+const cacheRegistry = createWaveformCacheRegistry()
+
 const {
     data: waveformData,
     loading: waveformLoading,
     error: waveformError,
-    loadData,
+    loadWindow,
     reset: resetWaveformData,
-} = useWaveformData(sessionIdRef, selectedType)
+} = useWaveformWindow(sessionIdRef, selectedType, cacheRegistry, fullDuration)
 
 const singleChartRef = ref<InstanceType<typeof WaveformChart>>()
 const multiViewRef = ref<InstanceType<typeof MultiWaveformView>>()
@@ -1166,10 +1185,10 @@ if (jumpToTime != null) {
     })
 }
 
-async function handleZoom(startSec: number, endSec: number): Promise<void> {
+function handleZoom(startSec: number, endSec: number): void {
     currentZoomRange.value = { start: startSec, end: endSec }
     if (!multiMode.value) {
-        await loadData(startSec, endSec)
+        loadWindow(startSec, endSec)
     }
 }
 
@@ -1178,7 +1197,7 @@ function handleResetZoom(): void {
     if (multiMode.value) {
         multiViewRef.value?.resetZoom()
     } else {
-        void loadData()
+        loadWindow()
         singleChartRef.value?.resetZoom()
     }
 }
@@ -1201,7 +1220,7 @@ function applyZoom(startSec: number, endSec: number): void {
     if (multiMode.value) {
         multiViewRef.value?.zoomTo(startSec, endSec)
     } else {
-        void loadData(startSec, endSec)
+        loadWindow(startSec, endSec)
     }
 }
 
@@ -1210,10 +1229,10 @@ function handleZoomIn(): void {
     const duration = fullDuration.value
     const range = currentZoomRange.value ?? { start: 0, end: duration }
     const currentWindow = range.end - range.start
-    if (currentWindow <= MIN_ZOOM_WINDOW) return
+    if (currentWindow <= MIN_ZOOM_WINDOW_SEC) return
 
     const center = (range.start + range.end) / 2
-    const newHalf = Math.max(MIN_ZOOM_WINDOW / 2, currentWindow / 4)
+    const newHalf = Math.max(MIN_ZOOM_WINDOW_SEC / 2, currentWindow / 4)
     const { start, end } = clampZoomRange(center, newHalf, duration)
     applyZoom(start, end)
 }
@@ -1240,22 +1259,12 @@ function handleAddChart(): void {
     if (next) multiViewRef.value.addChart(next)
 }
 
-const startEpoch = computed(() => {
-    if (!session.value) return 0
-    const ms = new Date(session.value.start_time).getTime()
-    return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
-})
-
-const fullDuration = computed(() => (session.value ? session.value.duration_hours * 3600 : 0))
-
-const MIN_ZOOM_WINDOW = 10
-
 const canZoomIn = computed(() => {
-    if (!session.value) return false
+    if (!session.value || fullDuration.value <= MIN_ZOOM_WINDOW_SEC) return false
     const currentWindow = currentZoomRange.value
         ? currentZoomRange.value.end - currentZoomRange.value.start
         : fullDuration.value
-    return currentWindow > MIN_ZOOM_WINDOW
+    return currentWindow > MIN_ZOOM_WINDOW_SEC
 })
 
 const canZoomOut = computed(() => currentZoomRange.value !== null)
@@ -1301,7 +1310,7 @@ async function navigateToDate(date: string): Promise<void> {
 watch(selectedType, (newType) => {
     if (!multiMode.value && newType) {
         resetWaveformData()
-        void loadData()
+        loadWindow()
     }
 })
 
@@ -1309,7 +1318,7 @@ watch(selectedType, (newType) => {
 // multi-mode zooms update currentZoomRange but never refetch the single chart
 watch(multiMode, (multi) => {
     if (!multi) {
-        void loadData(currentZoomRange.value?.start, currentZoomRange.value?.end)
+        loadWindow(currentZoomRange.value?.start, currentZoomRange.value?.end)
     }
 })
 
@@ -1360,6 +1369,7 @@ watch(
         healthError.value = null
         healthNight.value = null
         resetWaveformData()
+        cacheRegistry.clear()
         void loadDates()
 
         try {
@@ -1370,7 +1380,7 @@ watch(
             selectedType.value = s.waveform_types.includes('flow')
                 ? 'flow'
                 : (s.waveform_types[0] ?? '')
-            // watcher triggers loadData() for the selected type
+            // watcher triggers loadWindow() for the selected type
 
             if (s.has_event_data) {
                 try {

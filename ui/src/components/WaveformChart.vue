@@ -16,6 +16,7 @@ import { EVENT_COLORS, EVENT_SOLID_COLORS } from '@/types'
 import type { EventItem } from '@/types'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { formatWallClockTime } from '@/utils/formatting'
+import { MIN_ZOOM_WINDOW_SEC, ZOOM_FETCH_DEBOUNCE_MS } from '@/constants/waveform'
 
 const { isDark } = useDarkMode()
 
@@ -44,6 +45,36 @@ const containerRef = ref<HTMLDivElement>()
 let chart: uPlot | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let isInitialRender = true
+
+// Enforce the 5 s max-zoom floor for every zoom path (drag, wheel, programmatic
+// setScaleX). uPlot invokes the x scale's range fn on each setScale before
+// committing, so flooring here is the single choke point: the setScale hook then
+// reads already-clamped min/max and emits once, with no re-entrant setScale.
+// All values are wall-clock epoch seconds, matching the x scale.
+function clampSpan(min: number, max: number): [number, number] {
+    const ts = props.timestamps
+    if (!ts.length || min == null || max == null) return [min, max]
+    const dataMin = ts[0] + props.startEpoch
+    const dataMax = ts[ts.length - 1] + props.startEpoch
+    // A session shorter than the floor can only ever show its full span.
+    const floor = Math.min(MIN_ZOOM_WINDOW_SEC, dataMax - dataMin)
+    if (max - min >= floor) return [min, max]
+    // Expand around the window center to `floor` wide, then shift the window so it
+    // stays within [dataMin, dataMax]. Since floor <= dataSpan the window fits, so
+    // the two shifts never conflict.
+    const center = (min + max) / 2
+    let lo = center - floor / 2
+    let hi = center + floor / 2
+    if (lo < dataMin) {
+        hi += dataMin - lo
+        lo = dataMin
+    }
+    if (hi > dataMax) {
+        lo -= hi - dataMax
+        hi = dataMax
+    }
+    return [lo, hi]
+}
 
 function buildEventPlugin(): uPlot.Plugin {
     return {
@@ -167,7 +198,7 @@ function createChart(): void {
             drag: { x: true, y: false, setScale: true },
         },
         scales: {
-            x: { time: true },
+            x: { time: true, range: (_u: uPlot, min: number, max: number) => clampSpan(min, max) },
             // Pin y-axis for channels that have a known fixed range so a quiet
             // night doesn't auto-scale to a misleadingly wide or narrow extent.
             y:
@@ -227,7 +258,7 @@ function createChart(): void {
                     if (debounceTimer) clearTimeout(debounceTimer)
                     debounceTimer = setTimeout(() => {
                         emit('zoom', min - props.startEpoch, max - props.startEpoch)
-                    }, 300)
+                    }, ZOOM_FETCH_DEBOUNCE_MS)
                 },
             ],
         },

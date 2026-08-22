@@ -72,7 +72,9 @@ vi.mock('@lucide/vue', () => ({
 }))
 
 import { getWaveformData } from '@/api/waveforms'
+import { Select } from '@/components/ui/select'
 import MultiWaveformView from '@/components/MultiWaveformView.vue'
+import { createWaveformCacheRegistry } from '@/utils/waveformCache'
 import type { WaveformDataResponse } from '@/types'
 
 const mockGetWaveformData = vi.mocked(getWaveformData)
@@ -90,11 +92,17 @@ function makeResponse(overrides: Partial<WaveformDataResponse> = {}): WaveformDa
     }
 }
 
-const DEFAULT_PROPS = {
-    sessionId: 42,
-    availableTypes: ['flow', 'pressure'],
-    initialTypes: ['flow'],
-    startEpoch: 0,
+// A fresh registry per mount keeps cache state from leaking between tests.
+function makeProps(overrides: Record<string, unknown> = {}) {
+    return {
+        sessionId: 42,
+        availableTypes: ['flow', 'pressure'],
+        initialTypes: ['flow'],
+        startEpoch: 0,
+        cacheRegistry: createWaveformCacheRegistry(),
+        durationSec: 3600,
+        ...overrides,
+    }
 }
 
 beforeEach(() => {
@@ -111,7 +119,7 @@ describe('MultiWaveformView', () => {
         mockGetWaveformData.mockReturnValue(deferred)
 
         // Act
-        const wrapper = mount(MultiWaveformView, { props: DEFAULT_PROPS })
+        const wrapper = mount(MultiWaveformView, { props: makeProps() })
         await Promise.resolve() // allow onMounted to run
 
         // Assert
@@ -128,7 +136,7 @@ describe('MultiWaveformView', () => {
         mockGetWaveformData.mockResolvedValue(makeResponse())
 
         // Act
-        const wrapper = mount(MultiWaveformView, { props: DEFAULT_PROPS })
+        const wrapper = mount(MultiWaveformView, { props: makeProps() })
         await flushPromises()
 
         // Assert
@@ -137,10 +145,11 @@ describe('MultiWaveformView', () => {
     })
 
     it('test_zoomTo_keeps_chart_mounted_with_refetching_true_then_false_after_resolve', async () => {
-        // Arrange: initial load resolves immediately
-        mockGetWaveformData.mockResolvedValueOnce(makeResponse())
+        // Arrange: initial full-night load is inexact (returned == max_points), so a zoom into a
+        // sparse sub-window misses the cache and triggers a refetch.
+        mockGetWaveformData.mockResolvedValueOnce(makeResponse({ returned_samples: 2000 }))
 
-        const wrapper = mount(MultiWaveformView, { props: DEFAULT_PROPS })
+        const wrapper = mount(MultiWaveformView, { props: makeProps() })
         await flushPromises()
 
         // Sanity: chart rendered
@@ -171,12 +180,12 @@ describe('MultiWaveformView', () => {
     })
 
     it('test_zoom_refetch_reject_keeps_chart_mounted_and_shows_banner', async () => {
-        // Arrange: initial load resolves, zoom refetch rejects
+        // Arrange: inexact initial load (so the zoom misses cache), zoom refetch rejects
         mockGetWaveformData
-            .mockResolvedValueOnce(makeResponse())
+            .mockResolvedValueOnce(makeResponse({ returned_samples: 2000 }))
             .mockRejectedValueOnce(new Error('timeout'))
 
-        const wrapper = mount(MultiWaveformView, { props: DEFAULT_PROPS })
+        const wrapper = mount(MultiWaveformView, { props: makeProps() })
         await flushPromises()
 
         // Act: trigger zoom via zoomTo
@@ -195,11 +204,74 @@ describe('MultiWaveformView', () => {
         mockGetWaveformData.mockRejectedValue(new Error('server error'))
 
         // Act
-        const wrapper = mount(MultiWaveformView, { props: DEFAULT_PROPS })
+        const wrapper = mount(MultiWaveformView, { props: makeProps() })
         await flushPromises()
 
         // Assert: error block shown, chart absent
         expect(wrapper.find('.waveform-chart-stub').exists()).toBe(false)
         expect(wrapper.text()).toContain('server error')
+    })
+
+    it('test_rezoom_into_cached_region_issues_no_fetches', async () => {
+        // Arrange: exact full-night overview (returned < max_points) for both charts.
+        mockGetWaveformData.mockResolvedValue(makeResponse())
+        const wrapper = mount(MultiWaveformView, {
+            props: makeProps({ initialTypes: ['flow', 'pressure'] }),
+        })
+        await flushPromises()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2) // one full-night fetch per chart
+        mockGetWaveformData.mockClear()
+
+        // Act: zoom into a sub-window fully covered by each exact overview.
+        const vm = wrapper.vm as unknown as { zoomTo: (s: number, e: number) => void }
+        vm.zoomTo(0.5, 1.5)
+        await flushPromises()
+
+        // Assert: served entirely from cache — no network across any chart.
+        expect(mockGetWaveformData).not.toHaveBeenCalled()
+    })
+
+    it('test_first_zoom_into_new_region_fetches_once_per_chart', async () => {
+        // Arrange: inexact overview (returned == max_points) so a fresh region misses the cache.
+        mockGetWaveformData.mockResolvedValue(makeResponse({ returned_samples: 2000 }))
+        const wrapper = mount(MultiWaveformView, {
+            props: makeProps({ initialTypes: ['flow', 'pressure'] }),
+        })
+        await flushPromises()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
+        mockGetWaveformData.mockClear()
+
+        // Act
+        const vm = wrapper.vm as unknown as { zoomTo: (s: number, e: number) => void }
+        vm.zoomTo(10, 20)
+        await flushPromises()
+
+        // Assert: exactly one refetch per chart.
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
+    })
+
+    it('test_type_switch_and_back_reuses_cached_full_night', async () => {
+        // Arrange: exact overview cached for flow.
+        mockGetWaveformData.mockResolvedValue(makeResponse())
+        const wrapper = mount(MultiWaveformView, {
+            props: makeProps({ initialTypes: ['flow'], availableTypes: ['flow', 'pressure'] }),
+        })
+        await flushPromises()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(1) // flow full night
+
+        const select = wrapper.findComponent(Select)
+
+        // Act 1: switch to pressure — a new type, so it fetches once.
+        select.vm.$emit('update:modelValue', 'pressure')
+        await flushPromises()
+        expect(mockGetWaveformData).toHaveBeenCalledTimes(2)
+        mockGetWaveformData.mockClear()
+
+        // Act 2: switch back to flow — its cache persisted, so no fetch.
+        select.vm.$emit('update:modelValue', 'flow')
+        await flushPromises()
+
+        // Assert
+        expect(mockGetWaveformData).not.toHaveBeenCalled()
     })
 })

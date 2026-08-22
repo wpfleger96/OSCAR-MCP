@@ -91,7 +91,8 @@ import WaveformChart from './WaveformChart.vue'
 import InfoHint from '@/components/InfoHint.vue'
 import { getWaveformData } from '@/api/waveforms'
 import { WAVEFORM_LABELS, WAVEFORM_GLOSSARY_MAP } from '@/types'
-import type { WaveformDataResponse, EventItem, WaveformType } from '@/types'
+import type { EventItem, WaveformType } from '@/types'
+import type { WaveformCacheRegistry, WaveformSlice } from '@/utils/waveformCache'
 
 const props = defineProps<{
     sessionId: number
@@ -99,6 +100,8 @@ const props = defineProps<{
     events?: EventItem[]
     initialTypes?: string[]
     startEpoch: number
+    cacheRegistry: WaveformCacheRegistry
+    durationSec: number
 }>()
 
 const emit = defineEmits<{
@@ -108,7 +111,7 @@ const emit = defineEmits<{
 interface ChartState {
     id: number
     type: string
-    data: WaveformDataResponse | null
+    data: WaveformSlice | null
     loading: boolean
     error: string | null
 }
@@ -128,22 +131,43 @@ function setChartRef(idx: number, el: unknown): void {
 }
 
 async function loadChart(chart: ChartState, startSec?: number, endSec?: number): Promise<void> {
+    // A newer request (even a cache hit) supersedes any in-flight fetch for this chart.
     chartAborts.get(chart.id)?.abort()
+    const start = startSec ?? 0
+    const end = endSec ?? props.durationSec
+    const cache = props.cacheRegistry.getCache(chart.type)
+
+    const resolved = cache.resolve(start, end, props.durationSec)
+    if (resolved.slice) chart.data = resolved.slice
+    chart.error = null
+    if (resolved.hit || !resolved.fetchWindow) {
+        chart.loading = false
+        chartAborts.delete(chart.id)
+        return
+    }
+
     const thisController = new AbortController()
     chartAborts.set(chart.id, thisController)
+    const fetchWindow = resolved.fetchWindow
 
     chart.loading = true
-    chart.error = null
     try {
-        const params: Record<string, number> = { max_points: 2000 }
-        if (startSec !== undefined) params.start_seconds = startSec
-        if (endSec !== undefined) params.end_seconds = endSec
-        chart.data = await getWaveformData(
+        const params: Record<string, number> = { max_points: fetchWindow.maxPoints }
+        // Full-night fetch omits bounds so it never clips when duration rounds below the last sample.
+        if (!(fetchWindow.startSec <= 0 && fetchWindow.endSec >= props.durationSec)) {
+            params.start_seconds = fetchWindow.startSec
+            params.end_seconds = fetchWindow.endSec
+        }
+        const response = await getWaveformData(
             props.sessionId,
             chart.type,
             params,
             thisController.signal,
         )
+        cache.store(fetchWindow, response, props.durationSec)
+        if (chartAborts.get(chart.id) === thisController) {
+            chart.data = cache.resolve(start, end, props.durationSec).slice
+        }
     } catch (err: unknown) {
         if (err instanceof Error && err.name !== 'CanceledError') {
             chart.error = err.message
