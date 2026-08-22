@@ -232,6 +232,38 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
         short: 'Harmonic mean of sensitivity and precision; balances missed events against over-detection.',
     },
 
+    // ── Validation: signal-correlation & experimental-metric axes ─────────────
+    spearman_r: {
+        label: 'Spearman r',
+        short: 'Rank correlation between a SNORE per-breath metric and the device signal it is validated against, from -1 to +1.',
+        long: 'Spearman r measures monotonic agreement of rankings rather than absolute values, so it is robust to the smoothing and unit differences between SNORE and device channels. Values near +1 mean the two rank nights or breaths the same way.',
+    },
+    auc: {
+        label: 'AUC',
+        short: 'Area under the ROC curve: how well a SNORE score separates device-flagged flow-limited breaths from the rest (0.5 = chance, 1.0 = perfect).',
+        long: 'AUC25 and AUC50 are the same measure taken at two device FLG operating points — discriminating breaths at device FLG ≥ 0.25 and ≥ 0.50 respectively. Higher thresholds isolate more severely flow-limited breaths.',
+    },
+    chance_floor: {
+        label: 'Chance Precision Floor',
+        short: 'The precision a random detector firing at the same density would reach by chance alone.',
+        long: 'Computed as the pooled machine-RE rate per second × (2 × match tolerance). Measured precision at or below this floor is indistinguishable from chance given how often the proxy fires — it is context, not a signal of failure.',
+    },
+    rera_proxy: {
+        label: 'RERA Proxy',
+        short: "SNORE's experimental FL-run RERA proxy: runs of ≥2 consecutive flow-limited breaths ending in a recovery breath.",
+        long: 'Fires far more often than the device flags machine RE (which ResMed does very conservatively), so near-zero precision against machine RE is expected. Useful as an internally-consistent trend instrument, not a validated absolute count.',
+    },
+    apple_breathing_disturbances: {
+        label: 'Apple Breathing Disturbances',
+        short: "Apple Watch's sleeping breathing-disturbance metric — a genuinely independent second axis for the SNORE indices.",
+        long: 'Derived from wrist sensors during sleep, independent of the ResMed device. A positive rank correlation with the SNORE RERA/FL indices is weak external evidence they track real respiratory disturbance.',
+    },
+    cross_night_spearman: {
+        label: 'Cross-night Spearman',
+        short: "Rank correlation of SNORE's nightly 95th-percentile FL against the device's nightly 95th-percentile FLG, across nights.",
+        long: 'A night-level agreement check: even when per-breath alignment is noisy, nights the device ranks as more flow-limited should rank higher for SNORE too.',
+    },
+
     // ── New device-channel labels ──────────────────────────────────────────
     fl_device: {
         label: 'Flow Limitation (device)',
