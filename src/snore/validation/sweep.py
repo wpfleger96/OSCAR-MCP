@@ -46,8 +46,7 @@ from snore.analysis.data.waveform_loader import deserialize_waveform_blob
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
 from snore.analysis.shared.versioning import AnalysisStatus
 from snore.analysis.utils import convert_machine_reras
-from snore.constants import FLOW_LIMITATION_CLASSES, RERAProxyConstants
-from snore.constants import FlowLimitationConstants as FLC
+from snore.constants import RERAProxyConstants
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.services.breath_service import BreathService
@@ -57,7 +56,7 @@ from snore.validation.apple_cross_report import correlate_night_pairs
 from snore.validation.fl_validator import (
     FLG_AUC_HIGH_THRESHOLD_DEFAULT,
     FLG_AUC_LOW_THRESHOLD_DEFAULT,
-    score_fl_arrays,
+    auc_severity_vs_flg,
 )
 from snore.validation.rera_validator import (
     proxy_reras_from_breath_arrays,
@@ -118,15 +117,16 @@ DEFAULT_GRIDS: dict[str, dict[str, list[float]]] = {
 
 @dataclass(frozen=True)
 class FlgSessionArrays:
-    """Aligned per-breath FL arrays for one session (FLG target)."""
+    """Aligned per-breath FL arrays for one session (FLG target).
+
+    The FLG grid only needs the breath-aligned severity/FLG pair; the
+    full-night FLG sample array is not retained (it fed ``device_flg_95th``,
+    which the sweep discards).
+    """
 
     session_id: int
-    mid_insp_flattening: np.ndarray
-    flatness_index: np.ndarray
-    class_weight: np.ndarray
-    rule_matched: np.ndarray
-    breath_flg: np.ndarray
-    session_flg_values: np.ndarray
+    flattening_severity_valid: np.ndarray
+    flg_valid: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -236,6 +236,10 @@ def _score_flg_grid(
         "pos_rate_low",
         "total_breaths",
     ]
+    # The per-session breath-aligned (severity, FLG) arrays are combo-invariant —
+    # only the AUC class labels move with the breakpoint — so the loader caches
+    # them once and each combo recomputes only the two threshold labelings.
+    total_breaths = sum(int(s.flg_valid.size) for s in sessions)
     rows: list[SweepRow] = []
     for knobs in enumerate_grid(grid):
         low = float(knobs["flg_low_threshold"])
@@ -243,27 +247,14 @@ def _score_flg_grid(
         auc_low: list[float] = []
         auc_high: list[float] = []
         n_pos = 0
-        n_total = 0
         for s in sessions:
-            scores = score_fl_arrays(
-                s.mid_insp_flattening,
-                s.flatness_index,
-                s.class_weight,
-                s.rule_matched,
-                s.breath_flg,
-                s.session_flg_values,
-                flg_low_threshold=low,
-                flg_high_threshold=high,
-            )
-            valid = s.breath_flg[~np.isnan(s.breath_flg)]
-            n_total += int(valid.size)
-            n_pos += int(np.count_nonzero(valid >= low))
-            if scores is None:
-                continue
-            if scores.auc_low is not None:
-                auc_low.append(scores.auc_low)
-            if scores.auc_high is not None:
-                auc_high.append(scores.auc_high)
+            a_low = auc_severity_vs_flg(s.flattening_severity_valid, s.flg_valid, low)
+            a_high = auc_severity_vs_flg(s.flattening_severity_valid, s.flg_valid, high)
+            n_pos += int(np.count_nonzero(s.flg_valid >= low))
+            if a_low is not None:
+                auc_low.append(a_low)
+            if a_high is not None:
+                auc_high.append(a_high)
         objective = float(np.mean(auc_low)) if auc_low else None
         rows.append(
             SweepRow(
@@ -273,8 +264,8 @@ def _score_flg_grid(
                     "mean_auc_low": objective,
                     "mean_auc_high": float(np.mean(auc_high)) if auc_high else None,
                     "n_sessions_scored": len(auc_low),
-                    "pos_rate_low": (n_pos / n_total) if n_total else None,
-                    "total_breaths": n_total,
+                    "pos_rate_low": (n_pos / total_breaths) if total_breaths else None,
+                    "total_breaths": total_breaths,
                 },
                 is_default=_is_default(knobs, TARGET_FLG),
             )
@@ -542,38 +533,19 @@ async def _load_flg_session(
     starts = np.array([b.start_offset_s for b in breaths], dtype=np.float64)
     ends = np.array([b.end_offset_s for b in breaths], dtype=np.float64)
     mid_insp = np.array([b.mid_insp_flattening for b in breaths], dtype=np.float64)
-    flatness = np.array([b.flatness_index for b in breaths], dtype=np.float64)
-    class_weight = np.array(
-        [
-            FLOW_LIMITATION_CLASSES[b.flow_class]["weight"]
-            if b.flow_class in FLOW_LIMITATION_CLASSES
-            else np.nan
-            for b in breaths
-        ],
-        dtype=np.float64,
-    )
-    rule_matched = np.array(
-        [
-            b.flow_confidence is not None
-            and b.flow_confidence > FLC.FL_DEFAULT_CONFIDENCE
-            for b in breaths
-        ],
-        dtype=bool,
-    )
     breath_flg = average_waveform_over_breaths(
         starts, ends, flg_timestamps.astype(np.float64), flg_values.astype(np.float64)
     )
-    if np.isnan(breath_flg).all():
+    # Cache only the combo-invariant breath-aligned pair the FLG grid consumes,
+    # mirroring score_fl_arrays' valid-mask exactly (NaN = no FLG in the window).
+    valid = ~np.isnan(breath_flg)
+    if not valid.any():
         return None
 
     return FlgSessionArrays(
         session_id=session.id,
-        mid_insp_flattening=mid_insp,
-        flatness_index=flatness,
-        class_weight=class_weight,
-        rule_matched=rule_matched,
-        breath_flg=breath_flg,
-        session_flg_values=flg_values,
+        flattening_severity_valid=(1.0 - mid_insp)[valid],
+        flg_valid=breath_flg[valid],
     )
 
 

@@ -13,7 +13,7 @@ from datetime import date
 import numpy as np
 import pytest
 
-from snore.validation.fl_validator import score_fl_arrays
+from snore.validation.fl_validator import auc_severity_vs_flg, score_fl_arrays
 from snore.validation.sweep import (
     DEFAULT_GRIDS,
     NOT_SWEEPABLE_NOTICE,
@@ -257,15 +257,13 @@ class TestAppleTarget:
 
 
 def _flg_session(mid_insp: list[float], flg: list[float]) -> FlgSessionArrays:
-    n = len(mid_insp)
+    mid = np.array(mid_insp, dtype=np.float64)
+    flg_arr = np.array(flg, dtype=np.float64)
+    valid = ~np.isnan(flg_arr)
     return FlgSessionArrays(
         session_id=1,
-        mid_insp_flattening=np.array(mid_insp, dtype=np.float64),
-        flatness_index=np.zeros(n),
-        class_weight=np.full(n, np.nan),
-        rule_matched=np.zeros(n, dtype=bool),
-        breath_flg=np.array(flg, dtype=np.float64),
-        session_flg_values=np.array(flg, dtype=np.float64),
+        flattening_severity_valid=(1.0 - mid)[valid],
+        flg_valid=flg_arr[valid],
     )
 
 
@@ -289,6 +287,34 @@ class TestFlgTarget:
         # At 0.05 every breath is a positive → degenerate (pos_rate == 1.0).
         assert by_low[0.05].metrics["pos_rate_low"] == pytest.approx(1.0)
         assert by_low[0.25].metrics["pos_rate_low"] == pytest.approx(0.5)
+
+    def test_grid_auc_matches_score_fl_arrays_seam(self):
+        # Pin: the FLG grid's cached-invariant AUCs equal what score_fl_arrays
+        # computes for the same arrays and breakpoints (extraction is exact).
+        # A NaN-FLG breath exercises the shared valid mask.
+        mid_insp = np.array([0.9, 0.8, 0.5, 0.3, 0.2], dtype=np.float64)
+        flatness = np.zeros(5, dtype=np.float64)
+        class_weight = np.full(5, np.nan, dtype=np.float64)
+        rule_matched = np.zeros(5, dtype=bool)
+        breath_flg = np.array([0.1, np.nan, 0.4, 0.6, 0.8], dtype=np.float64)
+        session_flg = breath_flg[~np.isnan(breath_flg)]
+        valid = ~np.isnan(breath_flg)
+        sev_valid = (1.0 - mid_insp)[valid]
+        flg_valid = breath_flg[valid]
+        for low, high in [(0.25, 0.50), (0.15, 0.35), (0.35, 0.60)]:
+            scores = score_fl_arrays(
+                mid_insp,
+                flatness,
+                class_weight,
+                rule_matched,
+                breath_flg,
+                session_flg,
+                flg_low_threshold=low,
+                flg_high_threshold=high,
+            )
+            assert scores is not None
+            assert auc_severity_vs_flg(sev_valid, flg_valid, low) == scores.auc_low
+            assert auc_severity_vs_flg(sev_valid, flg_valid, high) == scores.auc_high
 
 
 # ---------------------------------------------------------------------------
