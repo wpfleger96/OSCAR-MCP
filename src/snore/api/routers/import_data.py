@@ -15,13 +15,14 @@ from typing import IO, Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from snore.api.deps import ActorDep, get_db
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.import_jobs import (
+    TERMINAL_STATES,
     ImportJob,
     JobState,
     JobType,
@@ -32,6 +33,12 @@ from snore.api.import_jobs import (
     list_jobs,
     remove_job,
     reserve_slot,
+)
+from snore.api.jobs import (
+    cancel_or_409,
+    merge_job_lists,
+    owned_or_404,
+    terminal_records_query,
 )
 from snore.api.schemas import (
     HealthImportResultSummary,
@@ -819,30 +826,10 @@ async def list_pipeline_jobs(
             )
         )
 
-    # Historical records from the database — terminal states only.  Non-terminal
-    # rows (pending_upload, pending, running) represent in-flight jobs whose
-    # live state lives in memory; if they appear here without an in-memory
-    # counterpart they are orphans that startup recovery should have cleared.
-    # Filtering to terminal states keeps phantom "forever running" rows out of
-    # the UI when recovery is skipped or encounters a locked DB at boot.
-    stmt = (
-        select(models.ImportJobRecord)
-        .where(
-            or_(
-                models.ImportJobRecord.owner_user_id == actor.user_id,
-                models.ImportJobRecord.owner_user_id.is_(None),
-            ),
-            models.ImportJobRecord.state.in_(["succeeded", "failed", "cancelled"]),
-        )
-        .order_by(models.ImportJobRecord.created_at.desc())
-        .limit(50)
-    )
-    db_records = (await db.execute(stmt)).scalars().all()
-
-    for rec in db_records:
-        if rec.job_id in in_memory_ids:
-            continue
-
+    # Historical records from the database — terminal states only (see
+    # terminal_records_query: non-terminal persisted rows are orphans whose live
+    # state lives in memory and must not surface as phantom "running" entries).
+    def _db_row_to_status(rec: models.ImportJobRecord) -> PipelineJobStatus:
         rec_state = JobState(rec.state)
         stage = _derive_stage(rec_state, None, rec.analysis_queued, None)
 
@@ -862,30 +849,41 @@ async def list_pipeline_jobs(
                     rec.import_result_json
                 )
 
-        result.append(
-            PipelineJobStatus(
-                job_id=rec.job_id,
-                job_type=rec.job_type,
-                state=rec.state,
-                stage=stage,
-                file_count=rec.file_count,
-                created_at=rec.created_at.isoformat(),
-                finished_at=rec.finished_at.isoformat()
-                if rec.finished_at is not None
-                else None,
-                progress_message=None,
-                sessions_imported=rec.sessions_imported,
-                import_result=rec_import_result_summary,
-                health_import_result=rec_health_import_result_summary,
-                error_message=rec.error_message,
-                analysis_job_id=None,
-                analysis_queued=rec.analysis_queued,
-                linked_analysis=None,
-            )
+        return PipelineJobStatus(
+            job_id=rec.job_id,
+            job_type=rec.job_type,
+            state=rec.state,
+            stage=stage,
+            file_count=rec.file_count,
+            created_at=rec.created_at.isoformat(),
+            finished_at=rec.finished_at.isoformat()
+            if rec.finished_at is not None
+            else None,
+            progress_message=None,
+            sessions_imported=rec.sessions_imported,
+            import_result=rec_import_result_summary,
+            health_import_result=rec_health_import_result_summary,
+            error_message=rec.error_message,
+            analysis_job_id=None,
+            analysis_queued=rec.analysis_queued,
+            linked_analysis=None,
         )
 
-    result.sort(key=lambda j: datetime.fromisoformat(j.created_at), reverse=True)
-    return PipelineJobsListResponse(jobs=result)
+    stmt = terminal_records_query(
+        models.ImportJobRecord,
+        actor.user_id,
+        [s.value for s in TERMINAL_STATES],
+    )
+    db_records = (await db.execute(stmt)).scalars().all()
+
+    merged = merge_job_lists(
+        result,
+        in_memory_ids,
+        db_records,
+        to_status=_db_row_to_status,
+        sort_key=lambda j: datetime.fromisoformat(j.created_at),
+    )
+    return PipelineJobsListResponse(jobs=merged)
 
 
 @router.delete("/{job_id}", status_code=204)
@@ -897,17 +895,14 @@ def cancel_import(job_id: str, actor: RequireWritable) -> None:
 
     Jobs without an owner (owner_user_id=None) are accessible in local mode.
     """
-    job = get_job(job_id)
-    if job is None or (
-        job.owner_user_id is not None and job.owner_user_id != actor.user_id
-    ):
-        # 404 instead of 403 — no information about foreign job IDs.
-        raise HTTPException(status_code=404, detail="Import job not found")
-    if not cancel_job(job_id):
-        raise HTTPException(
-            status_code=409,
-            detail="Import job is already finished and cannot be cancelled",
-        )
+    owned_or_404(
+        get_job(job_id), actor.user_id, not_found_detail="Import job not found"
+    )
+    cancel_or_409(
+        cancel_job,
+        job_id,
+        already_detail="Import job is already finished and cannot be cancelled",
+    )
 
 
 _SSE_TIMEOUT = object()

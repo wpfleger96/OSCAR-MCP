@@ -701,10 +701,9 @@ def _startup_resume_imports(
             job._file_count = sum(1 for f in spool_path.iterdir() if f.is_file())
             # Register in the in-memory store without checking admission caps —
             # startup resume should not be refused by caps.
-            from snore.api.import_jobs import _jobs, _lock  # noqa: PLC0415
+            from snore.api.import_jobs import _store  # noqa: PLC0415
 
-            with _lock:
-                _jobs[job.job_id] = job
+            _store.add(job)
 
             profile_raw_root = DEFAULT_RAW_BACKUP_DIR / str(profile_id)
             enqueue_for_execution(job, profile_raw_root)

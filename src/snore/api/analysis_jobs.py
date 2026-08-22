@@ -24,7 +24,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, StrEnum
 
-from snore.api.import_jobs import JOB_TTL_SECONDS
+from snore.api.jobs.core import (
+    JOB_TTL_SECONDS,
+    JobRecordBase,
+    JobStore,
+    run_worker_loop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,18 +97,16 @@ TERMINAL_STATES = frozenset(
 )
 
 
-@dataclass
-class AnalysisJob:
-    job_id: str
+@dataclass(kw_only=True)
+class AnalysisJob(JobRecordBase[AnalysisJobState]):
+    _TERMINAL_STATES = TERMINAL_STATES
+
     profile_id: int
     session_ids: list[int]
     source: AnalysisJobSource
-    owner_user_id: int | None = None
     modes: list[str] | None = None
     primary_mode: str | None = None
     store_results: bool = True
-    created_at: float = field(default_factory=time.monotonic)
-    created_at_wall: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     _state: AnalysisJobState = field(
         default=AnalysisJobState.QUEUED, init=False, repr=False
@@ -111,29 +114,9 @@ class AnalysisJob:
     _progress_completed: int = field(default=0, init=False, repr=False)
     _progress_total: int = field(default=0, init=False, repr=False)
     _error_message: str | None = field(default=None, init=False, repr=False)
-    _started_at: float | None = field(default=None, init=False, repr=False)
-    _started_at_wall: datetime | None = field(default=None, init=False, repr=False)
+    # Monotonic terminal timestamp (analysis-specific field name; import uses
+    # _terminal_at).  Tests assign this directly, so it stays a plain field.
     _finished_at: float | None = field(default=None, init=False, repr=False)
-    _finished_at_wall: datetime | None = field(default=None, init=False, repr=False)
-    _cancel_flag: bool = field(default=False, init=False, repr=False)
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False
-    )
-
-    @property
-    def state(self) -> AnalysisJobState:
-        with self._lock:
-            return self._state
-
-    @property
-    def is_terminal(self) -> bool:
-        with self._lock:
-            return self._state in TERMINAL_STATES
-
-    @property
-    def cancel_requested(self) -> bool:
-        with self._lock:
-            return self._cancel_flag
 
     @property
     def progress_completed(self) -> int:
@@ -151,24 +134,9 @@ class AnalysisJob:
             return self._error_message
 
     @property
-    def started_at(self) -> float | None:
-        with self._lock:
-            return self._started_at
-
-    @property
     def finished_at(self) -> float | None:
         with self._lock:
             return self._finished_at
-
-    @property
-    def started_at_wall(self) -> datetime | None:
-        with self._lock:
-            return self._started_at_wall
-
-    @property
-    def finished_at_wall(self) -> datetime | None:
-        with self._lock:
-            return self._finished_at_wall
 
     def try_start(self) -> bool:
         """Atomically transition QUEUED → RUNNING, or QUEUED → CANCELLED if cancel was set.
@@ -182,9 +150,7 @@ class AnalysisJob:
                 self._finished_at = time.monotonic()
                 self._finished_at_wall = datetime.now(UTC)
                 return False
-            self._state = AnalysisJobState.RUNNING
-            self._started_at = time.monotonic()
-            self._started_at_wall = datetime.now(UTC)
+            self._start_running(AnalysisJobState.RUNNING)
             return True
 
     def finish(self, succeeded: bool, error_message: str | None = None) -> None:
@@ -206,21 +172,12 @@ class AnalysisJob:
             self._finished_at = time.monotonic()
             self._finished_at_wall = datetime.now(UTC)
 
-    def try_cancel(self) -> bool:
-        """Set the cancel flag; if QUEUED, immediately transition to CANCELLED.
-
-        Returns True if the job was in a non-terminal state.
-        Queue removal must be handled at the module level under _condition.
-        """
-        with self._lock:
-            if self._state in TERMINAL_STATES:
-                return False
-            self._cancel_flag = True
-            if self._state == AnalysisJobState.QUEUED:
-                self._state = AnalysisJobState.CANCELLED
-                self._finished_at = time.monotonic()
-                self._finished_at_wall = datetime.now(UTC)
-            return True
+    def _on_cancel_locked(self) -> None:
+        """Eager-terminalize a QUEUED job. Caller holds ``_lock`` (see base)."""
+        if self._state == AnalysisJobState.QUEUED:
+            self._state = AnalysisJobState.CANCELLED
+            self._finished_at = time.monotonic()
+            self._finished_at_wall = datetime.now(UTC)
 
     def update_progress(self, done: int, total: int | None) -> None:
         """Update progress counters; safe to call from any thread."""
@@ -275,8 +232,12 @@ class AnalysisJob:
 # ---------------------------------------------------------------------------
 
 _queue: collections.deque[AnalysisJob] = collections.deque()
-_all_jobs: dict[str, AnalysisJob] = {}
-_lock = threading.Lock()
+# _all_jobs and _lock are the store's live objects: tests clear _all_jobs
+# directly and the module fuses its condition onto the store lock.
+# Alias in place only — never rebind store.jobs/store.lock (see JobStore docstring).
+_store: JobStore[AnalysisJob] = JobStore()
+_all_jobs = _store.jobs
+_lock = _store.lock
 _condition = threading.Condition(_lock)
 
 _worker_threads: list[threading.Thread] = []
@@ -327,8 +288,7 @@ def enqueue(
 
 
 def get_job(job_id: str) -> AnalysisJob | None:
-    with _lock:
-        return _all_jobs.get(job_id)
+    return _store.get(job_id)
 
 
 def list_jobs(owner_user_id: int | None = None) -> list[AnalysisJob]:
@@ -338,15 +298,7 @@ def list_jobs(owner_user_id: int | None = None) -> list[AnalysisJob]:
     A job with a set owner is visible only to that owner.
     When *owner_user_id* is None the caller receives all jobs.
     """
-    with _lock:
-        all_jobs = list(_all_jobs.values())
-    if owner_user_id is None:
-        return all_jobs
-    return [
-        j
-        for j in all_jobs
-        if j.owner_user_id is None or j.owner_user_id == owner_user_id
-    ]
+    return _store.list_visible_to(owner_user_id)
 
 
 def cancel_job(job_id: str) -> bool:
@@ -388,65 +340,50 @@ def has_running_jobs() -> bool:
 
 
 def _reap_terminal() -> None:
-    now = time.monotonic()
-    with _lock:
-        to_remove = [
-            jid
-            for jid, job in _all_jobs.items()
-            if job.is_terminal
-            and (fa := job.finished_at) is not None
-            and now - fa > JOB_TTL_SECONDS
-        ]
-        for jid in to_remove:
-            _all_jobs.pop(jid, None)
-            logger.debug("Reaped terminal analysis job %s", jid)
+    removed = _store.reap(JOB_TTL_SECONDS, terminal_at=lambda job: job.finished_at)
+    for jid in removed:
+        logger.debug("Reaped terminal analysis job %s", jid)
 
 
 async def _upsert_analysis_record(job: AnalysisJob) -> None:
     """Upsert the current job state to the database for crash-recovery durability."""
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # noqa: PLC0415
-
+    from snore.api.jobs.durability import upsert_job_record  # noqa: PLC0415
     from snore.database.models import AnalysisJobRecord  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
 
     now = datetime.now(UTC)
     finished = job.finished_at_wall if job.is_terminal else None
 
-    stmt = (
-        sqlite_insert(AnalysisJobRecord)
-        .values(
-            job_id=job.job_id,
-            source=job.source.value,
-            profile_id=job.profile_id,
-            owner_user_id=job.owner_user_id,
-            session_ids_json=job.session_ids,
-            modes=job.modes,
-            primary_mode=job.primary_mode,
-            store_results=job.store_results,
-            state=job.state.value,
-            progress_completed=job.progress_completed,
-            progress_total=job.progress_total,
-            error_message=job.error_message,
-            created_at=job.created_at_wall,
-            started_at=job.started_at_wall,
-            finished_at=finished,
-            updated_at=now,
-        )
-        .on_conflict_do_update(
-            index_elements=["job_id"],
-            set_={
-                "state": job.state.value,
-                "progress_completed": job.progress_completed,
-                "progress_total": job.progress_total,
-                "error_message": job.error_message,
-                "started_at": job.started_at_wall,
-                "finished_at": finished,
-                "updated_at": now,
-            },
-        )
+    values = {
+        "job_id": job.job_id,
+        "source": job.source.value,
+        "profile_id": job.profile_id,
+        "owner_user_id": job.owner_user_id,
+        "session_ids_json": job.session_ids,
+        "modes": job.modes,
+        "primary_mode": job.primary_mode,
+        "store_results": job.store_results,
+        "state": job.state.value,
+        "progress_completed": job.progress_completed,
+        "progress_total": job.progress_total,
+        "error_message": job.error_message,
+        "created_at": job.created_at_wall,
+        "started_at": job.started_at_wall,
+        "finished_at": finished,
+        "updated_at": now,
+    }
+    await upsert_job_record(
+        AnalysisJobRecord,
+        values=values,
+        update_fields=[
+            "state",
+            "progress_completed",
+            "progress_total",
+            "error_message",
+            "started_at",
+            "finished_at",
+            "updated_at",
+        ],
     )
-    async with session_scope(immediate=True) as db:
-        await db.execute(stmt)
 
 
 async def _run_analysis(job: AnalysisJob) -> None:
@@ -492,39 +429,46 @@ def _execute_job(job: AnalysisJob) -> None:
             )
 
 
-def _worker_loop(stop_event: threading.Event, condition: threading.Condition) -> None:
-    last_reap = time.monotonic()
-    while not stop_event.is_set():
-        job: AnalysisJob | None = None
-        with condition:
-            if not _queue and not stop_event.is_set():
-                condition.wait(timeout=1.0)
-            if not stop_event.is_set() and _queue:
-                job = _queue.popleft()
+class _ThrottledReaper:
+    """Per-worker reap cadence: unconditional after each job, throttled on idle.
 
-        if job is None:
-            # Idle timeout — reap at most every 60 s.
-            now = time.monotonic()
-            if now - last_reap >= 60.0:
-                _reap_terminal()
-                last_reap = now
-            continue
+    The analysis store is polled only by the workers and a low-frequency list
+    endpoint, so reaping inline here suffices (import runs a dedicated reaper
+    thread instead).  Idle cycles reap at most every ``interval`` seconds; a
+    completed job always reaps and resets the clock.
+    """
 
-        try:
-            _execute_job(job)
-        except BaseException as exc:
-            logger.exception(
-                "Unexpected error in analysis worker for job %s", job.job_id
-            )
-            if not job.is_terminal:
-                try:
-                    job.finish(succeeded=False, error_message=str(exc))
-                except Exception:
-                    pass
-            # Do NOT re-raise — the worker thread must stay alive.
+    def __init__(self, interval: float = 60.0) -> None:
+        self._interval = interval
+        self._last_reap = time.monotonic()
 
+    def on_idle(self) -> None:
+        now = time.monotonic()
+        if now - self._last_reap >= self._interval:
+            _reap_terminal()
+            self._last_reap = now
+
+    def after_job(self) -> None:
         _reap_terminal()
-        last_reap = time.monotonic()
+        self._last_reap = time.monotonic()
+
+
+def _worker_loop(stop_event: threading.Event, condition: threading.Condition) -> None:
+    reaper = _ThrottledReaper(60.0)
+
+    def _on_error(job: AnalysisJob, exc: BaseException) -> None:
+        if not job.is_terminal:
+            job.finish(succeeded=False, error_message=str(exc))
+
+    run_worker_loop(
+        stop_event,
+        condition,
+        _queue,
+        _execute_job,
+        on_idle=reaper.on_idle,
+        after_execute=reaper.after_job,
+        on_execute_error=_on_error,
+    )
 
 
 def start_worker() -> tuple[list[threading.Thread], threading.Event]:
