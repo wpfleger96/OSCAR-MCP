@@ -141,6 +141,8 @@ export function avg(vals: (number | null | undefined)[]): number | null {
 const NULL_REASON_LABELS: Record<string, string> = {
     analysis_not_run: 'Breath analysis has not been run for this night.',
     analysis_stale: 'Breath analysis is out of date for this night.',
+    device_ambiguous:
+        'The night has sessions from more than one device and no device was pinned to disambiguate.',
     algo_version_mismatch: 'Produced by a different analysis algorithm version.',
     channel_absent: 'A required signal channel is not available.',
     channel_unaligned: 'Signal channels could not be aligned for this night.',

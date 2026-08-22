@@ -2397,6 +2397,11 @@ export interface components {
              */
             n_analysis_stale: number
             /**
+             * N Device Ambiguous
+             * @description Nights skipped: multiple devices, no device_id pinned
+             */
+            n_device_ambiguous: number
+            /**
              * N Skipped No Apple Bd
              * @description Nights with no Apple breathing-disturbance value
              */
@@ -2463,7 +2468,7 @@ export interface components {
             rera_index_reason?: string | null
             /**
              * Skip Reason
-             * @description Why the night contributes no SNORE side to any correlation: 'analysis_not_run' — SNORE analysis never ran for the night; 'analysis_stale' — SNORE analysis is stale / version-mismatched; None — the night carries usable SNORE indices
+             * @description Why the night contributes no SNORE side to any correlation: 'analysis_not_run' — SNORE analysis never ran for the night; 'analysis_stale' — SNORE analysis is stale / version-mismatched; 'device_ambiguous' — the night has sessions from more than one device and no device_id was pinned to disambiguate; None — the night carries usable SNORE indices
              */
             skip_reason?: string | null
             /**
@@ -2502,6 +2507,8 @@ export interface components {
         }
         /** AppleCrossValidationRequest */
         AppleCrossValidationRequest: {
+            /** Device Id */
+            device_id?: number | null
             /**
              * From Date
              * Format: date

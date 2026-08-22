@@ -39,6 +39,11 @@
                         :value="report.aggregate.n_analysis_not_run"
                         :decimals="0"
                     />
+                    <StatCard
+                        label="Skipped (device ambiguous)"
+                        :value="report.aggregate.n_device_ambiguous"
+                        :decimals="0"
+                    />
                 </div>
 
                 <div class="rounded-md border overflow-x-auto">
