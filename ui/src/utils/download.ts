@@ -22,8 +22,10 @@ export function downloadJson(value: unknown, filename: string): void {
 /** Quote one CSV cell, neutralizing spreadsheet formula injection. */
 export function csvCell(value: unknown): string {
     const s = String(value ?? '')
-    // Neutralize formula injection: prefix cells starting with =, +, -, or @
-    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s
+    // Neutralize formula injection: prefix cells opening with a formula trigger
+    // (=, +, -, @, tab, or CR). Numeric values are exempt so legitimate negative
+    // metrics (rho, biases) export as numbers, not text like '-0.5000.
+    const safe = /^[=+\-@\t\r]/.test(s) && !Number.isFinite(Number(s)) ? `'${s}` : s
     // Wrap in double quotes, escape embedded double quotes as ""
     return `"${safe.replaceAll('"', '""')}"`
 }
