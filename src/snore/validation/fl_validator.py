@@ -60,6 +60,18 @@ def _auc_mwu(scores: np.ndarray, labels: np.ndarray) -> float | None:
     return float(result.statistic) / (len(pos) * len(neg))
 
 
+def auc_severity_vs_flg(
+    severity_valid: np.ndarray, flg_valid: np.ndarray, threshold: float
+) -> float | None:
+    """AUC of a severity score separating breaths with ``FLG >= threshold``.
+
+    The single FLG-breakpoint labeling seam: ``score_fl_arrays`` computes both
+    threshold AUCs through it, and the offline sweep's FLG grid drives it
+    directly over cached per-session arrays so the two paths stay identical.
+    """
+    return _auc_mwu(severity_valid, flg_valid >= threshold)
+
+
 def _percentile95(arr: np.ndarray) -> float | None:
     """95th percentile; None for empty arrays."""
     if len(arr) == 0:
@@ -85,12 +97,12 @@ class FlArrayScores:
     spearman_flattening_p: float | None
     spearman_flatness_r: float | None
     spearman_flatness_p: float | None
-    auc_t25: float | None
-    auc_t50: float | None
+    auc_low: float | None
+    auc_high: float | None
     spearman_class_weight_r: float | None
     spearman_class_weight_p: float | None
-    auc_class_t25: float | None
-    auc_class_t50: float | None
+    auc_class_low: float | None
+    auc_class_high: float | None
     snore_fl_95th: float | None
     device_flg_95th: float | None
 
@@ -144,8 +156,8 @@ def score_fl_arrays(
     spr_flat_r, spr_flat_p = spearman_or_none(flat_sev_valid, flg_valid)
     spr_fi_r, spr_fi_p = spearman_or_none(flatness_valid, flg_valid)
 
-    auc_t25 = _auc_mwu(flat_sev_valid, flg_valid >= flg_low_threshold)
-    auc_t50 = _auc_mwu(flat_sev_valid, flg_valid >= flg_high_threshold)
+    auc_low = auc_severity_vs_flg(flat_sev_valid, flg_valid, flg_low_threshold)
+    auc_high = auc_severity_vs_flg(flat_sev_valid, flg_valid, flg_high_threshold)
 
     # flow_class weight vs FLG — over rule-matched breaths with a known class.
     class_mask = valid & rule_matched & ~np.isnan(class_weight)
@@ -153,8 +165,8 @@ def score_fl_arrays(
     weights_c = class_weight[class_mask]
     flg_c = breath_flg[class_mask]
     spr_cw_r, spr_cw_p = spearman_or_none(weights_c, flg_c)
-    auc_class_t25 = _auc_mwu(weights_c, flg_c >= flg_low_threshold)
-    auc_class_t50 = _auc_mwu(weights_c, flg_c >= flg_high_threshold)
+    auc_class_low = auc_severity_vs_flg(weights_c, flg_c, flg_low_threshold)
+    auc_class_high = auc_severity_vs_flg(weights_c, flg_c, flg_high_threshold)
 
     # device_flg_95th uses all session FLG samples (full-session population);
     # snore_fl_95th uses only the breath-aligned subset — intentionally asymmetric.
@@ -168,12 +180,12 @@ def score_fl_arrays(
         spearman_flattening_p=spr_flat_p,
         spearman_flatness_r=spr_fi_r,
         spearman_flatness_p=spr_fi_p,
-        auc_t25=auc_t25,
-        auc_t50=auc_t50,
+        auc_low=auc_low,
+        auc_high=auc_high,
         spearman_class_weight_r=spr_cw_r,
         spearman_class_weight_p=spr_cw_p,
-        auc_class_t25=auc_class_t25,
-        auc_class_t50=auc_class_t50,
+        auc_class_low=auc_class_low,
+        auc_class_high=auc_class_high,
         snore_fl_95th=snore_95th,
         device_flg_95th=device_95th,
     )
@@ -376,12 +388,12 @@ class FlowLimitationValidator:
             spearman_flattening_p=scores.spearman_flattening_p,
             spearman_flatness_r=scores.spearman_flatness_r,
             spearman_flatness_p=scores.spearman_flatness_p,
-            auc_t25=scores.auc_t25,
-            auc_t50=scores.auc_t50,
+            auc_t25=scores.auc_low,
+            auc_t50=scores.auc_high,
             spearman_class_weight_r=scores.spearman_class_weight_r,
             spearman_class_weight_p=scores.spearman_class_weight_p,
-            auc_class_t25=scores.auc_class_t25,
-            auc_class_t50=scores.auc_class_t50,
+            auc_class_t25=scores.auc_class_low,
+            auc_class_t50=scores.auc_class_high,
             snore_fl_95th=scores.snore_fl_95th,
             device_flg_95th=scores.device_flg_95th,
         )

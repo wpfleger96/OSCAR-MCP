@@ -260,10 +260,10 @@ def _score_flg_grid(
             n_pos += int(np.count_nonzero(valid >= low))
             if scores is None:
                 continue
-            if scores.auc_t25 is not None:
-                auc_low.append(scores.auc_t25)
-            if scores.auc_t50 is not None:
-                auc_high.append(scores.auc_t50)
+            if scores.auc_low is not None:
+                auc_low.append(scores.auc_low)
+            if scores.auc_high is not None:
+                auc_high.append(scores.auc_high)
         objective = float(np.mean(auc_low)) if auc_low else None
         rows.append(
             SweepRow(

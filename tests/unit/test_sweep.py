@@ -52,7 +52,7 @@ class TestScoreFlArrays:
         scores = score_fl_arrays(*self._arrays(mid_insp, flg))
         assert scores is not None
         assert scores.n_breaths_compared == 4
-        assert scores.auc_t25 == pytest.approx(1.0)
+        assert scores.auc_low == pytest.approx(1.0)
 
     def test_no_aligned_pairs_returns_none(self):
         args = self._arrays([0.5, 0.5], [np.nan, np.nan])
@@ -66,8 +66,39 @@ class TestScoreFlArrays:
         at_45 = score_fl_arrays(*args, flg_low_threshold=0.45)
         at_55 = score_fl_arrays(*args, flg_low_threshold=0.55)
         assert at_45 is not None and at_55 is not None
-        assert at_45.auc_t25 == pytest.approx(1.0)
-        assert at_55.auc_t25 == pytest.approx(0.75)
+        assert at_45.auc_low == pytest.approx(1.0)
+        assert at_55.auc_low == pytest.approx(0.75)
+
+    def test_class_weight_low_threshold_override_changes_auc(self):
+        # The class-weight AUC path honours the same FLG breakpoint override.
+        # Weights inverted against FLG between 0.5 and 0.6 make the breakpoint
+        # matter (all breaths rule-matched with a known class weight).
+        mid_insp = np.full(4, 0.5, dtype=np.float64)
+        flatness = np.zeros(4, dtype=np.float64)
+        class_weight = np.array([0.1, 0.9, 0.5, 0.95], dtype=np.float64)
+        rule_matched = np.ones(4, dtype=bool)
+        flg = np.array([0.1, 0.5, 0.6, 0.9], dtype=np.float64)
+        at_45 = score_fl_arrays(
+            mid_insp,
+            flatness,
+            class_weight,
+            rule_matched,
+            flg,
+            flg,
+            flg_low_threshold=0.45,
+        )
+        at_55 = score_fl_arrays(
+            mid_insp,
+            flatness,
+            class_weight,
+            rule_matched,
+            flg,
+            flg,
+            flg_low_threshold=0.55,
+        )
+        assert at_45 is not None and at_55 is not None
+        assert at_45.auc_class_low == pytest.approx(1.0)
+        assert at_55.auc_class_low == pytest.approx(0.75)
 
 
 # ---------------------------------------------------------------------------
