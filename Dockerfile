@@ -12,7 +12,7 @@ COPY ui/ ./
 RUN pnpm run build
 
 # Stage 2: compile Python dependencies (full image has gcc for native extensions)
-FROM python:3.13 AS python-builder
+FROM python:3.14 AS python-builder
 
 WORKDIR /app
 
@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # Stage 3: slim runtime — copy the pre-built venv, no compiler needed
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
