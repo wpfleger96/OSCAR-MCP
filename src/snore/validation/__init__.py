@@ -40,6 +40,14 @@ from snore.validation.report import (
     export_report_csv,
     export_report_json,
 )
+from snore.validation.rera_report import (
+    ReraAggregateMetrics,
+    ReraSessionValidation,
+    ReraValidationReport,
+    export_rera_report_csv,
+    export_rera_report_json,
+)
+from snore.validation.rera_validator import ReraValidator
 from snore.validation.stats import mean_or_none, spearman_or_none
 
 __all__ = [
@@ -74,4 +82,10 @@ __all__ = [
     "ChannelAggregateMetrics",
     "export_breath_trends_report_json",
     "export_breath_trends_report_csv",
+    "ReraValidator",
+    "ReraValidationReport",
+    "ReraSessionValidation",
+    "ReraAggregateMetrics",
+    "export_rera_report_json",
+    "export_rera_report_csv",
 ]
