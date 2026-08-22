@@ -25,7 +25,7 @@ from concurrent.futures import as_completed
 from concurrent.futures.process import BrokenProcessPool
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -143,6 +143,27 @@ def _resmed_parse_bundle_worker(
         date_from,
         date_to,
     )
+
+
+class _PldSignal(NamedTuple):
+    """One PLD waveform's name candidates and read parameters.
+
+    Entries are resolved in list order; ``exclude`` names earlier entries whose
+    already-claimed signal must be skipped (e.g. therapy pressure excludes the
+    mask/EPAP signals, so it must appear after them).  ``warn_label`` set means
+    a "no data" warning is logged when the signal is found but reads empty;
+    unset entries skip silently.
+    """
+
+    key: str
+    patterns: list[str]
+    waveform_type: WaveformType
+    unit: str
+    valid_range: tuple[float, float] | None = None
+    convert_lps_to_lpm: bool = False
+    scale_factor: float | None = None
+    exclude: tuple[str, ...] = ()
+    warn_label: str | None = None
 
 
 class ResmedEDFParser(DeviceParser):
@@ -2011,6 +2032,100 @@ class ResmedEDFParser(DeviceParser):
                     return signal
         return None
 
+    # Ordered PLD waveform specs. ResMed signal names vary by firmware, e.g.
+    # "MaskPress.2s"/"EPRPress.2s"/"Press.2s" (AirSense 11) vs "MaskPressure"/
+    # "Exp Pres"/"Pressure" (older).  Mask and EPAP are resolved first so
+    # therapy pressure can exclude them; TidVol before Ti so bare "Ti" does not
+    # match "TidVol".  FlowLim/Snore/RespRate/TidVol/IERatio/Ti are index-like
+    # (valid_range-gated) and skip silently when absent (VAuto-only for the
+    # last two).
+    _PLD_SIGNALS: tuple[_PldSignal, ...] = (
+        _PldSignal(
+            "mask",
+            ["MaskPress", "Mask Pres"],
+            WaveformType.MASK_PRESSURE,
+            UNIT_PRESSURE,
+            warn_label="mask pressure",
+        ),
+        _PldSignal(
+            "epap",
+            ["EPRPress", "Exp Pres"],
+            WaveformType.EPAP,
+            UNIT_PRESSURE,
+            warn_label="EPAP",
+        ),
+        _PldSignal(
+            "therapy",
+            ["Press", "Therapy Pres", "Pressure"],
+            WaveformType.THERAPY_PRESSURE,
+            UNIT_PRESSURE,
+            exclude=("mask", "epap"),
+            warn_label="therapy pressure",
+        ),
+        _PldSignal(
+            "leak",
+            ["Leak"],
+            WaveformType.LEAK_RATE,
+            UNIT_FLOW,
+            convert_lps_to_lpm=True,
+            warn_label="leak",
+        ),
+        _PldSignal(
+            "mv",
+            ["MinVent", "MV"],
+            WaveformType.MINUTE_VENTILATION,
+            UNIT_FLOW,
+            warn_label="minute-vent",
+        ),
+        _PldSignal(
+            "flow_lim",
+            ["FlowLim.2s", "FlowLim", "FFL Index"],
+            WaveformType.FLOW_LIMITATION,
+            "",
+            valid_range=(0.0, 1.0),
+        ),
+        _PldSignal(
+            "snore",
+            ["Snore.2s", "Snore"],
+            WaveformType.SNORE,
+            "",
+            valid_range=(0.0, 5.0),
+        ),
+        _PldSignal(
+            "resp_rate",
+            ["RespRate.2s", "RespRate"],
+            WaveformType.RESPIRATORY_RATE,
+            UNIT_BPM,
+            valid_range=(0.0, 90.0),
+        ),
+        # TidVol is stored in L on the device; scale to mL (range applied after).
+        _PldSignal(
+            "tidvol",
+            ["TidVol.2s", "TidVol"],
+            WaveformType.TIDAL_VOLUME,
+            UNIT_ML,
+            valid_range=(0.0, 4000.0),
+            scale_factor=1000.0,
+        ),
+        _PldSignal(
+            "ie_ratio",
+            ["IERatio.2s", "IERatio"],
+            WaveformType.IE_RATIO,
+            UNIT_PERCENT,
+            valid_range=(0.0, 400.0),
+        ),
+        # R5Ti.2s preferred over Ti.2s where both appear (OSCAR
+        # resmed_loader.cpp:4173); excludes the claimed TidVol signal only.
+        _PldSignal(
+            "ti",
+            ["R5Ti.2s", "Ti.2s", "Ti"],
+            WaveformType.TI,
+            UNIT_SECONDS,
+            valid_range=(0.0, 10.0),
+            exclude=("tidvol",),
+        ),
+    )
+
     def _parse_pressure_leak(self, file_path: Path, session: UnifiedSession) -> None:
         """Parse PLD pressure/leak file."""
         from .formats.edf import get_edf_record_count
@@ -2033,170 +2148,41 @@ class ResmedEDFParser(DeviceParser):
             )
 
             with EDFReader(file_path) as edf:
-                # Parse all three pressure signals separately
-                # ResMed signal names: "MaskPress.2s", "EPRPress.2s", "Press.2s" (AirSense 11)
-                # or "MaskPressure", "Exp Pres", "Pressure" (older devices)
-                mask_signal = self._find_signal(edf, ["MaskPress", "Mask Pres"])
-                epap_signal = self._find_signal(edf, ["EPRPress", "Exp Pres"])
-
-                claimed = {s for s in (mask_signal, epap_signal) if s is not None}
-                therapy_signal = self._find_signal_excluding(
-                    edf, ["Press", "Therapy Pres", "Pressure"], exclude=claimed
-                )
-
-                # Parse therapy pressure (device's target pressure)
-                if therapy_signal:
-                    result = self._read_waveform(
-                        edf,
-                        therapy_signal,
-                        WaveformType.THERAPY_PRESSURE,
-                        UNIT_PRESSURE,
-                    )
-                    if result is None:
-                        logger.warning(
-                            f"No data in therapy pressure signal {therapy_signal}"
+                resolved: dict[str, str | None] = {}
+                for spec in self._PLD_SIGNALS:
+                    if spec.exclude:
+                        exclude = {
+                            sig
+                            for k in spec.exclude
+                            if (sig := resolved.get(k)) is not None
+                        }
+                        signal = self._find_signal_excluding(
+                            edf, spec.patterns, exclude=exclude
                         )
                     else:
-                        session.add_waveform(result[0])
+                        signal = self._find_signal(edf, spec.patterns)
+                    resolved[spec.key] = signal
 
-                # Parse mask pressure (measured at mask)
-                if mask_signal:
+                    if signal is None:
+                        continue
+
                     result = self._read_waveform(
-                        edf, mask_signal, WaveformType.MASK_PRESSURE, UNIT_PRESSURE
+                        edf,
+                        signal,
+                        spec.waveform_type,
+                        spec.unit,
+                        valid_range=spec.valid_range,
+                        convert_lps_to_lpm=spec.convert_lps_to_lpm,
+                        scale_factor=spec.scale_factor,
                     )
                     if result is None:
-                        logger.warning(f"No data in mask pressure signal {mask_signal}")
-                    else:
-                        session.add_waveform(result[0])
+                        if spec.warn_label:
+                            logger.warning(
+                                f"No data in {spec.warn_label} signal {signal}"
+                            )
+                        continue
 
-                # Parse EPAP (therapy pressure minus EPR)
-                if epap_signal:
-                    result = self._read_waveform(
-                        edf, epap_signal, WaveformType.EPAP, UNIT_PRESSURE
-                    )
-                    if result is None:
-                        logger.warning(f"No data in EPAP signal {epap_signal}")
-                    else:
-                        session.add_waveform(result[0])
-
-                # ResMed uses names like "Leak.2s", "LeakRate"
-                leak_signal = self._find_signal(edf, ["Leak"])
-
-                if leak_signal:
-                    result = self._read_waveform(
-                        edf,
-                        leak_signal,
-                        WaveformType.LEAK_RATE,
-                        UNIT_FLOW,
-                        convert_lps_to_lpm=True,
-                    )
-                    if result is None:
-                        logger.warning(f"No data in leak signal {leak_signal}")
-                    else:
-                        session.add_waveform(result[0])
-
-                # ResMed uses names like "MinVent.2s"; stored in L/min already
-                mv_signal = self._find_signal(edf, ["MinVent", "MV"])
-
-                if mv_signal:
-                    result = self._read_waveform(
-                        edf, mv_signal, WaveformType.MINUTE_VENTILATION, UNIT_FLOW
-                    )
-                    if result is None:
-                        logger.warning(f"No data in minute-vent signal {mv_signal}")
-                    else:
-                        session.add_waveform(result[0])
-
-                # Flow limitation index: dimensionless score 0–1 from the
-                # device's FL algorithm. Imported as the device reference for
-                # FL validation (see FL validation workstream).
-                flow_lim_signal = self._find_signal(
-                    edf, ["FlowLim.2s", "FlowLim", "FFL Index"]
-                )
-                if flow_lim_signal:
-                    result = self._read_waveform(
-                        edf,
-                        flow_lim_signal,
-                        WaveformType.FLOW_LIMITATION,
-                        "",
-                        valid_range=(0.0, 1.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                snore_signal = self._find_signal(edf, ["Snore.2s", "Snore"])
-                if snore_signal:
-                    result = self._read_waveform(
-                        edf,
-                        snore_signal,
-                        WaveformType.SNORE,
-                        "",
-                        valid_range=(0.0, 5.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                rr_signal = self._find_signal(edf, ["RespRate.2s", "RespRate"])
-                if rr_signal:
-                    result = self._read_waveform(
-                        edf,
-                        rr_signal,
-                        WaveformType.RESPIRATORY_RATE,
-                        UNIT_BPM,
-                        valid_range=(0.0, 90.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                # TidVol is stored in L on the device; scale to mL for the
-                # unified model (valid_range is applied after conversion).
-                tidvol_signal = self._find_signal(edf, ["TidVol.2s", "TidVol"])
-                if tidvol_signal:
-                    result = self._read_waveform(
-                        edf,
-                        tidvol_signal,
-                        WaveformType.TIDAL_VOLUME,
-                        UNIT_ML,
-                        valid_range=(0.0, 4000.0),
-                        scale_factor=1000.0,
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                # IERatio and Ti are VAuto-only; absent on APAP/CPAP devices —
-                # _find_signal returns None and the block is skipped silently.
-                ie_ratio_signal = self._find_signal(edf, ["IERatio.2s", "IERatio"])
-                if ie_ratio_signal:
-                    result = self._read_waveform(
-                        edf,
-                        ie_ratio_signal,
-                        WaveformType.IE_RATIO,
-                        UNIT_PERCENT,
-                        valid_range=(0.0, 400.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
-
-                # Use _find_signal_excluding so bare "Ti" does not accidentally
-                # match "TidVol" (substring collision) when the volume signal
-                # was already claimed above.
-                # R5Ti.2s and Ti.2s may both appear on some devices (e.g. 37051);
-                # prefer R5Ti.2s when present (OSCAR resmed_loader.cpp:4173).
-                ti_signal = self._find_signal_excluding(
-                    edf,
-                    ["R5Ti.2s", "Ti.2s", "Ti"],
-                    exclude={tidvol_signal} if tidvol_signal else set(),
-                )
-                if ti_signal:
-                    result = self._read_waveform(
-                        edf,
-                        ti_signal,
-                        WaveformType.TI,
-                        UNIT_SECONDS,
-                        valid_range=(0.0, 10.0),
-                    )
-                    if result is not None:
-                        session.add_waveform(result[0])
+                    session.add_waveform(result[0])
 
                 logger.debug(f"Parsed pressure/leak from {file_path.name}")
 
