@@ -8,6 +8,8 @@ planted-signal case proves the correct knob setting ranks first.
 
 from __future__ import annotations
 
+import csv
+
 from datetime import date
 
 import numpy as np
@@ -420,3 +422,23 @@ class TestExportSweepCsv:
         # One data row per grid combination, best-first.
         assert len(lines) - 1 == len(result.rows) == 2
         assert lines[1].startswith("4")  # winning combo exported first
+
+    def test_objective_written_at_full_precision(self, tmp_path):
+        # The objective (sensitivity - tiny chance floor) has many significant
+        # digits; repr formatting must preserve them, not truncate to 6 places.
+        session = _proxy_session(date(2024, 1, 1), n_events=1, machine_starts=[0.0])
+        data = SweepData(target="re", proxy_sessions=[session])
+        grid = {
+            "fl_class_threshold": [4],
+            "min_fl_run_length": [2],
+            "recovery_amplitude_margin": [0.20],
+        }
+        result = evaluate_grid(data, grid)
+        out = tmp_path / "ranked.csv"
+        export_sweep_csv(result, out)
+
+        rows = list(csv.DictReader(out.read_text().splitlines()))
+        assert result.rows[0].objective is not None
+        # The cell round-trips back to the exact float — full precision preserved.
+        assert float(rows[0]["objective"]) == result.rows[0].objective
+        assert rows[0]["objective"] == repr(result.rows[0].objective)

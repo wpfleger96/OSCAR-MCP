@@ -111,6 +111,14 @@ DEFAULT_GRIDS: dict[str, dict[str, list[float]]] = {
     TARGET_APPLE: dict(_PROXY_GRID),
 }
 
+# Each default knob value must be an enumerated point of its own grid, else the
+# highlighted "(default)" baseline row silently drops out of the ranking.
+for _target, _defaults in DEFAULT_KNOBS.items():
+    for _knob, _value in _defaults.items():
+        assert _value in DEFAULT_GRIDS[_target].get(_knob, []), (
+            f"default {_knob}={_value} for target {_target!r} is not in its grid"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Cached, load-once data structures (one per target)
@@ -665,7 +673,8 @@ def export_sweep_csv(result: SweepResult, output_path: Path) -> None:
     """Write the FULL ranked grid (one row per combo) as CSV, best-first.
 
     Columns: each swept knob, ``rank``, ``objective``, every reported metric,
-    and ``is_default``.  Numeric cells use 6 significant places; ``None`` is "".
+    and ``is_default``.  Numeric cells carry full precision (``repr``) so tiny
+    magnitudes survive round-tripping, matching the RERA CSV; ``None`` is "".
     """
     knob_cols = list(result.rows[0].knobs.keys()) if result.rows else []
     fieldnames = (
@@ -675,9 +684,7 @@ def export_sweep_csv(result: SweepResult, output_path: Path) -> None:
     def _fmt(v: float | int | None) -> str:
         if v is None:
             return ""
-        if isinstance(v, float):
-            return f"{v:.6g}"
-        return str(v)
+        return repr(v)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="") as f:
