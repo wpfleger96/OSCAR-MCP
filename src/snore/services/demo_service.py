@@ -267,7 +267,13 @@ def _compute_day_offset(most_recent_night_key: str) -> timedelta:
 
 
 def _shift_session(session: UnifiedSession, offset: timedelta) -> UnifiedSession:
-    """Return a copy of *session* with all timestamps shifted by *offset*."""
+    """Return a copy of *session* with all timestamps shifted by *offset*.
+
+    Statistics are finalized before this shift and stay valid afterward: every
+    finalized field (event counts, AHI-family indices, ``usage_hours``, and the
+    relative-offset ``mask_on_segments``) is invariant under a uniform time
+    translation.
+    """
     shifted_events = [
         evt.model_copy(
             update={

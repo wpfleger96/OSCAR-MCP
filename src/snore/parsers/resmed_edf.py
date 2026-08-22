@@ -1379,8 +1379,9 @@ class ResmedEDFParser(DeviceParser):
             str_settings_cache=str_settings_cache,
             str_summaries_cache=str_summaries_cache,
         )
-        if session is not None:
-            session.finalize_statistics()
+        if session is None:
+            return None
+        session.finalize_statistics()
         return session
 
     def _parse_night_session(
