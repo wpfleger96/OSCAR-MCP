@@ -802,6 +802,57 @@ class TestGetNightlySummary:
         assert summary.analyzed_session_count == 0
         assert summary.fl_reason == NullReason.NOT_AVAILABLE
 
+    async def test_waveform_opt_out_preserves_fl_rera_fields(self, async_db_session):
+        """``include_waveform_stats=False`` leaves the breath-derived FL/RERA
+        fields byte-identical; only the waveform ``device_flg_*`` fields differ.
+
+        Pins the day-detail hot-path optimization: skipping the waveform blobs
+        must not perturb the metrics day detail actually consumes.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 3, 12)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+        # Rule-matched high-confidence class-5 breaths → non-zero
+        # fl_class_ge4_pct, so the equality check compares a real value.
+        await _store_analysis_with_breaths(
+            async_db_session, session, profile_id, n_breaths=8, flow_class=5
+        )
+        # A real fl waveform blob so the with-stats path aggregates device_flg.
+        samples = np.array([[float(i), 0.4] for i in range(10)], dtype=np.float32)
+        async_db_session.add(
+            models.Waveform(
+                session_id=session.id,
+                waveform_type="fl",
+                sample_rate=1.0,
+                sample_count=10,
+                data_blob=samples.tobytes(),
+            )
+        )
+        await async_db_session.flush()
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        with_stats = await svc.get_nightly_summary(
+            therapy_date, device_id=dev.id, include_waveform_stats=True
+        )
+        without_stats = await svc.get_nightly_summary(
+            therapy_date, device_id=dev.id, include_waveform_stats=False
+        )
+
+        assert with_stats.fl_class_ge4_pct is not None
+        assert with_stats.fl_class_ge4_pct == without_stats.fl_class_ge4_pct
+        assert (
+            with_stats.fl_class_ge4_pct_reason == without_stats.fl_class_ge4_pct_reason
+        )
+        assert with_stats.rera_index == without_stats.rera_index
+        assert with_stats.rera_index_reason == without_stats.rera_index_reason
+        assert with_stats.rera_count == without_stats.rera_count
+        assert with_stats.rera_reason == without_stats.rera_reason
+
+        # The opt-out actually skipped waveform aggregation.
+        assert with_stats.device_flg_median is not None
+        assert without_stats.device_flg_median is None
+
 
 # ---------------------------------------------------------------------------
 # get_nightly_range_summary
