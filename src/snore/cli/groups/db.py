@@ -187,18 +187,57 @@ def recompute_days(db: str | None) -> None:
     session, refreshing every Day row across all devices and profiles.  Use
     after an aggregation-formula change (e.g. a new weighting) to update
     historical Day rows without re-importing raw device data.
+
+    Days are processed in chunks, each committed in its own gated write
+    transaction (like ``cleanup-orphans``), so the SQLite write lock is
+    released between chunks instead of held for the whole run — concurrent
+    import/analysis workers are not starved.  Recomputation is idempotent, so
+    unlike an all-or-nothing pass a run interrupted after some chunks have
+    committed can simply be re-run: re-processed chunks yield identical values.
     """
 
     async def _run() -> None:
+        from rich.progress import (  # noqa: PLC0415
+            BarColumn,
+            MofNCompleteColumn,
+            Progress,
+            TextColumn,
+        )
         from sqlalchemy import select  # noqa: PLC0415
 
         from snore.database.models import Day  # noqa: PLC0415
+        from snore.database.session import (  # noqa: PLC0415
+            init_database,
+            session_scope,
+        )
+        from snore.database.write_gate import write_gate  # noqa: PLC0415
 
-        async with db_session(db) as session:
-            days = (await session.execute(select(Day))).scalars().all()
-            for day in days:
-                await DayManager.aggregate_day_statistics(day, session)
-            print_success(f"Recomputed {len(days)} day(s) from session statistics")
+        await init_database(str(Path(db).expanduser()) if db else None)
+
+        async with session_scope() as session:
+            day_ids = (
+                (await session.execute(select(Day.id).order_by(Day.id))).scalars().all()
+            )
+
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Recomputing days", total=len(day_ids))
+            for chunk in iter_id_chunks(day_ids):
+                async with write_gate(), session_scope(immediate=True) as session:
+                    days = (
+                        (await session.execute(select(Day).where(Day.id.in_(chunk))))
+                        .scalars()
+                        .all()
+                    )
+                    for day in days:
+                        await DayManager.aggregate_day_statistics(day, session)
+                progress.update(task, advance=len(chunk))
+
+        print_success(f"Recomputed {len(day_ids)} day(s) from session statistics")
 
     asyncio.run(_run())
 

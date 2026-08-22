@@ -2135,10 +2135,20 @@ export interface components {
                 [key: string]: unknown
             } | null
             /**
+             * Machine Ahi
+             * @description Machine-reported AHI (None if no events)
+             */
+            machine_ahi?: number | null
+            /**
              * Machine Events
              * @description Machine-flagged events
              */
             machine_events: components['schemas']['AnalysisEvent'][]
+            /**
+             * Machine Rdi
+             * @description Machine-reported RDI (None if no events)
+             */
+            machine_rdi?: number | null
             /**
              * Mode Results
              * @description Results by detection mode
@@ -4449,6 +4459,8 @@ export interface components {
         SessionStatistics: {
             /** Ahi */
             ahi?: number | null
+            /** Ahi Device */
+            ahi_device?: number | null
             /** Ai */
             ai?: number | null
             /** Amb Humidity Median */
@@ -4461,6 +4473,8 @@ export interface components {
             blow_press_95th?: number | null
             /** Cai */
             cai?: number | null
+            /** Cai Device */
+            cai_device?: number | null
             /** Central Apneas */
             central_apneas?: number | null
             /** Csr Pct */
@@ -4483,6 +4497,8 @@ export interface components {
             flow_limitations?: number | null
             /** Hi */
             hi?: number | null
+            /** Hi Device */
+            hi_device?: number | null
             /** Htube Pow Median */
             htube_pow_median?: number | null
             /** Htube Temp Median */
@@ -4531,6 +4547,8 @@ export interface components {
             mixed_apneas?: number | null
             /** Oai */
             oai?: number | null
+            /** Oai Device */
+            oai_device?: number | null
             /** Obstructive Apneas */
             obstructive_apneas?: number | null
             /** Pressure 95Th */

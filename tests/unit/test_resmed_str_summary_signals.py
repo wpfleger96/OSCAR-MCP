@@ -467,6 +467,64 @@ class TestSpo2MaxGuard:
 
 
 # ---------------------------------------------------------------------------
+# Device-reported indices: STR map retargeting verified end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceIndexMapRetargeting:
+    """Parsing a real STR file routes AHI/OAI/CAI/HI into the ``*_device`` keys.
+
+    This is the end-to-end guard the ``setattr``-based ``TestDeviceIndexColumns``
+    cannot provide: it exercises ``STR_SUMMARY_SIGNALS`` itself, so a regression
+    that retargets these four entries back to ``ahi``/``oai``/``cai``/``hi``
+    (the event-computed columns) makes it fail. The summaries dict must carry
+    the values under the ``*_device`` keys and never under the bare index keys,
+    because ``finalize_statistics`` owns the bare keys and STR must not feed them.
+    """
+
+    def test_ahi_maps_to_ahi_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"AHI": 15.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["ahi_device"] == pytest.approx(15.0, rel=1e-3)
+        assert "ahi" not in summaries[_DATE_0]
+
+    def test_oai_maps_to_oai_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"OAI": 8.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["oai_device"] == pytest.approx(8.0, rel=1e-3)
+        assert "oai" not in summaries[_DATE_0]
+
+    def test_cai_maps_to_cai_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"CAI": 4.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["cai_device"] == pytest.approx(4.0, rel=1e-3)
+        assert "cai" not in summaries[_DATE_0]
+
+    def test_hi_maps_to_hi_device(self, parser, tmp_path):
+        edf = _make_str_edf(tmp_path, {"HI": 3.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        assert summaries[_DATE_0]["hi_device"] == pytest.approx(3.0, rel=1e-3)
+        assert "hi" not in summaries[_DATE_0]
+
+    def test_all_four_indices_land_in_device_columns_together(self, parser, tmp_path):
+        """A single STR file with all four indices routes every one to ``*_device``."""
+        edf = _make_str_edf(tmp_path, {"AHI": 15.0, "OAI": 8.0, "CAI": 4.0, "HI": 3.0})
+        _, summaries = parser._preload_str_file(edf)
+        assert summaries is not None
+        day = summaries[_DATE_0]
+        assert day["ahi_device"] == pytest.approx(15.0, rel=1e-3)
+        assert day["oai_device"] == pytest.approx(8.0, rel=1e-3)
+        assert day["cai_device"] == pytest.approx(4.0, rel=1e-3)
+        assert day["hi_device"] == pytest.approx(3.0, rel=1e-3)
+        # None of the event-computed keys are populated from STR.
+        assert not {"ahi", "oai", "cai", "hi"} & day.keys()
+
+
+# ---------------------------------------------------------------------------
 # Device-reported indices preserved alongside the computed ones
 # ---------------------------------------------------------------------------
 

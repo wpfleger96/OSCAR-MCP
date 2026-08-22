@@ -109,21 +109,70 @@ def test_waveform_coverage_negative_sample_rate_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# No hidden fallback between bases
+# No hidden fallback between bases: foreign kwargs are rejected, not ignored
 # ---------------------------------------------------------------------------
 
 
-def test_mask_on_ignores_span_input():
-    # Known-zero mask-on must stay 0.0 even when a span is also supplied.
-    assert (
+def test_mask_on_rejects_span_input():
+    # A span supplied alongside MASK_ON is a mis-routed kwarg, not a fallback.
+    with pytest.raises(ValueError, match="span_seconds"):
         therapy_hours(
             TherapyHoursBasis.MASK_ON, mask_on_segments=[], span_seconds=7200.0
         )
-        == 0.0
-    )
 
 
-def test_session_span_ignores_mask_on_input():
+def test_session_span_rejects_mask_on_input():
+    with pytest.raises(ValueError, match="mask_on_segments"):
+        therapy_hours(
+            TherapyHoursBasis.SESSION_SPAN,
+            span_seconds=3600.0,
+            mask_on_segments=[(0.0, 3600.0)],
+        )
+
+
+# Every basis paired with each kwarg that belongs to a different basis; a
+# None-valued foreign kwarg is still accepted (it is the parameter default).
+_FOREIGN_KWARGS = {
+    TherapyHoursBasis.MASK_ON: [
+        {"span_seconds": 3600.0},
+        {"sample_count": 36000},
+        {"sample_rate": 10.0},
+    ],
+    TherapyHoursBasis.SESSION_SPAN: [
+        {"mask_on_segments": [(0.0, 3600.0)]},
+        {"sample_count": 36000},
+        {"sample_rate": 10.0},
+    ],
+    TherapyHoursBasis.WAVEFORM_COVERAGE: [
+        {"mask_on_segments": [(0.0, 3600.0)]},
+        {"span_seconds": 3600.0},
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("basis", "foreign_kwarg"),
+    [(basis, kw) for basis, kws in _FOREIGN_KWARGS.items() for kw in kws],
+)
+def test_basis_rejects_foreign_kwarg(basis, foreign_kwarg):
+    (foreign_name,) = foreign_kwarg
+    with pytest.raises(ValueError, match=foreign_name):
+        therapy_hours(basis, **foreign_kwarg)
+
+
+def test_error_names_all_offending_kwargs():
+    with pytest.raises(ValueError, match="sample_count.*sample_rate"):
+        therapy_hours(
+            TherapyHoursBasis.MASK_ON,
+            mask_on_segments=[],
+            sample_count=36000,
+            sample_rate=10.0,
+        )
+
+
+def test_none_valued_foreign_kwarg_is_accepted():
+    # SESSION_SPAN with mask_on_segments=None is fine — None is the default and
+    # signals "not supplied", so it is not treated as a mis-routed argument.
     assert (
         therapy_hours(
             TherapyHoursBasis.SESSION_SPAN,

@@ -29,6 +29,16 @@ class TherapyHoursBasis(StrEnum):
     WAVEFORM_COVERAGE = "waveform_coverage"
 
 
+# The input kwargs each basis derives its denominator from.  A kwarg belonging
+# to any other basis is rejected (see ``therapy_hours``), turning a mis-routed
+# argument into a loud error instead of a silent "unknown" fallback.
+_BASIS_KWARGS: dict[TherapyHoursBasis, frozenset[str]] = {
+    TherapyHoursBasis.MASK_ON: frozenset({"mask_on_segments"}),
+    TherapyHoursBasis.SESSION_SPAN: frozenset({"span_seconds"}),
+    TherapyHoursBasis.WAVEFORM_COVERAGE: frozenset({"sample_count", "sample_rate"}),
+}
+
+
 def therapy_hours(
     basis: TherapyHoursBasis,
     *,
@@ -45,6 +55,13 @@ def therapy_hours(
     ("known-zero") — in particular an empty ``mask_on_segments`` list is
     known-zero and must not be replaced by the session span.
 
+    Each basis owns exactly the kwargs it reads (``MASK_ON`` →
+    ``mask_on_segments``; ``SESSION_SPAN`` → ``span_seconds``;
+    ``WAVEFORM_COVERAGE`` → ``sample_count`` + ``sample_rate``).  Passing a
+    non-``None`` kwarg that belongs to another basis raises ``ValueError``
+    rather than ignoring it, so a mis-routed or mistyped argument fails loudly
+    instead of degrading into the "unknown" fallback.
+
     Args:
         basis: Which measurement to derive the hours from.
         mask_on_segments: ``(start, end)`` pairs in seconds of mask-on wear,
@@ -56,7 +73,26 @@ def therapy_hours(
     Returns:
         The denominator in hours, or ``None`` when the requested basis's
         inputs are absent (or ``sample_rate <= 0`` for ``WAVEFORM_COVERAGE``).
+
+    Raises:
+        ValueError: If any kwarg not belonging to ``basis`` is not ``None``.
     """
+    foreign = sorted(
+        name
+        for name, value in (
+            ("mask_on_segments", mask_on_segments),
+            ("span_seconds", span_seconds),
+            ("sample_count", sample_count),
+            ("sample_rate", sample_rate),
+        )
+        if value is not None and name not in _BASIS_KWARGS[basis]
+    )
+    if foreign:
+        raise ValueError(
+            f"therapy_hours({basis.value}) does not accept "
+            f"{', '.join(foreign)}; those kwargs belong to another basis"
+        )
+
     if basis is TherapyHoursBasis.MASK_ON:
         if mask_on_segments is None:
             return None
