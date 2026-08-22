@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from snore.analysis.calculations import (
     calculate_ahi_trend_direction,
+    calculate_average_ahi,
     calculate_median_ahi,
     calculate_period_statistics,
     calculate_trends,
@@ -116,6 +117,58 @@ class TestCalculateMedianAhi:
         result = calculate_median_ahi(days)
 
         assert result is None
+
+
+class TestCalculateAverageAhi:
+    """Test usage-weighted average AHI calculation."""
+
+    @staticmethod
+    def _day(ahi: float | None, hours: float | None) -> Day:
+        day = Day()
+        day.date = date(2024, 1, 1)
+        day.ahi = ahi
+        day.total_therapy_hours = hours
+        return day
+
+    def test_empty_returns_none(self) -> None:
+        assert calculate_average_ahi([]) is None
+
+    def test_weighted_by_therapy_hours(self) -> None:
+        """A short high-AHI night barely moves the usage-weighted average."""
+        days = [self._day(10.0, 8.0), self._day(40.0, 0.5)]
+
+        result = calculate_average_ahi(days)
+
+        # Weighted: (10*8 + 40*0.5) / 8.5 = 100/8.5 ≈ 11.76, NOT the
+        # unweighted arithmetic mean of 25.0.
+        assert result == pytest.approx(100.0 / 8.5)
+
+    def test_zero_and_none_hour_days_excluded(self) -> None:
+        """Days with hours None or <= 0 drop out entirely."""
+        days = [
+            self._day(10.0, 8.0),
+            self._day(40.0, 0.5),
+            self._day(99.0, 0.0),  # zero hours → excluded
+            self._day(99.0, None),  # None hours → excluded
+        ]
+
+        result = calculate_average_ahi(days)
+
+        assert result == pytest.approx(100.0 / 8.5)
+
+    def test_none_ahi_excluded(self) -> None:
+        """Days without an AHI are excluded from the weighting."""
+        days = [self._day(5.0, 8.0), self._day(None, 8.0)]
+
+        result = calculate_average_ahi(days)
+
+        assert result == pytest.approx(5.0)
+
+    def test_all_none_hours_returns_none(self) -> None:
+        """When no day carries positive therapy hours, result is None."""
+        days = [self._day(5.0, None), self._day(6.0, 0.0)]
+
+        assert calculate_average_ahi(days) is None
 
 
 class TestCalculatePeriodStatistics:

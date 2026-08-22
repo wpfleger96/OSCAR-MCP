@@ -344,6 +344,51 @@ class TestDbStatsCommand:
         assert "Sessions: 0" in result.output
 
 
+class TestDbRecomputeDaysCommand:
+    """Test db recompute-days command."""
+
+    def test_recompute_days_rederives_ahi(
+        self, cli_runner, populated_test_db, db_session
+    ):
+        """recompute-days re-derives Day.ahi from stored session statistics.
+
+        The fixture adds each session's Statistics AFTER day aggregation runs, so
+        every Day.ahi starts NULL; recompute-days must populate it from the now-
+        present Statistics without re-importing raw data.
+        """
+        ahi_before = db_session.execute(
+            text("SELECT ahi FROM days WHERE ahi IS NOT NULL")
+        ).all()
+        assert ahi_before == []
+
+        result = cli_runner.invoke(
+            cli,
+            ["db", "recompute-days", "--db", str(populated_test_db)],
+            input="y\n",
+        )
+
+        assert result.exit_code == 0
+        assert "Recomputed 10 day(s)" in result.output
+
+        db_session.expire_all()
+        ahi_values = db_session.execute(text("SELECT ahi FROM days")).scalars().all()
+        assert len(ahi_values) == 10
+        assert all(v == pytest.approx(5.2) for v in ahi_values)
+
+    def test_recompute_days_empty_database(self, cli_runner, temp_db):
+        """recompute-days on an empty database reports zero days."""
+        asyncio.run(init_database(str(temp_db)))
+
+        result = cli_runner.invoke(
+            cli,
+            ["db", "recompute-days", "--db", str(temp_db)],
+            input="y\n",
+        )
+
+        assert result.exit_code == 0
+        assert "Recomputed 0 day(s)" in result.output
+
+
 class TestSessionListCommand:
     """Test session list command."""
 

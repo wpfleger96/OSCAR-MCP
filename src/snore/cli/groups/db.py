@@ -24,6 +24,7 @@ from snore.cli.display import (
     print_warning,
 )
 from snore.constants import DEFAULT_DATABASE_PATH
+from snore.database.day_manager import DayManager
 from snore.database.models import Base
 from snore.database.session import cleanup_database, init_database, session_scope
 from snore.services.database_service import DatabaseService
@@ -170,6 +171,34 @@ def cleanup_orphans(db: str | None) -> None:
                 print_kv(table, str(count))
         print_success(f"Removed {total} orphaned record(s)")
         console.print("\nTip: run 'snore db vacuum' to reclaim freed space")
+
+    asyncio.run(_run())
+
+
+@db.command("recompute-days")
+@db_option
+@click.confirmation_option(
+    prompt="Re-derive every Day's metrics from stored session statistics?"
+)
+def recompute_days(db: str | None) -> None:
+    """Recompute all Day aggregates from stored session statistics (no reparse).
+
+    Re-runs day aggregation over the ``Statistics`` already stored for each
+    session, refreshing every Day row across all devices and profiles.  Use
+    after an aggregation-formula change (e.g. a new weighting) to update
+    historical Day rows without re-importing raw device data.
+    """
+
+    async def _run() -> None:
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from snore.database.models import Day  # noqa: PLC0415
+
+        async with db_session(db) as session:
+            days = (await session.execute(select(Day))).scalars().all()
+            for day in days:
+                await DayManager.aggregate_day_statistics(day, session)
+            print_success(f"Recomputed {len(days)} day(s) from session statistics")
 
     asyncio.run(_run())
 

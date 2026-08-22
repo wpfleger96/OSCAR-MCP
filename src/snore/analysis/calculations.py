@@ -7,6 +7,7 @@ from statistics import median
 from typing import TYPE_CHECKING, Literal
 
 from snore.database import models
+from snore.utils.stats import weighted_mean
 
 if TYPE_CHECKING:
     from snore.services.schemas import PeriodStatistics
@@ -16,19 +17,25 @@ PeriodType = Literal["day", "week", "month", "6month", "year"]
 
 def calculate_average_ahi(days: list[models.Day]) -> float | None:
     """
-    Calculate average AHI across multiple days.
+    Calculate usage-weighted average AHI across multiple days.
+
+    Each day's AHI is weighted by ``Day.total_therapy_hours`` so nights with
+    more mask-on time count proportionally more.  Days without an AHI, or with
+    no positive therapy hours, are excluded.
 
     Args:
         days: List of Day records
 
     Returns:
-        Average AHI or None if no data
+        Usage-weighted average AHI or None if no qualifying data
     """
-    ahi_values = [day.ahi for day in days if day.ahi is not None]
-    if not ahi_values:
-        return None
-
-    return sum(ahi_values) / len(ahi_values)
+    return weighted_mean(
+        (day.ahi, day.total_therapy_hours)
+        for day in days
+        if day.ahi is not None
+        and day.total_therapy_hours is not None
+        and day.total_therapy_hours > 0
+    )
 
 
 def calculate_average_hours_per_day(days: list[models.Day]) -> float:
@@ -80,6 +87,10 @@ def assess_therapy_effectiveness(avg_ahi: float | None) -> str:
 def calculate_median_ahi(days: list[models.Day]) -> float | None:
     """
     Calculate median AHI across multiple days.
+
+    The median is intentionally unweighted: it reports the middle night, giving
+    each day equal footing regardless of usage hours (unlike the usage-weighted
+    ``calculate_average_ahi``).
 
     Args:
         days: List of Day records
@@ -228,7 +239,13 @@ def calculate_period_statistics(
         avg_ahi = calculate_average_ahi(days_in_period)
         median_ahi = calculate_median_ahi(days_in_period)
 
-        avg_pressure = _field_avg(days_in_period, "pressure_median")
+        avg_pressure = weighted_mean(
+            (day.pressure_median, day.total_therapy_hours)
+            for day in days_in_period
+            if day.pressure_median is not None
+            and day.total_therapy_hours is not None
+            and day.total_therapy_hours > 0
+        )
         avg_leak = _field_avg(days_in_period, "leak_median")
         avg_spo2 = _field_avg(days_in_period, "spo2_mean")
 

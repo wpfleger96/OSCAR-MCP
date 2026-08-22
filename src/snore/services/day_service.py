@@ -127,7 +127,7 @@ class DayService(ProfileScopedService):
         )
 
         # Identity copies: Day metric columns that DayDetail exposes under the
-        # same name.  Columns DayDetail renames (pressure_mean → avg_pressure,
+        # same name.  Columns DayDetail renames (pressure_median → avg_pressure,
         # leak_median → avg_leak, spo2_mean → avg_spo2) are not DayDetail
         # fields, so the membership test skips them; they are passed explicitly.
         stat_fields = {
@@ -142,7 +142,7 @@ class DayService(ProfileScopedService):
             oai=day.oai,
             cai=day.cai,
             hi=day.hi,
-            avg_pressure=day.pressure_mean,
+            avg_pressure=day.pressure_median,
             avg_leak=day.leak_median,
             avg_spo2=day.spo2_mean,
             obstructive_apneas=day.obstructive_apneas or 0,

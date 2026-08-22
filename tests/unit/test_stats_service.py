@@ -80,7 +80,8 @@ class TestStatsService:
         assert summary.days_with_data == 2
         assert summary.total_hours == 15.0
         assert summary.avg_hours == 7.5
-        assert summary.avg_ahi == 2.75
+        # Usage-weighted by total_therapy_hours: (2.5*8 + 3.0*7) / 15 = 41/15.
+        assert summary.avg_ahi == pytest.approx(41.0 / 15.0)
         assert summary.effectiveness == "excellent"
         assert summary.first_date == day1.date
         assert summary.last_date == day2.date
@@ -257,7 +258,7 @@ class TestStatsService:
         assert worst_ahi[1] == 5.0
 
     async def test_pressure_aggregates(self, async_db_session, async_test_device):
-        """Pressure min/max/avg computed correctly from Day.pressure_median."""
+        """Pressure avg is usage-weighted from Day.pressure_median; min/max unweighted."""
         today = date.today()
         await _create_day_with_session(
             async_db_session,
@@ -289,7 +290,8 @@ class TestStatsService:
 
         assert summary is not None
         assert summary.avg_pressure is not None
-        assert abs(summary.avg_pressure - 10.33) < 0.1
+        # Usage-weighted: (10*8 + 12*7 + 9*7.5) / (8+7+7.5) = 231.5/22.5.
+        assert summary.avg_pressure == pytest.approx(231.5 / 22.5)
         assert summary.min_pressure == 9.0
         assert summary.max_pressure == 12.0
 
@@ -320,8 +322,61 @@ class TestStatsService:
 
         assert summary is not None
         assert summary.avg_spo2 is not None
-        assert abs(summary.avg_spo2 - 95.5) < 0.1
+        # Usage-weighted: (96*8 + 95*7) / 15 = 1433/15.
+        assert summary.avg_spo2 == pytest.approx(1433.0 / 15.0)
         assert summary.min_spo2 == 88
+
+    async def test_leak_avg_usage_weighted(self, async_db_session, async_test_device):
+        """avg_leak weights each day's leak_median by total_therapy_hours."""
+        today = date.today()
+        await _create_day_with_session(
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=1),
+            duration_hours=8.0,
+            leak_median=10.0,
+        )
+        await _create_day_with_session(
+            async_db_session,
+            async_test_device,
+            today,
+            duration_hours=2.0,
+            leak_median=30.0,
+        )
+
+        service = StatsService(async_db_session, profile_id=1)
+        summary = await service.get_summary()
+
+        assert summary is not None
+        # Weighted (10*8 + 30*2)/10 = 14.0, NOT the arithmetic mean 20.0.
+        assert summary.avg_leak == pytest.approx(14.0)
+
+    async def test_zero_hour_day_excluded_from_weighted_means(
+        self, async_db_session, async_test_device
+    ):
+        """A day with total_therapy_hours == 0 drops out of the weighted means."""
+        today = date.today()
+        await _create_day_with_session(
+            async_db_session,
+            async_test_device,
+            today - timedelta(days=1),
+            duration_hours=6.0,
+            pressure_median=11.0,
+        )
+        # Zero-hour day carries an extreme pressure that must not shift the mean.
+        await _create_day_with_session(
+            async_db_session,
+            async_test_device,
+            today,
+            duration_hours=0.0,
+            pressure_median=99.0,
+        )
+
+        service = StatsService(async_db_session, profile_id=1)
+        summary = await service.get_summary()
+
+        assert summary is not None
+        assert summary.avg_pressure == pytest.approx(11.0)
 
 
 class TestChunkedIdBinds:
