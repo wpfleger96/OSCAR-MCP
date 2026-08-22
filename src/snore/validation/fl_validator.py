@@ -40,6 +40,7 @@ from snore.validation.fl_report import (
     FlSessionValidation,
     FlValidationReport,
 )
+from snore.validation.session_scoping import work_session
 from snore.validation.stats import mean_or_none, spearman_or_none
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,12 @@ def _percentile95(arr: np.ndarray) -> float | None:
 class FlowLimitationValidator:
     """Validates SNORE's FL metrics against the device's FLG waveform signal."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self._db = db_session
+    def __init__(self, db_session: AsyncSession | None, profile_id: int) -> None:
+        # None → JOB mode: work_session opens a fresh short scope per session so
+        # the WAL read snapshot is released between sessions.  A real session →
+        # shared mode: every unit of work runs on it, one transaction, as before.
+        self._injected = db_session
+        self._db: AsyncSession = db_session  # type: ignore[assignment]
         self._profile_id = profile_id
 
     async def validate_date_range(
@@ -100,13 +105,17 @@ class FlowLimitationValidator:
             .order_by(models.Session.start_time)
         )
 
-        sessions = (await self._db.execute(stmt)).scalars().all()
+        async with work_session(self._injected) as db:
+            self._db = db
+            sessions = (await db.execute(stmt)).scalars().all()
         logger.info(f"Found {len(sessions)} sessions between {date_from} and {date_to}")
 
         session_results: list[FlSessionValidation] = []
         for session in sessions:
             try:
-                result = await self._validate_session(session)
+                async with work_session(self._injected) as db:
+                    self._db = db
+                    result = await self._validate_session(session)
                 session_results.append(result)
             except Exception as e:
                 logger.warning(f"Failed to validate session {session.id}: {e}")
