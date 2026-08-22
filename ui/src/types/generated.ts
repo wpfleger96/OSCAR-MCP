@@ -1926,6 +1926,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/validate/rera': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Rera Validation */
+        post: operations['run_rera_validation_api_v1_validate_rera_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -4348,6 +4365,322 @@ export interface components {
             name?: string | null
             /** Timezone */
             timezone?: string | null
+        }
+        /**
+         * ReraAggregateMetrics
+         * @description Aggregate RERA validation metrics across a date range.
+         */
+        ReraAggregateMetrics: {
+            /**
+             * Amplitude Density
+             * @description Pooled amplitude RERAs per therapy hour
+             */
+            amplitude_density?: number | null
+            /**
+             * Chance Precision Floor
+             * @description Whole-dataset chance-precision floor (density context): machine RE per SECOND over ALL evaluated therapy hours (scored + no-machine-RE sessions) x (2 x match_tolerance_seconds). Most hours carry zero RE, so this reads against the pooled densities. For the scored-session scores below use `scored_chance_precision_floor` instead. Null when no evaluated therapy hours exist.
+             */
+            chance_precision_floor?: number | null
+            /**
+             * Machine Re Density
+             * @description Pooled machine RE per therapy hour
+             */
+            machine_re_density?: number | null
+            /**
+             * Match Tolerance Seconds
+             * @description Start-time tolerance used for machine-RE matching
+             */
+            match_tolerance_seconds: number
+            /**
+             * Mean Amplitude F1
+             * @description Mean amplitude F1 over scored sessions
+             */
+            mean_amplitude_f1?: number | null
+            /**
+             * Mean Amplitude Precision
+             * @description Mean amplitude precision over scored sessions
+             */
+            mean_amplitude_precision?: number | null
+            /**
+             * Mean Amplitude Sensitivity
+             * @description Mean amplitude sensitivity over scored sessions
+             */
+            mean_amplitude_sensitivity?: number | null
+            /**
+             * Mean Proxy F1
+             * @description Mean FL-run-proxy F1 over scored sessions
+             */
+            mean_proxy_f1?: number | null
+            /**
+             * Mean Proxy Precision
+             * @description Mean FL-run-proxy precision over scored sessions
+             */
+            mean_proxy_precision?: number | null
+            /**
+             * Mean Proxy Sensitivity
+             * @description Mean FL-run-proxy sensitivity over scored sessions
+             */
+            mean_proxy_sensitivity?: number | null
+            /**
+             * Pooled Amplitude Precision
+             * @description Pooled amplitude precision over scored sessions (total matched / total amplitude RERAs), not a per-session mean
+             */
+            pooled_amplitude_precision?: number | null
+            /**
+             * Pooled Amplitude Sensitivity
+             * @description Pooled amplitude sensitivity over scored sessions (total matched / total machine RE), not a per-session mean
+             */
+            pooled_amplitude_sensitivity?: number | null
+            /**
+             * Pooled Proxy Precision
+             * @description Pooled FL-run-proxy precision over scored sessions (total matched / total proxy RERAs), not a per-session mean
+             */
+            pooled_proxy_precision?: number | null
+            /**
+             * Pooled Proxy Sensitivity
+             * @description Pooled FL-run-proxy sensitivity over scored sessions (total matched / total machine RE), not a per-session mean
+             */
+            pooled_proxy_sensitivity?: number | null
+            /**
+             * Proxy Density
+             * @description Pooled FL-run-proxy RERAs per therapy hour
+             */
+            proxy_density?: number | null
+            /**
+             * Scored Chance Precision Floor
+             * @description Scored-population chance-precision floor: machine RE per SECOND over scored-session hours only x (2 x match_tolerance_seconds). Scored sessions carry far more RE than the dataset average, so this is the honest baseline to compare the precision/sensitivity below against. Null when no scored therapy hours exist.
+             */
+            scored_chance_precision_floor?: number | null
+            /**
+             * Sessions Skipped Error
+             * @description Sessions skipped: unhandled error during validation
+             */
+            sessions_skipped_error: number
+            /**
+             * Sessions Skipped No Analysis
+             * @description Sessions skipped: no completed analysis result
+             */
+            sessions_skipped_no_analysis: number
+            /**
+             * Sessions Skipped No Machine Re
+             * @description Sessions skipped: device flagged zero RE (dominant case)
+             */
+            sessions_skipped_no_machine_re: number
+            /**
+             * Sessions Skipped No Valid Breaths
+             * @description Sessions skipped: analysis present but no stored breaths
+             */
+            sessions_skipped_no_valid_breaths: number
+            /**
+             * Sessions With Machine Re
+             * @description Sessions the device flagged >= 1 RE — the scored population
+             */
+            sessions_with_machine_re: number
+            /**
+             * Total Amplitude Reras
+             * @description Total amplitude-detector RERAs
+             */
+            total_amplitude_reras: number
+            /**
+             * Total Machine Re
+             * @description Total machine RE across all sessions
+             */
+            total_machine_re: number
+            /**
+             * Total Proxy Reras
+             * @description Total FL-run-proxy RERAs
+             */
+            total_proxy_reras: number
+            /**
+             * Total Sessions
+             * @description Sessions in the requested range
+             */
+            total_sessions: number
+        }
+        /**
+         * ReraSessionValidation
+         * @description RERA validation results for a single session (possibly skipped).
+         */
+        ReraSessionValidation: {
+            /**
+             * Amplitude Density
+             * @description Amplitude RERAs per therapy hour
+             */
+            amplitude_density?: number | null
+            /**
+             * Amplitude Density Reason
+             * @description Why amplitude_density is null
+             */
+            amplitude_density_reason?: string | null
+            /**
+             * Amplitude F1
+             * @description Amplitude-RERA F1 vs machine RE
+             */
+            amplitude_f1?: number | null
+            /**
+             * Amplitude F1 Reason
+             * @description Why amplitude_f1 is null
+             */
+            amplitude_f1_reason?: string | null
+            /**
+             * Amplitude Matched
+             * @description Amplitude RERAs matched to a machine RE event (scored sessions only; null when the session was skipped)
+             */
+            amplitude_matched?: number | null
+            /**
+             * Amplitude Precision
+             * @description Amplitude-RERA precision vs machine RE (matched / amplitude RERAs)
+             */
+            amplitude_precision?: number | null
+            /**
+             * Amplitude Precision Reason
+             * @description Why amplitude_precision is null
+             */
+            amplitude_precision_reason?: string | null
+            /**
+             * Amplitude Rera Count
+             * @description Amplitude-detector RERAs (mode_result.reras)
+             * @default 0
+             */
+            amplitude_rera_count: number
+            /**
+             * Amplitude Sensitivity
+             * @description Amplitude-RERA recall vs machine RE (matched / machine RE)
+             */
+            amplitude_sensitivity?: number | null
+            /**
+             * Amplitude Sensitivity Reason
+             * @description Why amplitude_sensitivity is null
+             */
+            amplitude_sensitivity_reason?: string | null
+            /**
+             * Date
+             * @description Session date (YYYY-MM-DD)
+             */
+            date: string
+            /**
+             * Duration Hours
+             * @description Session duration in hours
+             */
+            duration_hours: number
+            /**
+             * Machine Re Count
+             * @description Machine-flagged RE (RERA) events for this session
+             * @default 0
+             */
+            machine_re_count: number
+            /**
+             * Machine Re Density
+             * @description Machine RE events per therapy hour
+             */
+            machine_re_density?: number | null
+            /**
+             * Machine Re Density Reason
+             * @description Why machine_re_density is null
+             */
+            machine_re_density_reason?: string | null
+            /**
+             * Proxy Density
+             * @description FL-run-proxy RERAs per therapy hour
+             */
+            proxy_density?: number | null
+            /**
+             * Proxy Density Reason
+             * @description Why proxy_density is null
+             */
+            proxy_density_reason?: string | null
+            /**
+             * Proxy F1
+             * @description FL-run-proxy F1 vs machine RE
+             */
+            proxy_f1?: number | null
+            /**
+             * Proxy F1 Reason
+             * @description Why proxy_f1 is null
+             */
+            proxy_f1_reason?: string | null
+            /**
+             * Proxy Matched
+             * @description FL-run-proxy RERAs matched to a machine RE event (scored sessions only; null when the session was skipped)
+             */
+            proxy_matched?: number | null
+            /**
+             * Proxy Precision
+             * @description FL-run-proxy precision vs machine RE (matched / proxy RERAs)
+             */
+            proxy_precision?: number | null
+            /**
+             * Proxy Precision Reason
+             * @description Why proxy_precision is null
+             */
+            proxy_precision_reason?: string | null
+            /**
+             * Proxy Rera Count
+             * @description FL-run proxy RERAs recomputed from stored breaths
+             * @default 0
+             */
+            proxy_rera_count: number
+            /**
+             * Proxy Sensitivity
+             * @description FL-run-proxy recall vs machine RE (matched / machine RE)
+             */
+            proxy_sensitivity?: number | null
+            /**
+             * Proxy Sensitivity Reason
+             * @description Why proxy_sensitivity is null
+             */
+            proxy_sensitivity_reason?: string | null
+            /**
+             * Session Id
+             * @description Database session ID
+             */
+            session_id: number
+            /**
+             * Skipped Reason
+             * @description Why this session was excluded from the sensitivity/precision aggregates. Possible values: 'no_machine_re_events' — the device flagged zero RE events (the dominant case; counts/densities are still reported); 'no_analysis' — no completed (OK-status) analysis result; 'no_valid_breaths' — analysis present but no stored breath rows; 'error' — unhandled exception during session validation; None — session was fully scored against machine RE.
+             */
+            skipped_reason?: string | null
+        }
+        /**
+         * ReraValidationReport
+         * @description Complete RERA validation report.
+         */
+        ReraValidationReport: {
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['ReraAggregateMetrics']
+            /**
+             * Date Range End
+             * @description End date of the requested range
+             */
+            date_range_end: string
+            /**
+             * Date Range Start
+             * @description Start date of the requested range
+             */
+            date_range_start: string
+            /**
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             */
+            report_date: string
+            /**
+             * Sessions
+             * @description Per-session results
+             */
+            sessions: components['schemas']['ReraSessionValidation'][]
+        }
+        /** ReraValidationRequest */
+        ReraValidationRequest: {
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
         }
         /** RescanRequest */
         RescanRequest: {
@@ -8154,6 +8487,39 @@ export interface operations {
                 }
                 content: {
                     'application/json': components['schemas']['FlValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_rera_validation_api_v1_validate_rera_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['ReraValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ReraValidationReport']
                 }
             }
             /** @description Validation Error */

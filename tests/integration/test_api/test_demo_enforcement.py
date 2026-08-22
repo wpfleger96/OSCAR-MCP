@@ -46,6 +46,7 @@ DEMO_ALLOWED_MUTATING = {
     "POST /api/v1/validate/fl",
     "POST /api/v1/validate/breaths",
     "POST /api/v1/validate/apple",
+    "POST /api/v1/validate/rera",
     # Local-only route: protected by require_local_only (→ 403 in multiuser
     # where demo users actually live). In local mode (test default) it passes
     # require_local_only but demo users don't exist in practice.

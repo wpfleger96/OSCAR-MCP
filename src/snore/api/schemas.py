@@ -42,6 +42,7 @@ __all__ = [
     "AnalysisDeleteRequest",
     "BatchAnalysisRequest",
     "ValidationRequest",
+    "DateRangeValidationRequest",
     "FlValidationRequest",
     "BreathTrendsValidationRequest",
     "ReraValidationRequest",
@@ -172,37 +173,29 @@ class ValidationRequest(BaseModel):
     mode: AnalysisMode = "aasm"
 
 
-class FlValidationRequest(BaseModel):
+class DateRangeValidationRequest(BaseModel):
+    """Shared base for signal-validation requests over a ``[from_date, to_date]`` range."""
+
     from_date: date
     to_date: date
 
     @model_validator(mode="after")
-    def validate_date_order(self) -> FlValidationRequest:
+    def validate_date_order(self) -> DateRangeValidationRequest:
         if self.to_date < self.from_date:
             raise ValueError("to_date must be >= from_date")
         return self
 
 
-class BreathTrendsValidationRequest(BaseModel):
-    from_date: date
-    to_date: date
-
-    @model_validator(mode="after")
-    def validate_date_order(self) -> BreathTrendsValidationRequest:
-        if self.to_date < self.from_date:
-            raise ValueError("to_date must be >= from_date")
-        return self
+class FlValidationRequest(DateRangeValidationRequest):
+    pass
 
 
-class ReraValidationRequest(BaseModel):
-    from_date: date
-    to_date: date
+class BreathTrendsValidationRequest(DateRangeValidationRequest):
+    pass
 
-    @model_validator(mode="after")
-    def validate_date_order(self) -> ReraValidationRequest:
-        if self.to_date < self.from_date:
-            raise ValueError("to_date must be >= from_date")
-        return self
+
+class ReraValidationRequest(DateRangeValidationRequest):
+    pass
 
 
 # Apple cross-validation walks its calendar span in 90-night pages in the

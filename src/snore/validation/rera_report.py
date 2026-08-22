@@ -59,6 +59,20 @@ class ReraSessionValidation(BaseModel):
     proxy_rera_count: int = Field(
         default=0, description="FL-run proxy RERAs recomputed from stored breaths"
     )
+    amplitude_matched: int | None = Field(
+        default=None,
+        description=(
+            "Amplitude RERAs matched to a machine RE event (scored sessions "
+            "only; null when the session was skipped)"
+        ),
+    )
+    proxy_matched: int | None = Field(
+        default=None,
+        description=(
+            "FL-run-proxy RERAs matched to a machine RE event (scored sessions "
+            "only; null when the session was skipped)"
+        ),
+    )
     machine_re_density: float | None = Field(
         default=None, description="Machine RE events per therapy hour"
     )
@@ -156,10 +170,22 @@ class ReraAggregateMetrics(BaseModel):
     chance_precision_floor: float | None = Field(
         default=None,
         description=(
-            "Precision a random detector would reach by chance: pooled machine "
-            "RE per SECOND x (2 x match_tolerance_seconds). Near-zero measured "
-            "precision at or below this floor is context, not signal. Null when "
-            "no scored therapy hours exist."
+            "Whole-dataset chance-precision floor (density context): machine RE "
+            "per SECOND over ALL evaluated therapy hours (scored + no-machine-RE "
+            "sessions) x (2 x match_tolerance_seconds). Most hours carry zero RE, "
+            "so this reads against the pooled densities. For the scored-session "
+            "scores below use `scored_chance_precision_floor` instead. Null when "
+            "no evaluated therapy hours exist."
+        ),
+    )
+    scored_chance_precision_floor: float | None = Field(
+        default=None,
+        description=(
+            "Scored-population chance-precision floor: machine RE per SECOND over "
+            "scored-session hours only x (2 x match_tolerance_seconds). Scored "
+            "sessions carry far more RE than the dataset average, so this is the "
+            "honest baseline to compare the precision/sensitivity below against. "
+            "Null when no scored therapy hours exist."
         ),
     )
     mean_amplitude_sensitivity: float | None = Field(
@@ -179,6 +205,34 @@ class ReraAggregateMetrics(BaseModel):
     )
     mean_proxy_f1: float | None = Field(
         default=None, description="Mean FL-run-proxy F1 over scored sessions"
+    )
+    pooled_amplitude_sensitivity: float | None = Field(
+        default=None,
+        description=(
+            "Pooled amplitude sensitivity over scored sessions "
+            "(total matched / total machine RE), not a per-session mean"
+        ),
+    )
+    pooled_amplitude_precision: float | None = Field(
+        default=None,
+        description=(
+            "Pooled amplitude precision over scored sessions "
+            "(total matched / total amplitude RERAs), not a per-session mean"
+        ),
+    )
+    pooled_proxy_sensitivity: float | None = Field(
+        default=None,
+        description=(
+            "Pooled FL-run-proxy sensitivity over scored sessions "
+            "(total matched / total machine RE), not a per-session mean"
+        ),
+    )
+    pooled_proxy_precision: float | None = Field(
+        default=None,
+        description=(
+            "Pooled FL-run-proxy precision over scored sessions "
+            "(total matched / total proxy RERAs), not a per-session mean"
+        ),
     )
 
 
@@ -211,6 +265,8 @@ def export_rera_report_csv(report: ReraValidationReport, output_path: Path) -> N
         "machine_re_count",
         "amplitude_rera_count",
         "proxy_rera_count",
+        "amplitude_matched",
+        "proxy_matched",
         "machine_re_density",
         "amplitude_sensitivity",
         "amplitude_precision",
@@ -227,6 +283,10 @@ def export_rera_report_csv(report: ReraValidationReport, output_path: Path) -> N
         # must not be rounded away in the data export.
         return "" if v is None else repr(v)
 
+    def _fmt_int(v: int | None) -> str:
+        # Matched counts are null for skipped sessions; keep the cell empty.
+        return "" if v is None else str(v)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -241,6 +301,8 @@ def export_rera_report_csv(report: ReraValidationReport, output_path: Path) -> N
                     "machine_re_count": s.machine_re_count,
                     "amplitude_rera_count": s.amplitude_rera_count,
                     "proxy_rera_count": s.proxy_rera_count,
+                    "amplitude_matched": _fmt_int(s.amplitude_matched),
+                    "proxy_matched": _fmt_int(s.proxy_matched),
                     "machine_re_density": _fmt(s.machine_re_density),
                     "amplitude_sensitivity": _fmt(s.amplitude_sensitivity),
                     "amplitude_precision": _fmt(s.amplitude_precision),

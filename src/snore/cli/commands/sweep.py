@@ -18,7 +18,6 @@ import click
 
 from rich.table import Table
 
-from snore.cli.commands.validate_rera import _fmt_sig
 from snore.cli.decorators import (
     actor_options,
     date_range_options_required,
@@ -27,7 +26,7 @@ from snore.cli.decorators import (
 from snore.cli.decorators import (
     db_session as open_db_session,
 )
-from snore.cli.display import console, err_console
+from snore.cli.display import console, err_console, fmt_sig
 from snore.validation.sweep import SweepResult
 
 
@@ -64,7 +63,7 @@ def _fmt(v: float | int | None) -> str:
         return str(v)
     if isinstance(v, int):
         return str(v)
-    return _fmt_sig(v, na="N/A")
+    return fmt_sig(v, na="N/A")
 
 
 def _render_table(result: SweepResult, top: int) -> None:
