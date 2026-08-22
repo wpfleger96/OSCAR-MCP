@@ -18,6 +18,7 @@ import click
 
 from rich.table import Table
 
+from snore.cli.commands.validate_rera import _fmt_sig
 from snore.cli.decorators import (
     actor_options,
     date_range_options_required,
@@ -54,11 +55,16 @@ _OPTION_TO_KNOB = {
 
 
 def _fmt(v: float | int | None) -> str:
+    """Format a cell; floats use adaptive significant digits so tiny magnitudes
+    (the chance floor ~4e-5, precision ~1e-3) stay visible instead of collapsing
+    to ``0.0000``.  Integers render plainly (no scientific notation)."""
     if v is None:
         return "N/A"
-    if isinstance(v, float):
-        return f"{v:.4f}"
-    return str(v)
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, int):
+        return str(v)
+    return _fmt_sig(v, na="N/A")
 
 
 def _render_table(result: SweepResult, top: int) -> None:
