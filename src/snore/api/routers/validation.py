@@ -7,6 +7,7 @@ from snore.api.schemas import (
     AppleCrossValidationRequest,
     BreathTrendsValidationRequest,
     FlValidationRequest,
+    ReraValidationRequest,
     ValidationRequest,
 )
 from snore.services.breath.dtos import DeviceNotOwnedError
@@ -18,6 +19,8 @@ from snore.validation import (
     BreathTrendsValidator,
     FlowLimitationValidator,
     FlValidationReport,
+    ReraValidationReport,
+    ReraValidator,
     ValidationReport,
 )
 
@@ -68,6 +71,19 @@ async def run_apple_cross_validation(
         raise HTTPException(
             status_code=404, detail="device_id not found for this profile"
         ) from exc
+
+
+@router.post("/rera", response_model=ReraValidationReport)
+async def run_rera_validation(
+    body: ReraValidationRequest,
+    actor: RequireAuth,
+    db: AsyncSession = Depends(get_db),
+) -> ReraValidationReport:
+    validator = ReraValidator(db, actor.profile_id)
+    return await validator.validate_date_range(
+        date_from=body.from_date.isoformat(),
+        date_to=body.to_date.isoformat(),
+    )
 
 
 @router.post("/breaths", response_model=BreathTrendsValidationReport)

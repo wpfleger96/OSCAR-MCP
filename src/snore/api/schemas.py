@@ -44,6 +44,7 @@ __all__ = [
     "ValidationRequest",
     "FlValidationRequest",
     "BreathTrendsValidationRequest",
+    "ReraValidationRequest",
     "EventItem",
     "DayDetail",
     "DayListItem",
@@ -214,6 +215,17 @@ class AppleCrossValidationRequest(BaseModel):
                 f"Date range spans {span_nights} nights; the maximum is "
                 f"{_APPLE_CROSS_MAX_SPAN_NIGHTS}. Narrow the range."
             )
+        return self
+
+
+class ReraValidationRequest(BaseModel):
+    from_date: date
+    to_date: date
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> ReraValidationRequest:
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be >= from_date")
         return self
 
 
