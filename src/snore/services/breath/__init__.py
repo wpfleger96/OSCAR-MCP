@@ -26,12 +26,12 @@ from .algorithms import (
     _extract_window_mean as _extract_window_mean,
 )
 from .algorithms import (
-    _iter_fl_run_recoveries as _iter_fl_run_recoveries,
-)
-from .algorithms import (
     compute_ca_analysis,
     compute_waveform_window,
     derive_mv_from_flow,
+)
+from .algorithms import (
+    iter_fl_run_recoveries as iter_fl_run_recoveries,
 )
 from .capabilities import CapabilitiesMixin
 from .dtos import (

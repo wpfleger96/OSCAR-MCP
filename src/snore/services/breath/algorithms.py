@@ -110,7 +110,7 @@ def compute_waveform_window(raw: RawWaveformWindow) -> WaveformWindow:
 # ---------------------------------------------------------------------------
 
 
-def _iter_fl_run_recoveries(
+def iter_fl_run_recoveries(
     breath_rows: Sequence[Any],
     *,
     fl_class_threshold: int = RERAProxyConstants.FL_CLASS_THRESHOLD,
@@ -180,7 +180,7 @@ def _count_fl_run_reras(
     """Count RERA-proxy events: FL runs ending in a recovery breath."""
     return sum(
         1
-        for _ in _iter_fl_run_recoveries(
+        for _ in iter_fl_run_recoveries(
             breath_rows,
             fl_class_threshold=fl_class_threshold,
             min_fl_run_length=min_fl_run_length,

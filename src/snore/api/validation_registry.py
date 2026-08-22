@@ -14,11 +14,17 @@ the persistence layer needs and nothing else:
 - ``mode``           — JOB (queued background run) or SYNC (computed inline in
                        the POST, row written straight to SUCCEEDED).
 
-Registering a new validator (e.g. ``rera``, ``apple``) is ONE additive change:
-import its ``run``/``current_params`` and add a single ``register(...)`` call at
-the bottom of this module.  Nothing else in the persistence/jobs/API layer needs
-to change — unregistered types in ``VALIDATOR_TYPES`` are accepted by the request
-schema but rejected with a clear 400 until their spec is registered here.
+All five request-accepted validator types (``events``/``fl``/``breaths``/
+``rera``/``apple``) are registered at the bottom of this module.  The set of
+accepted types is the ``ValidatorType`` Literal in ``schemas.py`` — the single
+source of truth :func:`registered_types` is checked against.
+
+Registering a new validator is ONE additive change: add its value to that
+Literal, then import its ``run``/``current_params`` and add a single
+``register(...)`` call here.  Nothing else in the persistence/jobs/API layer
+needs to change.  Until that ``register(...)`` call is added, a run request for
+the new type is accepted by the request schema but rejected by the handler with
+a clear 400 (:func:`get_spec` returns None).
 """
 
 from __future__ import annotations
@@ -32,12 +38,6 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from sqlalchemy.ext.asyncio import AsyncSession
 
-# Request-accepted validator types.  ``events``/``fl``/``breaths`` are registered
-# below; ``rera``/``apple`` are accepted here so the request schema and DB CHECK
-# admit them, but stay UNREGISTERED (their sibling validators land separately) —
-# a run request for them returns a clear 400 until ``register(...)`` is added.
-VALIDATOR_TYPES: tuple[str, ...] = ("events", "fl", "breaths", "rera", "apple")
-
 
 class RunMode(StrEnum):
     """How a validator's run is executed and persisted."""
@@ -46,9 +46,11 @@ class RunMode(StrEnum):
     SYNC = "sync"  # Computed inline in the POST; row written state=succeeded.
 
 
-# (db, profile_id, date_from_iso, date_to_iso, params) -> report model
+# (db, profile_id, date_from_iso, date_to_iso, params) -> report model.  ``db``
+# is None for JOB runs (the validator opens its own short per-session scopes so
+# no read snapshot spans the run) and the request session for SYNC runs.
 RunFn = Callable[
-    ["AsyncSession", int, str, str, dict[str, Any]], "Awaitable[BaseModel]"
+    ["AsyncSession | None", int, str, str, dict[str, Any]], "Awaitable[BaseModel]"
 ]
 # (request_params | None) -> the canonical params dict for the dedup key
 ParamsFn = Callable[[dict[str, Any] | None], dict[str, Any]]
@@ -87,7 +89,11 @@ def engine_identity() -> dict[str, Any]:
     """
     from snore.analysis.shared.versioning import AlgorithmIdentity  # noqa: PLC0415
 
-    return AlgorithmIdentity.current().model_dump()
+    # mode="json" so the identity serialises exactly as it is stored in
+    # engine_identity_json — a future enum/datetime field would otherwise make
+    # the stored (JSON) value and this (Python) value compare unequal forever,
+    # silently disabling dedup.
+    return AlgorithmIdentity.current().model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +102,7 @@ def engine_identity() -> dict[str, Any]:
 
 
 async def _run_events(
-    db: AsyncSession,
+    db: AsyncSession | None,
     profile_id: int,
     date_from: str,
     date_to: str,
@@ -121,7 +127,7 @@ def _params_events(request_params: dict[str, Any] | None) -> dict[str, Any]:
 
 
 async def _run_fl(
-    db: AsyncSession,
+    db: AsyncSession | None,
     profile_id: int,
     date_from: str,
     date_to: str,
@@ -150,7 +156,7 @@ def _params_fl(request_params: dict[str, Any] | None) -> dict[str, Any]:
 
 
 async def _run_breaths(
-    db: AsyncSession,
+    db: AsyncSession | None,
     profile_id: int,
     date_from: str,
     date_to: str,
@@ -176,7 +182,7 @@ def _params_breaths(request_params: dict[str, Any] | None) -> dict[str, Any]:
 
 
 async def _run_rera(
-    db: AsyncSession,
+    db: AsyncSession | None,
     profile_id: int,
     date_from: str,
     date_to: str,
@@ -217,7 +223,7 @@ def _params_rera(request_params: dict[str, Any] | None) -> dict[str, Any]:
 
 
 async def _run_apple(
-    db: AsyncSession,
+    db: AsyncSession | None,
     profile_id: int,
     date_from: str,
     date_to: str,
@@ -225,6 +231,9 @@ async def _run_apple(
 ) -> BaseModel:
     from snore.validation import AppleCrossValidator  # noqa: PLC0415
 
+    # apple is SYNC: it only ever runs inline in the POST, always with the
+    # request session — never the None the JOB path passes.
+    assert db is not None, "apple validation requires an active session"
     device_id = params.get("device_id")
     return await AppleCrossValidator(db, profile_id).validate_date_range(
         date_from=date_from,
@@ -244,9 +253,18 @@ def _params_apple(request_params: dict[str, Any] | None) -> dict[str, Any]:
     # degrade to device_ambiguous), so a pinned run must not dedup onto an
     # unpinned one.  Include device_id only when supplied — omitting it keeps
     # the key identical to the pre-pinning behavior for the common case.
+    #
+    # Coerce here (not in the run path) so a non-integer device_id fails as a
+    # clean request error before anything is enqueued, rather than raising deep
+    # in the run and surfacing as a 500.
     device_id = (request_params or {}).get("device_id")
     if device_id is not None:
-        params["device_id"] = int(device_id)
+        try:
+            params["device_id"] = int(device_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"device_id must be an integer, got {device_id!r}"
+            ) from exc
     return params
 
 

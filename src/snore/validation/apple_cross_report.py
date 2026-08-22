@@ -34,6 +34,10 @@ from pydantic import BaseModel, Field
 
 from snore.validation.stats import spearman_or_none
 
+# Minimum paired nights before Spearman is attempted.  This is a floor for
+# *computability*, not statistical power: near it, the p-value is coarse and
+# floored high (3 pairs → smallest possible two-sided p ≈ 0.33) and rho is only
+# directional.  Treat rho below ~n=5 as a sign, not an effect size.
 _MIN_PAIRS = 3
 
 
@@ -139,10 +143,20 @@ class AppleCrossNightRecord(BaseModel):
 
 
 class AppleCrossAggregate(BaseModel):
-    """Aggregate coverage counters and the four cross-source correlations."""
+    """Aggregate coverage counters and the four cross-source correlations.
+
+    The skip counters below are independent axes over the same nights, not a
+    partition: the SNORE-side counters (``n_analysis_not_run``,
+    ``n_analysis_stale``, ``n_device_ambiguous``) classify why a night's SNORE
+    indices are unusable, while the Apple-side ``n_skipped_no_apple_bd`` counts
+    nights lacking an Apple breathing-disturbance value.  A single night can be
+    counted on both axes, so the counters must not be summed.
+    """
 
     total_nights: int = Field(
-        description="Nights with a SNORE nightly summary in range"
+        description=(
+            "Nights carrying SNORE sessions in range (resolved + device-ambiguous)"
+        )
     )
     n_analysis_not_run: int = Field(
         description="Nights skipped: SNORE analysis never ran"
@@ -154,7 +168,10 @@ class AppleCrossAggregate(BaseModel):
         description="Nights skipped: multiple devices, no device_id pinned"
     )
     n_skipped_no_apple_bd: int = Field(
-        description="Nights with no Apple breathing-disturbance value"
+        description=(
+            "Nights with no Apple breathing-disturbance value (an independent "
+            "axis from the SNORE-side skip counters; do not sum)"
+        )
     )
     n_with_apple_bd: int = Field(
         description="Nights carrying an Apple breathing-disturbance value"

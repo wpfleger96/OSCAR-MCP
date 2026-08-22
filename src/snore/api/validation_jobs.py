@@ -35,8 +35,8 @@ from snore.api.jobs.core import (
     JOB_TTL_SECONDS,
     JobRecordBase,
     JobStore,
-    run_worker_loop,
 )
+from snore.api.jobs.pool import WorkerPool
 
 if TYPE_CHECKING:
     from snore.database.models import ValidationRun
@@ -183,10 +183,6 @@ _all_jobs = _store.jobs
 _lock = _store.lock
 _condition = threading.Condition(_lock)
 
-_worker_threads: list[threading.Thread] = []
-_stop_event: threading.Event | None = None
-_stop_events: list[threading.Event] = []
-
 
 def enqueue(
     *,
@@ -254,6 +250,17 @@ def cancel_job(job_id: str) -> bool:
     return result
 
 
+def forget(job_id: str) -> None:
+    """Drop a job's in-memory twin from the store (used after its row is deleted).
+
+    A terminal job lingers in the store until the TTL reaper removes it (up to
+    ``JOB_TTL_SECONDS``).  When the DELETE handler removes the row, it must also
+    forget the twin, or the merged ``GET /runs`` list would resurrect the just-
+    deleted run from memory.  No-op if the job is already gone.
+    """
+    _store.remove(job_id)
+
+
 def has_running_jobs() -> bool:
     """True if any validation run is currently RUNNING.
 
@@ -276,6 +283,56 @@ def _reap_terminal() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _find_matching_run(
+    db: Any,
+    *,
+    states: list[str],
+    profile_id: int,
+    validator_type: str,
+    date_from: date,
+    date_to: date,
+    engine_identity: dict[str, Any],
+    validator_params: dict[str, Any],
+    owner_user_id: int | None,
+) -> ValidationRun | None:
+    """Return the newest run in one of ``states`` matching the full dedup key.
+
+    The ``(profile_id, validator_type, date_from, date_to)`` prefix is filtered
+    in SQL (backed by ``ix_validation_runs_dedup``); the two JSON components are
+    compared in Python as dicts so key ordering is irrelevant.  Visibility
+    follows the same own-or-unowned rule as the job list.  The report blob is
+    deferred — the dedup comparison never reads it.
+    """
+    from sqlalchemy import or_, select  # noqa: PLC0415
+    from sqlalchemy.orm import defer  # noqa: PLC0415
+
+    from snore.database import models  # noqa: PLC0415
+
+    stmt = (
+        select(models.ValidationRun)
+        .where(
+            models.ValidationRun.profile_id == profile_id,
+            models.ValidationRun.validator_type == validator_type,
+            models.ValidationRun.date_from == date_from,
+            models.ValidationRun.date_to == date_to,
+            models.ValidationRun.state.in_(states),
+            or_(
+                models.ValidationRun.owner_user_id == owner_user_id,
+                models.ValidationRun.owner_user_id.is_(None),
+            ),
+        )
+        .options(defer(models.ValidationRun.report_json))
+        .order_by(models.ValidationRun.created_at.desc())
+    )
+    for row in (await db.execute(stmt)).scalars():
+        if (
+            row.engine_identity_json == engine_identity
+            and row.validator_params_json == validator_params
+        ):
+            return row  # type: ignore[no-any-return]
+    return None
+
+
 async def find_reusable_run(
     db: Any,
     *,
@@ -287,39 +344,47 @@ async def find_reusable_run(
     validator_params: dict[str, Any],
     owner_user_id: int | None,
 ) -> ValidationRun | None:
-    """Return the newest SUCCEEDED run matching the full dedup key, or None.
-
-    The ``(profile_id, validator_type, date_from, date_to)`` prefix is filtered
-    in SQL (backed by ``ix_validation_runs_dedup``); the two JSON components are
-    compared in Python as dicts so key ordering is irrelevant.  Visibility
-    follows the same own-or-unowned rule as the job list.
-    """
-    from sqlalchemy import or_, select  # noqa: PLC0415
-
-    from snore.database import models  # noqa: PLC0415
-
-    stmt = (
-        select(models.ValidationRun)
-        .where(
-            models.ValidationRun.profile_id == profile_id,
-            models.ValidationRun.validator_type == validator_type,
-            models.ValidationRun.date_from == date_from,
-            models.ValidationRun.date_to == date_to,
-            models.ValidationRun.state == ValidationRunState.SUCCEEDED.value,
-            or_(
-                models.ValidationRun.owner_user_id == owner_user_id,
-                models.ValidationRun.owner_user_id.is_(None),
-            ),
-        )
-        .order_by(models.ValidationRun.created_at.desc())
+    """Return the newest SUCCEEDED run matching the full dedup key, or None."""
+    return await _find_matching_run(
+        db,
+        states=[ValidationRunState.SUCCEEDED.value],
+        profile_id=profile_id,
+        validator_type=validator_type,
+        date_from=date_from,
+        date_to=date_to,
+        engine_identity=engine_identity,
+        validator_params=validator_params,
+        owner_user_id=owner_user_id,
     )
-    for row in (await db.execute(stmt)).scalars():
-        if (
-            row.engine_identity_json == engine_identity
-            and row.validator_params_json == validator_params
-        ):
-            return row  # type: ignore[no-any-return]
-    return None
+
+
+async def find_inflight_run(
+    db: Any,
+    *,
+    profile_id: int,
+    validator_type: str,
+    date_from: date,
+    date_to: date,
+    engine_identity: dict[str, Any],
+    validator_params: dict[str, Any],
+    owner_user_id: int | None,
+) -> ValidationRun | None:
+    """Return an already QUEUED/RUNNING run matching the full dedup key, or None.
+
+    Lets the enqueue path collapse a duplicate request onto the in-flight run
+    instead of queueing a second identical job (``force=True`` still bypasses).
+    """
+    return await _find_matching_run(
+        db,
+        states=[ValidationRunState.QUEUED.value, ValidationRunState.RUNNING.value],
+        profile_id=profile_id,
+        validator_type=validator_type,
+        date_from=date_from,
+        date_to=date_to,
+        engine_identity=engine_identity,
+        validator_params=validator_params,
+        owner_user_id=owner_user_id,
+    )
 
 
 async def insert_queued_run(
@@ -417,62 +482,65 @@ async def delete_run(run_id: int) -> None:
 
 
 async def _persist_run(job: ValidationRunJob) -> None:
-    """Upsert the job's current state (and report at terminal) into its run row."""
-    from snore.api.jobs.durability import upsert_job_record  # noqa: PLC0415
+    """Update the run row in place with the job's current state.
+
+    An UPDATE keyed on the row id — never an upsert.  ``insert_queued_run``
+    always pre-creates the row, so the worker has nothing to INSERT; and a run
+    the user concurrently DELETEd must stay gone, not be resurrected by a
+    terminal write, so a zero-row UPDATE is exactly the desired no-op.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
     from snore.database.models import ValidationRun as _Run  # noqa: PLC0415
+    from snore.database.session import session_scope  # noqa: PLC0415
 
     now = datetime.now(UTC)
-    is_terminal = job.is_terminal
-    values = {
-        "id": job.run_id,
-        "job_id": job.job_id,
-        "profile_id": job.profile_id,
-        "owner_user_id": job.owner_user_id,
-        "validator_type": job.validator_type,
-        "date_from": job.date_from,
-        "date_to": job.date_to,
-        "engine_identity_json": job.engine_identity,
-        "validator_params_json": job.validator_params,
-        "report_json": job.report_json if is_terminal else None,
+    values: dict[str, Any] = {
         "state": job.state.value,
         "error_message": job.error_message,
-        "created_at": job.created_at_wall,
         "started_at": job.started_at_wall,
-        "finished_at": job.finished_at_wall if is_terminal else None,
         "updated_at": now,
     }
-    await upsert_job_record(
-        _Run,
-        values=values,
-        update_fields=[
-            "state",
-            "report_json",
-            "error_message",
-            "started_at",
-            "finished_at",
-            "updated_at",
-        ],
-        index_elements=("id",),
-    )
+    if job.is_terminal:
+        # report_json and finished_at are written only once the run terminates;
+        # before that the row keeps the NULLs insert_queued_run set.
+        values["report_json"] = job.report_json
+        values["finished_at"] = job.finished_at_wall
+    async with session_scope(immediate=True) as db:
+        await db.execute(update(_Run).where(_Run.id == job.run_id).values(**values))
+
+
+async def _finalize_run(job: ValidationRunJob) -> None:
+    """Persist the terminal state, then prune this run's retention group.
+
+    Pruning after every terminal persist (scoped to the run's own
+    profile+validator group) keeps the keep-``_RETENTION_PER_GROUP`` cap honoured
+    continuously in a long-lived process, not only at the startup sweep.
+    """
+    await _persist_run(job)
+    await prune_retention(profile_id=job.profile_id, validator_type=job.validator_type)
 
 
 async def _run_validation(job: ValidationRunJob) -> dict[str, Any]:
-    """Construct and invoke the registered validator; return its report as JSON."""
+    """Construct and invoke the registered validator; return its report as JSON.
+
+    Passes ``None`` for the session: a JOB validator opens its own short-lived
+    per-session scopes so no single read transaction spans the multi-minute run
+    (a batch-long read snapshot would pin the WAL and starve checkpoints).
+    """
     from snore.api.validation_registry import get_spec  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
 
     spec = get_spec(job.validator_type)
     if spec is None:  # Defensive: enqueue only ever happens for registered types.
         raise ValueError(f"No validator registered for type {job.validator_type!r}")
 
-    async with session_scope() as db:
-        report = await spec.run(
-            db,
-            job.profile_id,
-            job.date_from.isoformat(),
-            job.date_to.isoformat(),
-            job.validator_params,
-        )
+    report = await spec.run(
+        None,
+        job.profile_id,
+        job.date_from.isoformat(),
+        job.date_to.isoformat(),
+        job.validator_params,
+    )
     return report.model_dump(mode="json")
 
 
@@ -480,7 +548,7 @@ def _execute_job(job: ValidationRunJob) -> None:
     if not job.try_start():
         # Cancelled before start — persist the terminal (cancelled) state.
         try:
-            asyncio.run(_persist_run(job))
+            asyncio.run(_finalize_run(job))
         except Exception:
             logger.exception(
                 "Failed to persist cancelled validation run %s", job.job_id
@@ -501,68 +569,31 @@ def _execute_job(job: ValidationRunJob) -> None:
         job.finish(succeeded=False, error_message=str(exc))
     finally:
         try:
-            asyncio.run(_persist_run(job))
+            asyncio.run(_finalize_run(job))
         except Exception:
             logger.exception(
                 "Failed to persist terminal state for validation run %s", job.job_id
             )
 
 
-class _ThrottledReaper:
-    """Reap unconditionally after each job; at most every ``interval`` on idle."""
-
-    def __init__(self, interval: float = 60.0) -> None:
-        self._interval = interval
-        self._last_reap = time.monotonic()
-
-    def on_idle(self) -> None:
-        now = time.monotonic()
-        if now - self._last_reap >= self._interval:
-            _reap_terminal()
-            self._last_reap = now
-
-    def after_job(self) -> None:
-        _reap_terminal()
-        self._last_reap = time.monotonic()
-
-
-def _worker_loop(stop_event: threading.Event, condition: threading.Condition) -> None:
-    reaper = _ThrottledReaper(60.0)
-
-    def _on_error(job: ValidationRunJob, exc: BaseException) -> None:
-        if not job.is_terminal:
-            job.finish(succeeded=False, error_message=str(exc))
-
-    run_worker_loop(
-        stop_event,
-        condition,
-        _queue,
-        _execute_job,
-        on_idle=reaper.on_idle,
-        after_execute=reaper.after_job,
-        on_execute_error=_on_error,
-    )
+# The worker-pool layer (throttled reaping, per-worker loop wiring, restartable
+# start/shutdown thread bookkeeping) is shared with analysis_jobs.  ``execute``
+# and ``concurrency`` are wrapped so a test patching this module's ``_execute_job``
+# / ``_get_job_concurrency`` is honoured at call time.
+_pool: WorkerPool[ValidationRunJob] = WorkerPool(
+    queue=_queue,
+    condition=_condition,
+    store=_store,
+    execute=lambda job: _execute_job(job),
+    concurrency=lambda: _get_job_concurrency(),
+    thread_name_prefix="validation-job-worker",
+    reap=_reap_terminal,
+)
 
 
 def start_worker() -> tuple[list[threading.Thread], threading.Event]:
     """Start N persistent worker threads; return (threads, stop_event)."""
-    global _stop_event
-    n = _get_job_concurrency()
-    stop_event = threading.Event()
-    _stop_event = stop_event
-    _stop_events.append(stop_event)
-    threads: list[threading.Thread] = []
-    for i in range(n):
-        t = threading.Thread(
-            target=_worker_loop,
-            args=(stop_event, _condition),
-            daemon=True,
-            name=f"validation-job-worker-{i}",
-        )
-        threads.append(t)
-        t.start()
-    _worker_threads.extend(threads)
-    return threads, stop_event
+    return _pool.start()
 
 
 def shutdown(timeout: float = 10.0) -> list[threading.Thread]:
@@ -570,25 +601,7 @@ def shutdown(timeout: float = 10.0) -> list[threading.Thread]:
 
     Returns any worker threads still alive after ``timeout``.
     """
-    global _stop_event
-    for ev in _stop_events:
-        ev.set()
-    if _stop_event is not None:
-        _stop_event.set()
-    with _condition:
-        for job in list(_all_jobs.values()):
-            job.try_cancel()
-        _queue.clear()
-        _condition.notify_all()
-    deadline = time.monotonic() + timeout
-    for t in _worker_threads:
-        remaining = max(0.0, deadline - time.monotonic())
-        t.join(timeout=remaining)
-    _worker_threads[:] = [t for t in _worker_threads if t.is_alive()]
-    if not _worker_threads:
-        _stop_events.clear()
-        _stop_event = None
-    return list(_worker_threads)
+    return _pool.shutdown(timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -636,12 +649,20 @@ async def recover_orphaned_runs() -> int:
     return count
 
 
-async def prune_retention(keep: int = _RETENTION_PER_GROUP) -> int:
+async def prune_retention(
+    keep: int = _RETENTION_PER_GROUP,
+    *,
+    profile_id: int | None = None,
+    validator_type: str | None = None,
+) -> int:
     """Delete all but the newest ``keep`` rows per (profile_id, validator_type).
 
     Returns the number of rows deleted.  Uses a ROW_NUMBER window partitioned by
     the retention group, ordered newest-first, deleting anything ranked beyond
-    ``keep``.
+    ``keep``.  With ``profile_id`` and ``validator_type`` given, the sweep is
+    restricted to that one group — the cheap per-run prune the worker runs after
+    each terminal persist.  With neither, it sweeps every group (the startup
+    sweep).
     """
     from sqlalchemy import delete, func, select  # noqa: PLC0415
 
@@ -649,7 +670,7 @@ async def prune_retention(keep: int = _RETENTION_PER_GROUP) -> int:
     from snore.database.session import session_scope  # noqa: PLC0415
 
     run = models.ValidationRun
-    ranked = select(
+    ranked_src = select(
         run.id,
         func.row_number()
         .over(
@@ -657,7 +678,12 @@ async def prune_retention(keep: int = _RETENTION_PER_GROUP) -> int:
             order_by=(run.created_at.desc(), run.id.desc()),
         )
         .label("rn"),
-    ).subquery()
+    )
+    if profile_id is not None and validator_type is not None:
+        ranked_src = ranked_src.where(
+            run.profile_id == profile_id, run.validator_type == validator_type
+        )
+    ranked = ranked_src.subquery()
     stale_ids = select(ranked.c.id).where(ranked.c.rn > keep)
 
     count = 0
@@ -666,7 +692,7 @@ async def prune_retention(keep: int = _RETENTION_PER_GROUP) -> int:
             result = await db.execute(delete(run).where(run.id.in_(stale_ids)))
             count = result.rowcount or 0  # type: ignore[attr-defined]
         if count:
-            logger.info("Startup retention: pruned %d old validation run(s)", count)
+            logger.info("Retention: pruned %d old validation run(s)", count)
     except Exception as exc:
         logger.warning("Validation run retention prune failed: %s", exc)
     return count

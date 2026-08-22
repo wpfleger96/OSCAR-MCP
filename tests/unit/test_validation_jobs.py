@@ -131,6 +131,14 @@ def test_cancel_queued_transitions_and_removes():
     assert len(vjobs._queue) == 0
 
 
+def test_forget_removes_twin_from_store():
+    job = _enqueue_one()
+    assert get_job(job.job_id) is job
+    vjobs.forget(job.job_id)
+    assert get_job(job.job_id) is None
+    vjobs.forget(job.job_id)  # idempotent — no error when already gone
+
+
 def test_try_start_after_cancel_flag_yields_cancelled():
     job = _enqueue_one()
     with job._lock:
@@ -195,7 +203,13 @@ def test_to_dict_shape():
 
 
 def test_all_validator_types_are_registered():
-    assert vreg.registered_types() == frozenset(vreg.VALIDATOR_TYPES)
+    from typing import get_args
+
+    from snore.api.schemas import ValidatorType
+
+    # The ValidatorType Literal is the single source of accepted types; every one
+    # of its args must have a registered spec.
+    assert vreg.registered_types() == frozenset(get_args(ValidatorType))
     assert vreg.registered_types() == frozenset(
         {"events", "fl", "breaths", "rera", "apple"}
     )
@@ -459,6 +473,118 @@ def test_dedup_miss_on_identity_or_params(init_db):
     _run(_check())
 
 
+@pytest.mark.parametrize("state", ["failed", "cancelled", "queued", "running"])
+def test_dedup_skips_non_succeeded(init_db, state):
+    async def _check() -> None:
+        from snore.database.session import session_scope
+
+        await _seed_run(state=state, report_json=None)
+        async with session_scope() as db:
+            assert (
+                await vjobs.find_reusable_run(
+                    db,
+                    profile_id=1,
+                    validator_type="events",
+                    date_from=date(2024, 1, 1),
+                    date_to=date(2024, 1, 7),
+                    engine_identity=_IDENTITY,
+                    validator_params=_PARAMS,
+                    owner_user_id=None,
+                )
+                is None
+            )
+
+    _run(_check())
+
+
+@pytest.mark.parametrize("state", ["queued", "running"])
+def test_find_inflight_matches_non_terminal(init_db, state):
+    async def _check() -> None:
+        from snore.database.session import session_scope
+
+        run_id = await _seed_run(state=state, report_json=None)
+        async with session_scope() as db:
+            found = await vjobs.find_inflight_run(
+                db,
+                profile_id=1,
+                validator_type="events",
+                date_from=date(2024, 1, 1),
+                date_to=date(2024, 1, 7),
+                engine_identity=_IDENTITY,
+                validator_params=_PARAMS,
+                owner_user_id=None,
+            )
+        assert found is not None
+        assert found.id == run_id
+
+    _run(_check())
+
+
+def test_find_inflight_ignores_succeeded(init_db):
+    async def _check() -> None:
+        from snore.database.session import session_scope
+
+        await _seed_run(state="succeeded")
+        async with session_scope() as db:
+            assert (
+                await vjobs.find_inflight_run(
+                    db,
+                    profile_id=1,
+                    validator_type="events",
+                    date_from=date(2024, 1, 1),
+                    date_to=date(2024, 1, 7),
+                    engine_identity=_IDENTITY,
+                    validator_params=_PARAMS,
+                    owner_user_id=None,
+                )
+                is None
+            )
+
+    _run(_check())
+
+
+def test_persist_run_after_row_deletion_does_not_reinsert(init_db, snapshot_registry):
+    """A terminal persist for a concurrently-deleted run must not re-create it."""
+
+    async def _stub_run(
+        db: Any, profile_id: int, date_from: str, date_to: str, params: Any
+    ) -> _StubReport:
+        return _StubReport(ok=True, n=1)
+
+    vreg.register(
+        ValidatorSpec(
+            validator_type="events",
+            mode=RunMode.JOB,
+            run=_stub_run,
+            current_params=lambda p: _PARAMS,
+        )
+    )
+
+    run_id = _run(
+        vjobs.insert_queued_run(
+            job_id="job-del",
+            profile_id=1,
+            owner_user_id=None,
+            validator_type="events",
+            date_from=date(2024, 1, 1),
+            date_to=date(2024, 1, 7),
+            engine_identity=_IDENTITY,
+            validator_params=_PARAMS,
+        )
+    )
+    job = _enqueue_one(run_id=run_id, job_id="job-del", validator_type="events")
+
+    # Delete the row out from under the worker, then drive it to a terminal
+    # persist.  The UPDATE-by-id must be a no-op, not resurrect the row.
+    _run(vjobs.delete_run(run_id))
+    job.try_start()
+    job.set_report({"ok": True})
+    job.finish(succeeded=True)
+    _run(vjobs._persist_run(job))
+
+    assert _run(_fetch_run(run_id)) is None
+
+
 def test_dedup_owner_scoping(init_db):
     async def _check() -> None:
         from snore.database.session import session_scope
@@ -520,6 +646,59 @@ def test_recover_orphaned_runs_marks_non_terminal_failed(init_db):
         assert (await _fetch_run(queued)).state == "failed"
         assert (await _fetch_run(running)).state == "failed"
         assert (await _fetch_run(done)).state == "succeeded"
+
+    _run(_check())
+
+
+def test_job_mode_validator_uses_short_per_session_scopes(init_db):
+    """A JOB validator (db_session=None) opens its own scopes and still runs.
+
+    Exercises the WAL-snapshot fix end-to-end with real sessions: the list query
+    and each per-session validation run under their own short ``session_scope()``
+    (no single read transaction spans the run).  The seeded session has no FLG
+    waveform, so it is skipped — the point is that the None-mode scope plumbing
+    resolves against a real DB.
+    """
+
+    async def _check() -> None:
+        from datetime import datetime as _dt
+
+        from snore.database import models
+        from snore.database.session import session_scope
+        from snore.validation import FlowLimitationValidator
+
+        async with session_scope(immediate=True) as db:
+            user = models.User(canonical_email="jobmode@example.com", role="admin")
+            db.add(user)
+            await db.flush()
+            profile = models.Profile(user_id=user.id, name="JobMode")
+            db.add(profile)
+            await db.flush()
+            device = models.Device(
+                profile_id=profile.id,
+                manufacturer="ResMed",
+                model="AirSense 11",
+                serial_number="SN1",
+            )
+            db.add(device)
+            await db.flush()
+            session = models.Session(
+                device_id=device.id,
+                device_session_id="s1",
+                start_time=_dt(2024, 1, 3, 22, 0, 0),
+                end_time=_dt(2024, 1, 4, 6, 0, 0),
+                duration_seconds=28800.0,
+            )
+            db.add(session)
+            await db.flush()
+            profile_id = profile.id
+
+        # None → JOB mode: the validator manages its own per-session scopes.
+        report = await FlowLimitationValidator(None, profile_id).validate_date_range(
+            date_from="2024-01-01", date_to="2024-01-31"
+        )
+        assert len(report.sessions) == 1
+        assert report.sessions[0].skipped_reason == "no_flg_waveform"
 
     _run(_check())
 

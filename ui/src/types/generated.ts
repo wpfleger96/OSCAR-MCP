@@ -2380,6 +2380,13 @@ export interface components {
         /**
          * AppleCrossAggregate
          * @description Aggregate coverage counters and the four cross-source correlations.
+         *
+         *     The skip counters below are independent axes over the same nights, not a
+         *     partition: the SNORE-side counters (``n_analysis_not_run``,
+         *     ``n_analysis_stale``, ``n_device_ambiguous``) classify why a night's SNORE
+         *     indices are unusable, while the Apple-side ``n_skipped_no_apple_bd`` counts
+         *     nights lacking an Apple breathing-disturbance value.  A single night can be
+         *     counted on both axes, so the counters must not be summed.
          */
         AppleCrossAggregate: {
             /** @description fl_class_ge4_pct vs Apple breathing disturbances */
@@ -2403,7 +2410,7 @@ export interface components {
             n_device_ambiguous: number
             /**
              * N Skipped No Apple Bd
-             * @description Nights with no Apple breathing-disturbance value
+             * @description Nights with no Apple breathing-disturbance value (an independent axis from the SNORE-side skip counters; do not sum)
              */
             n_skipped_no_apple_bd: number
             /**
@@ -2417,7 +2424,7 @@ export interface components {
             rera_vs_awake_seconds: components['schemas']['PairCorrelation']
             /**
              * Total Nights
-             * @description Nights with a SNORE nightly summary in range
+             * @description Nights carrying SNORE sessions in range (resolved + device-ambiguous)
              */
             total_nights: number
         }
@@ -4407,7 +4414,7 @@ export interface components {
             amplitude_density?: number | null
             /**
              * Chance Precision Floor
-             * @description Precision a random detector would reach by chance: pooled machine RE per SECOND x (2 x match_tolerance_seconds). Near-zero measured precision at or below this floor is context, not signal. Null when no scored therapy hours exist.
+             * @description Whole-dataset chance-precision floor (density context): machine RE per SECOND over ALL evaluated therapy hours (scored + no-machine-RE sessions) x (2 x match_tolerance_seconds). Most hours carry zero RE, so this reads against the pooled densities. For the scored-session scores below use `scored_chance_precision_floor` instead. Null when no evaluated therapy hours exist.
              */
             chance_precision_floor?: number | null
             /**
@@ -4451,10 +4458,35 @@ export interface components {
              */
             mean_proxy_sensitivity?: number | null
             /**
+             * Pooled Amplitude Precision
+             * @description Pooled amplitude precision over scored sessions (total matched / total amplitude RERAs), not a per-session mean
+             */
+            pooled_amplitude_precision?: number | null
+            /**
+             * Pooled Amplitude Sensitivity
+             * @description Pooled amplitude sensitivity over scored sessions (total matched / total machine RE), not a per-session mean
+             */
+            pooled_amplitude_sensitivity?: number | null
+            /**
+             * Pooled Proxy Precision
+             * @description Pooled FL-run-proxy precision over scored sessions (total matched / total proxy RERAs), not a per-session mean
+             */
+            pooled_proxy_precision?: number | null
+            /**
+             * Pooled Proxy Sensitivity
+             * @description Pooled FL-run-proxy sensitivity over scored sessions (total matched / total machine RE), not a per-session mean
+             */
+            pooled_proxy_sensitivity?: number | null
+            /**
              * Proxy Density
              * @description Pooled FL-run-proxy RERAs per therapy hour
              */
             proxy_density?: number | null
+            /**
+             * Scored Chance Precision Floor
+             * @description Scored-population chance-precision floor: machine RE per SECOND over scored-session hours only x (2 x match_tolerance_seconds). Scored sessions carry far more RE than the dataset average, so this is the honest baseline to compare the precision/sensitivity below against. Null when no scored therapy hours exist.
+             */
+            scored_chance_precision_floor?: number | null
             /**
              * Sessions Skipped Error
              * @description Sessions skipped: unhandled error during validation
@@ -4527,6 +4559,11 @@ export interface components {
              */
             amplitude_f1_reason?: string | null
             /**
+             * Amplitude Matched
+             * @description Amplitude RERAs matched to a machine RE event (scored sessions only; null when the session was skipped)
+             */
+            amplitude_matched?: number | null
+            /**
              * Amplitude Precision
              * @description Amplitude-RERA precision vs machine RE (matched / amplitude RERAs)
              */
@@ -4598,6 +4635,11 @@ export interface components {
              * @description Why proxy_f1 is null
              */
             proxy_f1_reason?: string | null
+            /**
+             * Proxy Matched
+             * @description FL-run-proxy RERAs matched to a machine RE event (scored sessions only; null when the session was skipped)
+             */
+            proxy_matched?: number | null
             /**
              * Proxy Precision
              * @description FL-run-proxy precision vs machine RE (matched / proxy RERAs)
