@@ -1173,6 +1173,81 @@ class AnalysisJobRecord(Base):
         return f"<AnalysisJobRecord(id={self.id}, job_id={self.job_id}, state={self.state})>"
 
 
+class ValidationRun(Base):
+    """A persisted validator run, comparable across algorithm versions.
+
+    Unlike the ``*_job_records`` durability mirrors, this row *is* the result:
+    the background job (or the synchronous POST for sync validator types) writes
+    its state and full ``report_json`` directly here — there is no separate
+    job-record table.  Sync runs carry ``job_id = NULL``.
+
+    Comparison / dedup key: two runs are the "same" run only when
+    ``(profile_id, validator_type, date_from, date_to)`` match AND both
+    ``engine_identity_json`` (``AlgorithmIdentity.current()``) and
+    ``validator_params_json`` (query-time knobs not covered by the identity)
+    are equal.  The identity component alone is insufficient — without the
+    params component, a threshold change would silently compare unlike runs.
+
+    ``report_json`` stores the whole Pydantic report blob.  Reports are read
+    whole by the UI and are bounded (≤~650 session rows), so there is no
+    per-session child table.  This is a reversible decision: a child table can
+    be introduced later without changing the run identity or the dedup key.
+    """
+
+    __tablename__ = "validation_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # NULL for synchronous runs (computed inline in the POST, never queued).
+    job_id: Mapped[str | None] = mapped_column(String(32), unique=True)
+    # No FK: runs must survive user/profile deletion for historical comparison.
+    profile_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(Integer)
+    validator_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False)
+    engine_identity_json: Mapped[dict[str, Any]] = mapped_column(
+        ValidatedJSON, nullable=False
+    )
+    validator_params_json: Mapped[dict[str, Any]] = mapped_column(
+        ValidatedJSON, nullable=False
+    )
+    # NULL until the run reaches SUCCEEDED; the whole report blob otherwise.
+    report_json: Mapped[dict[str, Any] | None] = mapped_column(ValidatedJSON)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_validation_runs_owner_user_id", "owner_user_id"),
+        Index(
+            "ix_validation_runs_profile_type_created",
+            "profile_id",
+            "validator_type",
+            "created_at",
+        ),
+        Index(
+            "ix_validation_runs_dedup",
+            "profile_id",
+            "validator_type",
+            "date_from",
+            "date_to",
+        ),
+        CheckConstraint(
+            "state IN ('queued','running','succeeded','failed','cancelled')",
+            name="chk_validation_run_state",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ValidationRun(id={self.id}, type={self.validator_type}, "
+            f"state={self.state})>"
+        )
+
+
 class DetectedPattern(Base):
     """
     Individual pattern detections from analysis.
