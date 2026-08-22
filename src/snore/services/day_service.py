@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from datetime import date
+from typing import Any
 
 from sqlalchemy import select
 
@@ -126,6 +127,8 @@ class DayService(ProfileScopedService):
             else None
         )
 
+        fl_rera = await self._nightly_fl_rera(day_date, day.device_id)
+
         # Identity copies: Day metric columns that DayDetail exposes under the
         # same name.  Columns DayDetail renames (pressure_median → avg_pressure,
         # leak_median → avg_leak, spo2_mean → avg_spo2) are not DayDetail
@@ -151,4 +154,55 @@ class DayService(ProfileScopedService):
             reras=day.reras or 0,
             session_ids=session_ids,
             health_sleep=health_sleep,
+            **fl_rera,
         )
+
+    async def _nightly_fl_rera(self, day_date: date, device_id: int) -> dict[str, Any]:
+        """Read-time flow-limitation / RERA-proxy metrics for one night.
+
+        Sourced from BreathService.get_nightly_summary — the same latest-run
+        aggregation the MCP nightly summary uses — so day detail never
+        recomputes breath logic.  Any documented lookup failure (analysis
+        absent, no owned sessions, device ambiguity, or a breath-table DB
+        error) degrades to null values with an ``analysis_not_run`` reason, so
+        the day-detail endpoint never fails on missing breath analysis.
+        """
+        from sqlalchemy.exc import SQLAlchemyError  # noqa: PLC0415
+
+        from snore.analysis.shared.versioning import NullReason  # noqa: PLC0415
+        from snore.services.breath_service import (  # noqa: PLC0415
+            BreathService,
+            DeviceAmbiguityError,
+            DeviceNotOwnedError,
+            MultiSessionAmbiguityError,
+        )
+
+        try:
+            night = await BreathService(
+                self.db_session, self.profile_id
+            ).get_nightly_summary(day_date, device_id=device_id)
+        except (
+            ValueError,  # NoSessionsInRangeError + explicit-device "no sessions"
+            DeviceAmbiguityError,
+            DeviceNotOwnedError,
+            MultiSessionAmbiguityError,
+            SQLAlchemyError,  # breath tables absent / other DB failure
+        ):
+            reason = NullReason.ANALYSIS_NOT_RUN.value
+            return {
+                "fl_class_ge4_pct": None,
+                "fl_class_ge4_pct_reason": reason,
+                "rera_index": None,
+                "rera_index_reason": reason,
+                "rera_count": None,
+                "rera_count_reason": reason,
+            }
+
+        return {
+            "fl_class_ge4_pct": night.fl_class_ge4_pct,
+            "fl_class_ge4_pct_reason": night.fl_class_ge4_pct_reason,
+            "rera_index": night.rera_index,
+            "rera_index_reason": night.rera_index_reason,
+            "rera_count": night.rera_count,
+            "rera_count_reason": night.rera_reason,
+        }

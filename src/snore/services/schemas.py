@@ -614,6 +614,16 @@ class DayDetail(DayListItem):
     central_apneas: int = 0
     hypopneas: int = 0
     reras: int = 0
+    # Nightly breath-analysis proxy metrics, sourced read-time from
+    # BreathService (same path as the MCP nightly summary).  Null with a
+    # *_reason code (e.g. "analysis_not_run") when breath analysis is absent or
+    # the nightly lookup fails — day detail never fails on missing analysis.
+    fl_class_ge4_pct: float | None = None
+    fl_class_ge4_pct_reason: str | None = None
+    rera_index: float | None = None
+    rera_index_reason: str | None = None
+    rera_count: int | None = None
+    rera_count_reason: str | None = None
     session_ids: list[int] = Field(default_factory=list)
     health_sleep: HealthNightSummaryRead | None = None
 
