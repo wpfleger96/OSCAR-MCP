@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from snore.api.deps import service_dep
+from snore.api.deps import service_dep, service_dep_immediate
 from snore.api.guards import RequireWritable
 from snore.api.schemas import (
     MaskLogCreateRequest,
@@ -15,6 +15,9 @@ from snore.services.schemas import MaskEpochResponse
 router = APIRouter()
 
 MaskLogServiceDep = Annotated[MaskLogService, Depends(service_dep(MaskLogService))]
+MaskLogImmediateServiceDep = Annotated[
+    MaskLogService, Depends(service_dep_immediate(MaskLogService))
+]
 MaskEpochServiceDep = Annotated[
     MaskEpochService, Depends(service_dep(MaskEpochService))
 ]
@@ -47,8 +50,8 @@ async def create_mask_log_entry(
 async def update_mask_log_entry(
     entry_id: int,
     body: MaskLogUpdateRequest,
-    service: MaskLogServiceDep,
     _actor: RequireWritable,
+    service: MaskLogImmediateServiceDep,
 ) -> MaskLogEntryResponse:
     return await service.update_entry(entry_id, body.model_dump(exclude_unset=True))
 
@@ -56,7 +59,7 @@ async def update_mask_log_entry(
 @router.delete("/masks/{entry_id}", status_code=204)
 async def delete_mask_log_entry(
     entry_id: int,
-    service: MaskLogServiceDep,
     _actor: RequireWritable,
+    service: MaskLogImmediateServiceDep,
 ) -> None:
     await service.delete_entry(entry_id)

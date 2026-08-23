@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.api.app import create_app
-from snore.api.deps import get_actor, get_db
+from snore.api.deps import get_actor, get_db, get_db_immediate
 from snore.auth.actor import ActorContext, AuthMode
 
 # ---------------------------------------------------------------------------
@@ -75,6 +75,9 @@ def demo_client(temp_db, async_db_session, db_session):
         async with async_db_session.begin():
             yield async_db_session
 
+    async def fail_if_immediate_db_resolved() -> None:
+        raise AssertionError("demo request acquired an immediate transaction")
+
     async def override_get_actor(
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> ActorContext:
@@ -110,6 +113,7 @@ def demo_client(temp_db, async_db_session, db_session):
         )
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db_immediate] = fail_if_immediate_db_resolved
     app.dependency_overrides[get_actor] = override_get_actor
 
     client = TestClient(app, raise_server_exceptions=False)
@@ -181,3 +185,20 @@ class TestDemoEnforcement:
             + "\nAdd each route to DEMO_ALLOWED_MUTATING or ensure require_writable"
             " is applied."
         )
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("PATCH", "/api/v1/sessions/1"),
+            ("DELETE", "/api/v1/sessions/"),
+            ("DELETE", "/api/v1/analysis"),
+            ("PATCH", "/api/v1/equipment/masks/1"),
+            ("DELETE", "/api/v1/equipment/masks/1"),
+        ],
+    )
+    def test_immediate_routes_reject_demo_before_writer_lock(
+        self, demo_client: TestClient, method: str, path: str
+    ) -> None:
+        """The writable guard must reject demo requests before BEGIN IMMEDIATE."""
+        response = demo_client.request(method, path, json={})
+        assert response.status_code == 403

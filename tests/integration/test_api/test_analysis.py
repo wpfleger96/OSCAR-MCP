@@ -433,10 +433,15 @@ class TestDeleteAnalysisCrossProfileIsolation:
         self, async_db_session: object, db_session: object, profile_id: int
     ) -> object:
         """Return a TestClient whose actor is locked to *profile_id*."""
+        from collections.abc import AsyncGenerator
+        from typing import Annotated
+
+        from fastapi import Depends
         from fastapi.testclient import TestClient
+        from sqlalchemy.ext.asyncio import AsyncSession
 
         from snore.api.app import create_app
-        from snore.api.deps import get_actor, get_db
+        from snore.api.deps import get_actor, get_db, get_db_immediate
         from snore.auth.actor import ActorContext, AuthMode, Role
 
         actor = ActorContext(
@@ -452,10 +457,16 @@ class TestDeleteAnalysisCrossProfileIsolation:
             async with async_db_session.begin():
                 yield async_db_session
 
+        async def override_get_db_immediate(
+            db: Annotated[AsyncSession, Depends(get_db)],
+        ) -> AsyncGenerator[AsyncSession]:
+            yield db
+
         async def override_get_actor():
             return actor
 
         app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_db_immediate] = override_get_db_immediate
         app.dependency_overrides[get_actor] = override_get_actor
         client = TestClient(app, raise_server_exceptions=True)
         return client
