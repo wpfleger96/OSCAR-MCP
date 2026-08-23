@@ -3516,10 +3516,12 @@ class TestSameProfileTwoDeviceExtended:
 
 @pytest.mark.unit
 class TestCompareEpochsRefusal:
-    """Verify that metadata failures null ALL epoch distributions before any breath queries.
+    """Verify metadata-check semantics run before any breath queries.
 
-    RX change within an epoch is a hard refusal (null_reason=RX_CHANGED_WITHIN_EPOCH).
-    Cross-epoch algorithm identity mismatch is now a non-blocking warning: distributions
+    A mid-epoch RX change nulls only its own epoch (null_reason=RX_CHANGED_WITHIN_EPOCH);
+    clean epochs still compute and the top-level null_reason is set only when EVERY
+    epoch was nulled for an RX change.
+    Cross-epoch algorithm identity mismatch is a non-blocking warning: distributions
     are still computed and version_warnings is populated instead of nulling everything.
     """
 
@@ -3608,6 +3610,121 @@ class TestCompareEpochsRefusal:
         assert epoch_result.mid_insp_flattening.median is None
         assert epoch_result.flatness_index.median is None
         assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+
+    async def test_one_violating_epoch_among_three_nulls_only_itself(
+        self, async_db_session
+    ):
+        """A mid-epoch RX change nulls only its own epoch; the two clean epochs
+        still compute, and the top-level null_reason stays None."""
+        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        rx_key = next(iter(RX_KEYS))
+
+        # Clean epoch 1: single session with breaths → computes normally.
+        d1 = date(2026, 5, 1)
+        _, s1 = await _make_day_and_session(async_db_session, dev.id, d1)
+        await _store_analysis_with_breaths(
+            async_db_session, s1, profile_id, n_breaths=3
+        )
+
+        # Violating epoch: two sessions on different days with divergent RX.
+        d2, d3 = date(2026, 5, 10), date(2026, 5, 11)
+        _, s2 = await _make_day_and_session(async_db_session, dev.id, d2)
+        _, s3 = await _make_day_and_session(async_db_session, dev.id, d3)
+        await _store_analysis_with_breaths(
+            async_db_session, s2, profile_id, n_breaths=3
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, s3, profile_id, n_breaths=3
+        )
+        await self._make_setting(async_db_session, s2.id, rx_key, "8.0")
+        await self._make_setting(async_db_session, s3.id, rx_key, "12.0")
+
+        # Clean epoch 2: single session with breaths → computes normally.
+        d4 = date(2026, 5, 20)
+        _, s4 = await _make_day_and_session(async_db_session, dev.id, d4)
+        await _store_analysis_with_breaths(
+            async_db_session, s4, profile_id, n_breaths=3
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="clean1", date_start=d1, date_end=d1, device_id=dev.id
+                ),
+                EpochRequest(
+                    label="violating", date_start=d2, date_end=d3, device_id=dev.id
+                ),
+                EpochRequest(
+                    label="clean2", date_start=d4, date_end=d4, device_id=dev.id
+                ),
+            ]
+        )
+
+        by_label = {e.label: e for e in result.epochs}
+        # Only the violating epoch is nulled, with the RX reason on both axes.
+        assert by_label["violating"].null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        assert by_label["violating"].mid_insp_flattening.median is None
+        assert by_label["violating"].rera_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        # Clean epochs compute normally.
+        for lbl in ("clean1", "clean2"):
+            assert by_label[lbl].null_reason is None
+            assert by_label[lbl].mid_insp_flattening.median is not None
+            assert by_label[lbl].flow_class_distribution
+        # Not a whole-comparison refusal; violation still reported.
+        assert result.null_reason is None
+        assert len(result.rx_violations) == 1
+        assert result.rx_violations[0].epoch_label == "violating"
+
+    async def test_all_epochs_violating_sets_top_level_refusal(self, async_db_session):
+        """When every epoch has a mid-epoch RX change, the top-level null_reason is
+        RX_CHANGED_WITHIN_EPOCH and every epoch is nulled."""
+        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        rx_key = next(iter(RX_KEYS))
+
+        da1, da2 = date(2026, 6, 1), date(2026, 6, 2)
+        _, sa1 = await _make_day_and_session(async_db_session, dev.id, da1)
+        _, sa2 = await _make_day_and_session(async_db_session, dev.id, da2)
+        await _store_analysis_with_breaths(
+            async_db_session, sa1, profile_id, n_breaths=2
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, sa2, profile_id, n_breaths=2
+        )
+        await self._make_setting(async_db_session, sa1.id, rx_key, "8.0")
+        await self._make_setting(async_db_session, sa2.id, rx_key, "12.0")
+
+        db1, db2 = date(2026, 6, 10), date(2026, 6, 11)
+        _, sb1 = await _make_day_and_session(async_db_session, dev.id, db1)
+        _, sb2 = await _make_day_and_session(async_db_session, dev.id, db2)
+        await _store_analysis_with_breaths(
+            async_db_session, sb1, profile_id, n_breaths=2
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, sb2, profile_id, n_breaths=2
+        )
+        await self._make_setting(async_db_session, sb1.id, rx_key, "9.0")
+        await self._make_setting(async_db_session, sb2.id, rx_key, "13.0")
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(label="A", date_start=da1, date_end=da2, device_id=dev.id),
+                EpochRequest(label="B", date_start=db1, date_end=db2, device_id=dev.id),
+            ]
+        )
+
+        assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        assert all(
+            e.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH for e in result.epochs
+        )
+        assert len(result.rx_violations) == 2
 
     async def test_cross_epoch_identity_mismatch_warns_instead_of_refusing(
         self, async_db_session

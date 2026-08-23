@@ -84,9 +84,13 @@ class EpochsMixin(_BreathServiceCore):
         """Distributions across RxTracker epochs.
 
         Two-phase design: metadata checks (RX + identity) run across ALL epochs
-        BEFORE any breath queries.  Hard refusals null all epoch distributions.
+        BEFORE any breath queries.
 
-        Hard refusal: mid-epoch RX change (RX_CHANGED_WITHIN_EPOCH).
+        Per-epoch nulling: a mid-epoch RX change nulls only the epoch it occurred
+        in (RX_CHANGED_WITHIN_EPOCH); clean epochs in the same comparison still
+        compute normally.  The top-level null_reason is RX_CHANGED_WITHIN_EPOCH
+        only when EVERY epoch was nulled for an RX change; otherwise None.
+        rx_violations is fully populated either way.
         Warning (non-blocking): CROSS_VERSION_REFUSAL_KEYS differ across epochs —
         distributions are still computed; callers should inspect version_warnings.
         Mixed primary modes degrade RERA fields only (PRIMARY_MODE_MISMATCH).
@@ -262,12 +266,22 @@ class EpochsMixin(_BreathServiceCore):
                     )
                     rx_violations.append(rx_violation)
 
+            # An epoch's own mid-epoch RX change nulls only that epoch; clean
+            # epochs in the same comparison still compute normally (per-epoch
+            # nulling, not a batch refusal).
+            if rx_violation is not None:
+                epoch_null_reason: NullReason | None = (
+                    NullReason.RX_CHANGED_WITHIN_EPOCH
+                )
+            elif contributing_sessions:
+                epoch_null_reason = None
+            else:
+                epoch_null_reason = NullReason.NO_DATA_IN_RANGE
+
             epoch_resolved.append(
                 {
                     "epoch": epoch,
-                    "null_reason": None
-                    if contributing_sessions
-                    else NullReason.NO_DATA_IN_RANGE,
+                    "null_reason": epoch_null_reason,
                     "contributing_sessions": contributing_sessions,
                     "all_rx": [rx for _, rx in session_rx_dated],
                     "nights_with_data": nights_with_data,
@@ -303,30 +317,17 @@ class EpochsMixin(_BreathServiceCore):
                         f"algorithm_identity.{k} differs across epochs: {vals_str}"
                     )
 
-        has_rx_violation = bool(rx_violations)
-
-        # RX change within an epoch is a hard refusal: distributions are meaningless
-        # when therapy settings changed mid-epoch.
-        if has_rx_violation:
-            epoch_stats: list[EpochBreathStats] = [
-                _null_epoch_stats(
-                    label=ed["epoch"].label,
-                    date_start=ed["epoch"].date_start,
-                    date_end=ed["epoch"].date_end,
-                    nights_with_data=ed["nights_with_data"],
-                    nights_missing_analysis=ed["nights_missing_analysis"],
-                    null_reason=NullReason.RX_CHANGED_WITHIN_EPOCH,
-                    rera_reason=NullReason.RX_CHANGED_WITHIN_EPOCH,
-                    rx_settings=ed["all_rx"][0] if ed["all_rx"] else {},
-                )
-                for ed in epoch_resolved
-            ]
-            return CompareEpochsResult(
-                epochs=epoch_stats,
-                null_reason=NullReason.RX_CHANGED_WITHIN_EPOCH,
-                rx_violations=rx_violations,
-                version_warnings=version_warnings,
-            )
+        # RX change within an epoch nulls that epoch only (its distributions are
+        # meaningless once therapy settings changed mid-range); clean epochs still
+        # compute below.  The top-level null_reason reflects a whole-comparison
+        # refusal only when EVERY epoch was nulled for the RX change.
+        all_epochs_rx_changed = all(
+            ed["null_reason"] == NullReason.RX_CHANGED_WITHIN_EPOCH
+            for ed in epoch_resolved
+        )
+        top_null_reason = (
+            NullReason.RX_CHANGED_WITHIN_EPOCH if all_epochs_rx_changed else None
+        )
 
         # -----------------------------------------------------------------------
         # Phase 3: Compute distributions (only if all checks passed)
@@ -356,7 +357,7 @@ class EpochsMixin(_BreathServiceCore):
             )
 
         requested = set(metrics) if metrics is not None else set(DistributionMetric)
-        epoch_stats = []
+        epoch_stats: list[EpochBreathStats] = []
 
         # Bulk-fetch waveform channel values for all contributing sessions across
         # all epochs in one query, then slice per epoch below.
@@ -379,6 +380,15 @@ class EpochsMixin(_BreathServiceCore):
             null_reason_ed: NullReason | None = ed["null_reason"]
 
             if null_reason_ed is not None or not contributing_sessions:
+                resolved_null_reason = null_reason_ed or NullReason.NO_DATA_IN_RANGE
+                # rera_reason must mirror the actual per-epoch null cause: an epoch
+                # nulled for a mid-epoch RX change carries that reason, not the
+                # generic ANALYSIS_NOT_RUN used for the no-data path.
+                epoch_rera_reason = (
+                    NullReason.RX_CHANGED_WITHIN_EPOCH
+                    if resolved_null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+                    else NullReason.ANALYSIS_NOT_RUN
+                )
                 epoch_stats.append(
                     _null_epoch_stats(
                         label=epoch.label,
@@ -386,8 +396,8 @@ class EpochsMixin(_BreathServiceCore):
                         date_end=epoch.date_end,
                         nights_with_data=nights_with_data,
                         nights_missing_analysis=nights_missing_analysis,
-                        null_reason=null_reason_ed or NullReason.NO_DATA_IN_RANGE,
-                        rera_reason=NullReason.ANALYSIS_NOT_RUN,
+                        null_reason=resolved_null_reason,
+                        rera_reason=epoch_rera_reason,
                         rx_settings=all_rx[0] if all_rx else {},
                     )
                 )
@@ -579,7 +589,7 @@ class EpochsMixin(_BreathServiceCore):
 
         return CompareEpochsResult(
             epochs=epoch_stats,
-            null_reason=None,
+            null_reason=top_null_reason,
             rx_violations=rx_violations,
             version_warnings=version_warnings,
         )
