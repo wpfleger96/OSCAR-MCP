@@ -29,6 +29,7 @@ from snore.services.database_service import (
 )
 from snore.services.profile_service import quarantine_profile_raw_dir
 from snore.services.schemas import DatabaseStats, ResetResult, VacuumResult
+from snore.services.waveform_service import clear_waveform_array_cache
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +286,10 @@ async def reset_db(
                 "is only in the response body and will not be recoverable afterward.",
                 caller_email,
             )
+
+    # The reset emptied the waveforms table, so every deserialized-array cache
+    # entry is now stale and its rowid is free for reuse by the next import.
+    clear_waveform_array_cache()
 
     # Best-effort rmtree of quarantined dirs after a successful commit.
     # CancelledError may skip this; startup recovery (DeletionSaga case 2)
