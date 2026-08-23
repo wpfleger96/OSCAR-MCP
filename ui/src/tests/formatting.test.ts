@@ -1,6 +1,39 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { formatWallClockTime } from '@/utils/formatting'
+import { formatWallClockTime, nullReasonLabel } from '@/utils/formatting'
+
+describe('nullReasonLabel', () => {
+    it('test_known_code_returns_sentence', () => {
+        expect(nullReasonLabel('analysis_not_run')).toBe(
+            'Breath analysis has not been run for this night.',
+        )
+    })
+
+    it('test_unknown_code_prettifies_underscores', () => {
+        expect(nullReasonLabel('some_future_reason')).toBe('some future reason')
+    })
+
+    // The six codes below were added alongside the FL/RERA day-view metrics; a
+    // mapped code must resolve to its full sentence, never the prettify fallback.
+    it.each([
+        'primary_mode_mismatch',
+        'smart_ramp_indeterminate',
+        'segments_unknown',
+        'multi_session_ambiguity',
+        'unvalidated_device',
+        'rx_changed_within_epoch',
+    ])('test_mapped_code_%s_resolves_to_full_sentence', (code) => {
+        const label = nullReasonLabel(code)
+        expect(label).not.toBe(code.replace(/_/g, ' '))
+        expect(label?.endsWith('.')).toBe(true)
+    })
+
+    it('test_nullish_reason_returns_null', () => {
+        expect(nullReasonLabel(null)).toBeNull()
+        expect(nullReasonLabel(undefined)).toBeNull()
+        expect(nullReasonLabel('')).toBeNull()
+    })
+})
 
 describe('formatWallClockTime', () => {
     // Build epoch via local-time constructor to avoid UTC/timezone dependency across machines.
