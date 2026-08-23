@@ -2907,6 +2907,11 @@ export interface components {
         /**
          * DayDetail
          * @description Full detail of a therapy day including per-metric stats.
+         *
+         *     The FL/RERA proxy fields below carry ``*_reason`` companions (unlike the
+         *     older nullable stats) because null here is ambiguous — "analysis not run"
+         *     versus a genuine zero — so a companion code disambiguates, mirroring the
+         *     MCP nightly-summary null-with-reason convention.
          */
         DayDetail: {
             /** Ahi */
@@ -2941,6 +2946,13 @@ export interface components {
             epap_median?: number | null
             /** Epap Min */
             epap_min?: number | null
+            /**
+             * Fl Class Ge4 Pct
+             * @description Percent of rule-classified breaths flagged flow-class >= 4 (experimental SNORE flow-limitation proxy).
+             */
+            fl_class_ge4_pct?: number | null
+            /** Fl Class Ge4 Pct Reason */
+            fl_class_ge4_pct_reason?: string | null
             health_sleep?: components['schemas']['HealthNightSummaryRead'] | null
             /** Hi */
             hi?: number | null
@@ -2973,7 +2985,22 @@ export interface components {
             /** Pressure Min */
             pressure_min?: number | null
             /**
+             * Rera Count
+             * @description Experimental SNORE RERA-proxy count from flow-limitation runs ending in a recovery breath — distinct from device-reported `reras`.
+             */
+            rera_count?: number | null
+            /** Rera Count Reason */
+            rera_count_reason?: string | null
+            /**
+             * Rera Index
+             * @description Experimental SNORE RERA-proxy events per therapy hour (FL-run proxy, not device-reported).
+             */
+            rera_index?: number | null
+            /** Rera Index Reason */
+            rera_index_reason?: string | null
+            /**
              * Reras
+             * @description Device-reported RERA count for the night (from the machine).
              * @default 0
              */
             reras: number

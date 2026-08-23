@@ -12,8 +12,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+from snore.analysis.data.waveform_loader import deserialize_waveform_blob
+from snore.constants import FLOW_LIMITATION_CLASSES
+from snore.constants import FlowLimitationConstants as FLC
 from snore.validation.alignment import average_waveform_over_breaths
-from snore.validation.fl_validator import FlowLimitationValidator, _auc_mwu
+from snore.validation.fl_validator import (
+    FlowLimitationValidator,
+    _auc_mwu,
+    score_fl_arrays,
+)
 from snore.validation.stats import spearman_or_none
 
 # ---------------------------------------------------------------------------
@@ -795,3 +802,103 @@ class TestFlowClassValidation:
         assert s.spearman_class_weight_r is None
         assert s.auc_class_t25 is None
         assert s.auc_class_t50 is None
+
+
+class TestScoreFlArraysExtractionEquivalence:
+    """Pin the extraction: the values ``_validate_session`` reports are exactly
+    what the pure ``score_fl_arrays`` core computes for the same input arrays."""
+
+    @pytest.mark.asyncio
+    async def test_report_fields_match_score_fl_arrays(self, mock_db_session):
+        # Rule-matched breaths across the class ladder plus one fallback breath,
+        # exercising both the flattening and class-weight AUC paths.
+        ts = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0]
+        vs = [0.1, 0.1, 0.3, 0.3, 0.5, 0.5, 0.7, 0.7, 0.9, 0.9, 0.05, 0.05]
+        # (start, end, mid_insp, flatness, flow_class, flow_confidence)
+        specs = [
+            (0.0, 4.0, 0.9, 0.1, 1, 0.8),
+            (4.0, 8.0, 0.7, 0.3, 4, 0.8),
+            (8.0, 12.0, 0.5, 0.5, 5, 0.8),
+            (12.0, 16.0, 0.3, 0.7, 6, 0.8),
+            (16.0, 20.0, 0.1, 0.9, 7, 0.8),
+            (20.0, 24.0, 0.5, 0.5, 7, 0.5),  # fallback confidence — excluded
+        ]
+        breaths = [
+            _make_breath_mock(s, e, mi, fi, i, flow_class=fc, flow_confidence=cf)
+            for i, (s, e, mi, fi, fc, cf) in enumerate(specs)
+        ]
+
+        # Rebuild the arrays score_fl_arrays receives inside _validate_session.
+        starts = np.array([b.start_offset_s for b in breaths], dtype=np.float64)
+        ends = np.array([b.end_offset_s for b in breaths], dtype=np.float64)
+        mid = np.array([b.mid_insp_flattening for b in breaths], dtype=np.float64)
+        flatness = np.array([b.flatness_index for b in breaths], dtype=np.float64)
+        class_weight = np.array(
+            [
+                FLOW_LIMITATION_CLASSES[b.flow_class]["weight"]
+                if b.flow_class in FLOW_LIMITATION_CLASSES
+                else np.nan
+                for b in breaths
+            ],
+            dtype=np.float64,
+        )
+        rule_matched = np.array(
+            [b.flow_confidence > FLC.FL_DEFAULT_CONFIDENCE for b in breaths],
+            dtype=bool,
+        )
+        # Deserialize through the same loader so float32 rounding matches exactly.
+        blob = _make_waveform_blob(ts, vs)
+        flg_ts, flg_raw = deserialize_waveform_blob(blob, len(ts))
+        valid_mask = (flg_raw >= 0.0) & np.isfinite(flg_raw)
+        flg_vs = np.clip(flg_raw[valid_mask], 0.0, 1.0)
+        breath_flg = average_waveform_over_breaths(
+            starts,
+            ends,
+            flg_ts[valid_mask].astype(np.float64),
+            flg_vs.astype(np.float64),
+        )
+        scores = score_fl_arrays(
+            mid, flatness, class_weight, rule_matched, breath_flg, flg_vs
+        )
+        assert scores is not None
+
+        session_row = _make_mock_session_row(20)
+        waveform_mock = MagicMock()
+        waveform_mock.data_blob = blob
+        waveform_mock.sample_count = len(ts)
+        analysis_row = _make_analysis_result_mock(120)
+
+        sessions_result = MagicMock()
+        sessions_result.scalars.return_value.all.return_value = [session_row]
+        waveform_result = MagicMock()
+        waveform_result.scalars.return_value.first.return_value = waveform_mock
+        analysis_result = MagicMock()
+        analysis_result.scalars.return_value.first.return_value = analysis_row
+        breaths_result = MagicMock()
+        breaths_result.scalars.return_value.all.return_value = breaths
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                sessions_result,
+                waveform_result,
+                analysis_result,
+                breaths_result,
+            ]
+        )
+
+        validator = FlowLimitationValidator(mock_db_session, profile_id=1)
+        report = await validator.validate_date_range("2025-01-01", "2025-01-31")
+        s = report.sessions[0]
+
+        # The wrapper maps score_fl_arrays' threshold-agnostic fields back to the
+        # report's published t25/t50 names — every metric must match exactly.
+        assert s.n_breaths_compared == scores.n_breaths_compared
+        assert s.n_class_breaths_compared == scores.n_class_breaths_compared
+        assert s.spearman_flattening_r == scores.spearman_flattening_r
+        assert s.spearman_flatness_r == scores.spearman_flatness_r
+        assert s.spearman_class_weight_r == scores.spearman_class_weight_r
+        assert s.auc_t25 == scores.auc_low
+        assert s.auc_t50 == scores.auc_high
+        assert s.auc_class_t25 == scores.auc_class_low
+        assert s.auc_class_t50 == scores.auc_class_high
+        assert s.snore_fl_95th == scores.snore_fl_95th
+        assert s.device_flg_95th == scores.device_flg_95th
