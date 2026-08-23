@@ -46,7 +46,7 @@ from snore.analysis.data.waveform_loader import deserialize_waveform_blob
 from snore.analysis.modes.postprocess import EVENT_MATCH_TOLERANCE_SECONDS
 from snore.analysis.shared.versioning import AnalysisStatus
 from snore.analysis.utils import convert_machine_reras
-from snore.constants import RERAProxyConstants
+from snore.constants import FlowLimitationConstants, RERAProxyConstants
 from snore.database import models
 from snore.database.day_manager import DayManager
 from snore.services.breath.algorithms import iter_fl_run_recoveries
@@ -91,16 +91,21 @@ DEFAULT_KNOBS: dict[str, dict[str, float]] = {
         "fl_class_threshold": float(RERAProxyConstants.FL_CLASS_THRESHOLD),
         "min_fl_run_length": float(RERAProxyConstants.MIN_FL_RUN_LENGTH),
         "recovery_amplitude_margin": RERAProxyConstants.RECOVERY_AMPLITUDE_MARGIN,
+        # 1.0 = production behaviour (all breaths drive the FL-run proxy).
+        "include_fallback": 1.0,
     },
 }
 DEFAULT_KNOBS[TARGET_APPLE] = dict(DEFAULT_KNOBS[TARGET_RE])
 
 # Default value lists per knob — each brackets its current constant so the sweep
-# explores both directions around production defaults.
+# explores both directions around production defaults.  ``include_fallback`` is
+# a binary probe (1.0 = all breaths, 0.0 = mask low-confidence fallback guesses),
+# so its grid defaults to the single production value; pass 1.0,0.0 to compare.
 _PROXY_GRID: dict[str, list[float]] = {
     "fl_class_threshold": [3, 4, 5],
     "min_fl_run_length": [1, 2, 3],
     "recovery_amplitude_margin": [0.10, 0.20, 0.30],
+    "include_fallback": [1.0],
 }
 DEFAULT_GRIDS: dict[str, dict[str, list[float]]] = {
     TARGET_FLG: {
@@ -145,12 +150,16 @@ class ProxySessionArrays:
 
     ``proxy_rows`` is built once at load time so the grid loop drives
     ``iter_fl_run_recoveries`` directly, never rebuilding the per-breath rows.
+    ``proxy_rows_no_fallback`` is the same rows with fallback-guess breaths'
+    ``flow_class`` masked to ``None`` — the ``include_fallback=0.0`` variant,
+    also built once so the grid loop stays zero-DB and rebuilds nothing per combo.
     """
 
     session_id: int
     therapy_date: date
     duration_hours: float
     proxy_rows: list[ProxyBreath]
+    proxy_rows_no_fallback: list[ProxyBreath]
     start_offset_s: list[float]
     machine_starts: list[float]
 
@@ -214,10 +223,11 @@ def enumerate_grid(grid: dict[str, list[float]]) -> list[dict[str, float]]:
 
 
 def _is_default(knobs: dict[str, float], target: str) -> bool:
+    # A knob absent from the grid is held at its production default, so that axis
+    # counts as default — only a present value that differs disqualifies a combo.
     defaults = DEFAULT_KNOBS[target]
     return all(
-        key in knobs and float(knobs[key]) == float(val)
-        for key, val in defaults.items()
+        float(knobs.get(key, val)) == float(val) for key, val in defaults.items()
     )
 
 
@@ -286,11 +296,21 @@ def _score_flg_grid(
 
 
 def _proxy_starts(s: ProxySessionArrays, knobs: dict[str, float]) -> list[float]:
-    """Drive the proxy criterion over the cached rows (mirrors the seam exactly)."""
+    """Drive the proxy criterion over the cached rows (mirrors the seam exactly).
+
+    ``include_fallback`` (default 1.0) picks which cached row list feeds the
+    proxy: >= 0.5 drives all breaths; < 0.5 drives the fallback-masked rows so
+    low-confidence guesses both end runs and cannot supply a recovery follower.
+    """
+    rows = (
+        s.proxy_rows
+        if knobs.get("include_fallback", 1.0) >= 0.5
+        else s.proxy_rows_no_fallback
+    )
     return [
         s.start_offset_s[run_start]
         for run_start, _run_last, _recovery in iter_fl_run_recoveries(
-            s.proxy_rows,
+            rows,
             fl_class_threshold=int(knobs["fl_class_threshold"]),
             min_fl_run_length=int(knobs["min_fl_run_length"]),
             recovery_amplitude_margin=float(knobs["recovery_amplitude_margin"]),
@@ -562,6 +582,19 @@ async def _load_flg_session(
     )
 
 
+def _is_fallback_flow_confidence(flow_confidence: float | None) -> bool:
+    """True for a low-confidence fallback guess: no shape rule matched.
+
+    The FL classifier stamps fallback (flatness-triaged) breaths with confidence
+    exactly ``FL_DEFAULT_CONFIDENCE``; rule-matched breaths score strictly above
+    it.  A null confidence (never classified) is treated as a fallback too.
+    """
+    return (
+        flow_confidence is None
+        or flow_confidence <= FlowLimitationConstants.FL_DEFAULT_CONFIDENCE
+    )
+
+
 async def _load_proxy_session(
     db: AsyncSession,
     breath_svc: BreathService,
@@ -581,6 +614,7 @@ async def _load_proxy_session(
             models.Breath.is_recovery_breath,
             models.Breath.peak_flow_lpm,
             models.Breath.start_offset_s,
+            models.Breath.flow_confidence,
         )
         .where(models.Breath.analysis_result_id == ar_id)
         .order_by(models.Breath.breath_number)
@@ -588,6 +622,15 @@ async def _load_proxy_session(
     breath_rows = (await db.execute(breath_stmt)).all()
     if not breath_rows:
         return None
+
+    is_recovery = [b.is_recovery_breath for b in breath_rows]
+    peak = [b.peak_flow_lpm for b in breath_rows]
+    # ``include_fallback=0.0`` variant: null the flow_class of fallback guesses so
+    # they end runs and disqualify a follower's recovery condition (b).
+    flow_class_no_fallback = [
+        None if _is_fallback_flow_confidence(b.flow_confidence) else b.flow_class
+        for b in breath_rows
+    ]
 
     machine_starts: list[float] = []
     if with_machine_re:
@@ -605,9 +648,10 @@ async def _load_proxy_session(
         therapy_date=DayManager.get_day_for_session(session.start_time),
         duration_hours=(session.duration_seconds or 0) / 3600.0,
         proxy_rows=build_proxy_breath_rows(
-            [b.flow_class for b in breath_rows],
-            [b.is_recovery_breath for b in breath_rows],
-            [b.peak_flow_lpm for b in breath_rows],
+            [b.flow_class for b in breath_rows], is_recovery, peak
+        ),
+        proxy_rows_no_fallback=build_proxy_breath_rows(
+            flow_class_no_fallback, is_recovery, peak
         ),
         start_offset_s=[b.start_offset_s for b in breath_rows],
         machine_starts=machine_starts,
