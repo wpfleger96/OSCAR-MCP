@@ -12,22 +12,29 @@
                 <span v-if="unit" class="stat-unit">{{ unit }}</span>
             </template>
             <template v-else>
-                <span class="stat-empty">---</span>
+                <span class="stat-empty" :title="reasonLabel ?? undefined">---</span>
             </template>
         </div>
     </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import InfoHint from '@/components/InfoHint.vue'
+import { nullReasonLabel } from '@/utils/formatting'
 
-defineProps<{
+const props = defineProps<{
     label: string
     value: number | null | undefined
     unit?: string
     decimals?: number
     glossaryKey?: string
+    // Null-with-reason code (e.g. 'analysis_not_run'); shown as a tooltip on the
+    // em-dash state to explain why a value is absent for this night.
+    reason?: string | null
 }>()
+
+const reasonLabel = computed(() => nullReasonLabel(props.reason))
 </script>
 
 <style scoped>

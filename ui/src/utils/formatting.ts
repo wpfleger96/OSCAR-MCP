@@ -134,3 +134,34 @@ export function avg(vals: (number | null | undefined)[]): number | null {
     const nonNull = vals.filter((v): v is number => v != null)
     return nonNull.length ? nonNull.reduce((a, b) => a + b, 0) / nonNull.length : null
 }
+
+// Friendly text for the backend's null-with-reason codes (NullReason enum), used
+// to explain why an experimental metric is absent for a given night. Unmapped
+// codes fall back to the prettified code so new reasons stay readable.
+const NULL_REASON_LABELS: Record<string, string> = {
+    analysis_not_run: 'Breath analysis has not been run for this night.',
+    analysis_stale: 'Breath analysis is out of date for this night.',
+    algo_version_mismatch: 'Produced by a different analysis algorithm version.',
+    channel_absent: 'A required signal channel is not available.',
+    channel_unaligned: 'Signal channels could not be aligned for this night.',
+    not_available: 'Not available for this night.',
+    no_data_in_range: 'No breath data was recorded for this night.',
+    table_missing: 'Breath-level data has not been stored for this night.',
+    duration_zero: 'Therapy duration was zero, so a per-hour rate is undefined.',
+    no_sessions: 'No therapy sessions were recorded for this night.',
+    primary_mode_mismatch:
+        "This night's therapy mode did not match the primary mode for this period.",
+    smart_ramp_indeterminate:
+        'The smart-ramp period could not be determined, so sleep onset could not be excluded.',
+    segments_unknown: 'The breath segments for this night could not be determined.',
+    multi_session_ambiguity:
+        'Multiple overlapping sessions made this metric ambiguous for the night.',
+    unvalidated_device: 'This device model has not been validated for this metric.',
+    rx_changed_within_epoch: 'The prescription changed partway through this period.',
+}
+
+/** Humanize a NullReason code into a sentence for tooltips; null when absent. */
+export function nullReasonLabel(reason: string | null | undefined): string | null {
+    if (!reason) return null
+    return NULL_REASON_LABELS[reason] ?? reason.replace(/_/g, ' ')
+}
