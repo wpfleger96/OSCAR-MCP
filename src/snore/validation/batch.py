@@ -21,6 +21,7 @@ from snore.validation.report import (
     SessionValidation,
     ValidationReport,
 )
+from snore.validation.session_scoping import work_session
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +29,19 @@ logger = logging.getLogger(__name__)
 class BatchValidator:
     """Runs validation across multiple sessions."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int):
+    def __init__(self, db_session: AsyncSession | None, profile_id: int):
         """
         Initialize batch validator.
 
         Args:
-            db_session: Async database session
+            db_session: Async database session, or None to run in JOB mode where
+                work_session opens a fresh short scope per session so the WAL
+                read snapshot is released between sessions.  A real session runs
+                every unit of work on it — one transaction — as before.
             profile_id: Profile ID to scope all queries — required, never global.
         """
-        self.db_session = db_session
+        self._injected = db_session
+        self.db_session: AsyncSession = db_session  # type: ignore[assignment]
         self.profile_id = profile_id
 
     async def validate_date_range(
@@ -67,42 +72,46 @@ class BatchValidator:
             )
         )
 
-        sessions = (
-            (await self.db_session.execute(stmt.order_by(models.Session.start_time)))
-            .scalars()
-            .all()
-        )
-
-        logger.info(f"Found {len(sessions)} sessions between {date_from} and {date_to}")
-
-        # Bulk-fetch all Statistics rows for the session set in one query.
-        session_ids = [s.id for s in sessions]
-        stats_by_session_id: dict[int, models.Statistics] = {}
-        if session_ids:
-            stat_rows = (
-                (
-                    await self.db_session.execute(
-                        select(models.Statistics).where(
-                            models.Statistics.session_id.in_(session_ids)
-                        )
-                    )
-                )
+        # Bulk-fetch the session set and its Statistics rows in one short scope.
+        async with work_session(self._injected) as db:
+            self.db_session = db
+            sessions = (
+                (await db.execute(stmt.order_by(models.Session.start_time)))
                 .scalars()
                 .all()
             )
-            stats_by_session_id = {int(r.session_id): r for r in stat_rows}
+            logger.info(
+                f"Found {len(sessions)} sessions between {date_from} and {date_to}"
+            )
+            session_ids = [s.id for s in sessions]
+            stats_by_session_id: dict[int, models.Statistics] = {}
+            if session_ids:
+                stat_rows = (
+                    (
+                        await db.execute(
+                            select(models.Statistics).where(
+                                models.Statistics.session_id.in_(session_ids)
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                stats_by_session_id = {int(r.session_id): r for r in stat_rows}
 
         session_validations = []
 
-        for session in sessions:
+        for session_id in session_ids:
             try:
-                validation = await self._validate_session(
-                    session.id, mode, stats_by_session_id
-                )
+                async with work_session(self._injected) as db:
+                    self.db_session = db
+                    validation = await self._validate_session(
+                        session_id, mode, stats_by_session_id
+                    )
                 if validation:
                     session_validations.append(validation)
             except Exception as e:
-                logger.warning(f"Failed to validate session {session.id}: {e}")
+                logger.warning(f"Failed to validate session {session_id}: {e}")
                 continue
 
         aggregate = self._calculate_aggregate(session_validations)

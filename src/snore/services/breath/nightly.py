@@ -34,6 +34,10 @@ from .dtos import (
     SessionCoverage,
 )
 
+# Maximum calendar nights a single get_nightly_range_summary call may span.
+# Longer ranges must be paged by the caller (e.g. AppleCrossValidator).
+MAX_NIGHTS_PER_CALL = 90
+
 
 def _stat_pair(
     value: float | None, reason: NullReason
@@ -426,11 +430,10 @@ class NightlyMixin(_BreathServiceCore):
         n_calendar = (date_end - date_start).days + 1
 
         # Enforce pagination cap (plan Phase 1: "paginated ~30 nights/call").
-        _MAX_NIGHTS = 90
-        if n_calendar > _MAX_NIGHTS:
+        if n_calendar > MAX_NIGHTS_PER_CALL:
             raise ValueError(
                 f"Date range spans {n_calendar} nights; maximum per call is "
-                f"{_MAX_NIGHTS}. Use multiple calls to page over longer ranges."
+                f"{MAX_NIGHTS_PER_CALL}. Use multiple calls to page over longer ranges."
             )
 
         # Resolve device ONCE across the full range.

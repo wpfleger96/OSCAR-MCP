@@ -59,6 +59,8 @@ from snore.api.routers import (
 from snore.api.routers import auth as auth_router
 from snore.api.routers import health as health_routes
 from snore.api.routers import me as me_router
+from snore.api.validation_jobs import shutdown as _shutdown_validation_jobs
+from snore.api.validation_jobs import start_worker as _start_validation_worker
 from snore.database.session import init_database, init_database_from_url
 
 API_V1_PREFIX = "/api/v1"
@@ -173,6 +175,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Mark orphaned import/analysis jobs as failed; collect resume candidates.
     import_resume_candidates = await _recover_orphaned_import_jobs()
     analysis_affected_profiles = await _recover_orphaned_analysis_jobs()
+    # Validation runs are idempotent — mark orphans failed (no auto-resume) and
+    # prune to the retention cap in the same startup sweep.
+    await _recover_orphaned_validation_jobs()
 
     # Clean stale spool directories, skipping any that will be resumed.
     skip_paths = {c[0] for c in import_resume_candidates}
@@ -191,6 +196,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ),
     )
     _start_analysis_worker()
+    _start_validation_worker()
     from snore.api.import_worker import _run_dispatch  # noqa: PLC0415
 
     _start_import_worker(_run_dispatch)
@@ -229,6 +235,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 _shutdown_analysis_jobs()
             except Exception:
                 logger.warning("Error shutting down analysis jobs", exc_info=True)
+            try:
+                _shutdown_validation_jobs()
+            except Exception:
+                logger.warning("Error shutting down validation jobs", exc_info=True)
             try:
                 from snore.utils.process_pool import shutdown_pool  # noqa: PLC0415
 
@@ -668,6 +678,20 @@ async def _recover_orphaned_analysis_jobs() -> set[int]:
     return affected_profiles
 
 
+async def _recover_orphaned_validation_jobs() -> None:
+    """Fail orphaned validation runs and prune to the retention cap at startup.
+
+    Non-terminal ``validation_runs`` rows are runs interrupted by a crash or
+    restart; validation is idempotent so they are marked failed and NOT
+    auto-resumed.  The retention prune keeps only the newest rows per
+    ``(profile_id, validator_type)`` so the comparison history stays bounded.
+    """
+    from snore.api import validation_jobs  # noqa: PLC0415
+
+    await validation_jobs.recover_orphaned_runs()
+    await validation_jobs.prune_retention()
+
+
 def _startup_resume_imports(
     candidates: list[tuple[Path, int, int | None, str]],
 ) -> None:
@@ -888,17 +912,22 @@ def create_app() -> FastAPI:
     @app.get("/health/busy", include_in_schema=False)
     async def health_busy() -> dict[str, bool]:
         from snore.api import analysis_jobs as _analysis_jobs  # noqa: PLC0415
+        from snore.api import validation_jobs as _validation_jobs  # noqa: PLC0415
         from snore.api.deps import is_reset_locked  # noqa: PLC0415
         from snore.api.import_jobs import has_active_jobs  # noqa: PLC0415
 
         reasons: list[str] = []
         # Import jobs gate on PENDING_UPLOAD/PENDING/RUNNING — all three states
-        # represent in-flight work.  Analysis gates on RUNNING only: QUEUED jobs
-        # have no in-progress data writes and are safe to interrupt.
+        # represent in-flight work.  Analysis and validation gate on RUNNING
+        # only: QUEUED jobs have no in-progress data writes and are safe to
+        # interrupt.  A multi-minute validation run must not be cut off by a
+        # watchtower container replacement.
         if has_active_jobs():
             reasons.append("imports")
         if _analysis_jobs.has_running_jobs():
             reasons.append("analysis")
+        if _validation_jobs.has_running_jobs():
+            reasons.append("validation")
         if is_reset_locked():
             reasons.append("reset")
         logger.debug("health/busy: %s", reasons)
