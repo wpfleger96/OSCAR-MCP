@@ -545,7 +545,12 @@ class EpochStats(BaseModel):
     primary_mode: str | None = None
     mid_insp_flattening: EpochDistribution
     flatness_index: EpochDistribution
+    # Rule-matched FL classifications only; the class>=4 fraction reconciles with
+    # nightly fl_class_ge4_pct.  Keys are strings because JSON object keys are.
     flow_class_distribution: dict[str, int] = {}
+    # Low-confidence fallback flatness-triage guesses (confidence at the default),
+    # reported separately so they don't inflate FL rates.
+    flow_class_distribution_fallback: dict[str, int] = {}
     tidal_volume_ml: EpochDistribution
     ie_ratio: EpochDistribution
     rera_proxy_count: int | None = None

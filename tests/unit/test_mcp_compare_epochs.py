@@ -45,6 +45,7 @@ def _make_epoch_stats(
     null_reason: Any = None,
     algorithm_identity: Any = None,
     flow_class_distribution: dict[int, int] | None = None,
+    flow_class_distribution_fallback: dict[int, int] | None = None,
     rera_reason: Any = None,
     rera_proxy_count: int | None = 0,
 ) -> Any:
@@ -76,6 +77,9 @@ def _make_epoch_stats(
         flow_class_distribution=flow_class_distribution
         if flow_class_distribution is not None
         else ({3: 10, 4: 5} if has_data else {}),
+        flow_class_distribution_fallback=flow_class_distribution_fallback
+        if flow_class_distribution_fallback is not None
+        else ({4: 3} if has_data else {}),
         tidal_volume_ml=pop_dist if has_data else null_dist,
         ie_ratio=pop_dist if has_data else null_dist,
         rera_proxy_count=rera_proxy_count if has_data else None,
@@ -146,6 +150,9 @@ class TestCompareEpochsRoundtrip:
         assert all(isinstance(k, str) for k in ep["flow_class_distribution"])
         assert ep["flow_class_distribution"]["3"] == 10
         assert ep["flow_class_distribution"]["4"] == 5
+        # Fallback bucket maps through with string keys, kept separate.
+        assert all(isinstance(k, str) for k in ep["flow_class_distribution_fallback"])
+        assert ep["flow_class_distribution_fallback"]["4"] == 3
         # algorithm_identity must be a dict (model_dump result)
         assert isinstance(ep["algorithm_identity"], dict)
         assert "segmenter" in ep["algorithm_identity"]

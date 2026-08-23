@@ -218,6 +218,11 @@ class FlowLimitationConstants:
     FL_CLASS1_FLATNESS_MAX = 0.45
     FL_CLASS1_SYMMETRY_MAX = 0.3
 
+    # Fallback flatness-triage cutoffs: when no shape rule matches, the breath is
+    # binned by flatness alone (class 1 / 4 / 7) at FL_DEFAULT_CONFIDENCE.
+    FL_FALLBACK_FLATNESS_CLASS1_MAX = 0.5
+    FL_FALLBACK_FLATNESS_CLASS4_MAX = 0.7
+
     # Threshold-margin confidence: rule-matched confidence is
     # FL_CONFIDENCE_BASE + FL_CONFIDENCE_MARGIN_SCALE * mean(margins), where each
     # margin is the fractional distance of a value past its threshold, clipped to

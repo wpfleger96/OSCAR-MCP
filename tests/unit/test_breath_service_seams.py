@@ -133,8 +133,15 @@ async def _store_analysis_with_breaths(
     n_breaths: int = 5,
     flow_class: int | None = 1,
     is_recovery: bool = False,
+    flow_specs: list[tuple[int | None, float]] | None = None,
 ) -> models.AnalysisResult:
-    """Write an AnalysisResult + Breath rows via AnalysisService.store_result."""
+    """Write an AnalysisResult + Breath rows via AnalysisService.store_result.
+
+    ``flow_specs`` overrides the uniform (flow_class, flow_confidence) with an
+    explicit per-breath list, used to exercise the rule-matched / fallback split.
+    """
+    if flow_specs is not None:
+        n_breaths = len(flow_specs)
     result_dto = AnalysisResultDTO(
         session_id=session.id,
         session_duration_hours=session.duration_seconds / 3600.0
@@ -171,8 +178,8 @@ async def _store_analysis_with_breaths(
             respiratory_rate_rolling=15.0,
             flatness_index=0.2,
             mid_insp_flattening=0.35,
-            flow_class=flow_class,
-            flow_confidence=0.9,
+            flow_class=flow_specs[i][0] if flow_specs is not None else flow_class,
+            flow_confidence=flow_specs[i][1] if flow_specs is not None else 0.9,
             is_recovery_breath=is_recovery if i == n_breaths - 1 else False,
             inferred_trigger_type="normal",
             trigger_confidence=0.8,
@@ -749,6 +756,55 @@ class TestCompareEpochs:
         assert es.nights_with_data > 0
         assert es.algorithm_identity is not None
         assert es.null_reason is None
+
+    async def test_mixed_confidence_splits_rule_matched_from_fallback_guesses(
+        self, async_db_session
+    ):
+        """flow_class_distribution counts only rule-matched breaths (confidence >
+        FL_DEFAULT_CONFIDENCE); fallback guesses stamped at exactly the default
+        confidence land in flow_class_distribution_fallback.  Union equals total.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 4, 1)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        default_conf = FLC.FL_DEFAULT_CONFIDENCE
+        # 3 rule-matched (confidence above the gate): classes 3, 4, 4.
+        # 2 fallback guesses (confidence exactly at the gate): classes 1, 4.
+        await _store_analysis_with_breaths(
+            async_db_session,
+            session,
+            profile_id,
+            flow_specs=[
+                (3, 0.9),
+                (4, 0.8),
+                (4, 0.75),
+                (1, default_conf),
+                (4, default_conf),
+            ],
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="apr",
+                    date_start=therapy_date,
+                    date_end=therapy_date,
+                    device_id=dev.id,
+                )
+            ]
+        )
+
+        es = result.epochs[0]
+        assert es.null_reason is None
+        assert es.flow_class_distribution == {3: 1, 4: 2}
+        assert es.flow_class_distribution_fallback == {1: 1, 4: 1}
+        # Every classified breath lands in exactly one dict; union equals total.
+        rule_total = sum(es.flow_class_distribution.values())
+        fallback_total = sum(es.flow_class_distribution_fallback.values())
+        assert rule_total + fallback_total == 5
 
 
 # ---------------------------------------------------------------------------

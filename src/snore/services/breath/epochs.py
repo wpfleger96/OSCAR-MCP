@@ -19,6 +19,7 @@ from snore.analysis.shared.versioning import (
     AnalysisStatus,
     NullReason,
 )
+from snore.constants import FlowLimitationConstants as FLC
 from snore.database import models
 from snore.utils.stats import percentile_nearest_rank
 
@@ -63,6 +64,7 @@ def _null_epoch_stats(
         mid_insp_flattening=null_dist,
         flatness_index=null_dist,
         flow_class_distribution={},
+        flow_class_distribution_fallback={},
         tidal_volume_ml=null_dist,
         ie_ratio=null_dist,
         rera_proxy_count=None,
@@ -88,6 +90,10 @@ class EpochsMixin(_BreathServiceCore):
         Warning (non-blocking): CROSS_VERSION_REFUSAL_KEYS differ across epochs —
         distributions are still computed; callers should inspect version_warnings.
         Mixed primary modes degrade RERA fields only (PRIMARY_MODE_MISMATCH).
+
+        flow_class_distribution counts rule-matched classifications only (the same
+        confidence gate as nightly fl_class_ge4_pct); low-confidence fallback
+        guesses are reported separately in flow_class_distribution_fallback.
         """
         from snore.services.breath_service import BreathService  # noqa: PLC0415
 
@@ -440,10 +446,26 @@ class EpochsMixin(_BreathServiceCore):
                 if b.tidal_volume_ml is not None
             ]
             ie_vals = [b.i_e_ratio for b in all_breath_rows if b.i_e_ratio is not None]
+            # Split FL classifications by the same confidence gate nightly uses:
+            # rule-matched (flow_confidence > FL_DEFAULT_CONFIDENCE) go in fc_dist so
+            # the class>=4 fraction reconciles with nightly fl_class_ge4_pct; low-
+            # confidence fallback flatness-triage guesses (confidence exactly at the
+            # default) go in fc_dist_fallback so they don't inflate FL rates.  Every
+            # breath with a non-null flow_class lands in exactly one dict.
             fc_dist: dict[int, int] = {}
+            fc_dist_fallback: dict[int, int] = {}
             for b in all_breath_rows:
-                if b.flow_class is not None:
+                if b.flow_class is None:
+                    continue
+                if (
+                    b.flow_confidence is not None
+                    and b.flow_confidence > FLC.FL_DEFAULT_CONFIDENCE
+                ):
                     fc_dist[b.flow_class] = fc_dist.get(b.flow_class, 0) + 1
+                else:
+                    fc_dist_fallback[b.flow_class] = (
+                        fc_dist_fallback.get(b.flow_class, 0) + 1
+                    )
 
             # RERA proxy: FL runs ending in recovery breath
             rera_count: int | None = None
@@ -515,6 +537,7 @@ class EpochsMixin(_BreathServiceCore):
                     if DistributionMetric.FLATNESS_INDEX in requested
                     else _null_dist,
                     flow_class_distribution=fc_dist,
+                    flow_class_distribution_fallback=fc_dist_fallback,
                     tidal_volume_ml=_distrib(tv_vals, n_lv, n_nights_contrib)
                     if DistributionMetric.TIDAL_VOLUME_ML in requested
                     else _null_dist,
