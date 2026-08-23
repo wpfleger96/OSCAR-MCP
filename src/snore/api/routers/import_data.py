@@ -8,7 +8,6 @@ import shutil
 import uuid
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, MutableMapping
-from datetime import datetime
 from pathlib import Path
 from typing import IO, Annotated, Any
 
@@ -811,13 +810,9 @@ async def list_pipeline_jobs(
                 state=import_state.value,
                 stage=stage,
                 file_count=job.file_count,
-                created_at=job.created_at_wall.isoformat(),
-                started_at=job.started_at_wall.isoformat()
-                if job.started_at_wall
-                else None,
-                finished_at=job.finished_at_wall.isoformat()
-                if job.finished_at_wall
-                else None,
+                created_at=job.created_at_wall,
+                started_at=job.started_at_wall,
+                finished_at=job.finished_at_wall,
                 progress_message=job.latest_progress_message,
                 sessions_imported=job.sessions_imported,
                 import_result=import_result_summary,
@@ -858,13 +853,9 @@ async def list_pipeline_jobs(
             state=rec.state,
             stage=stage,
             file_count=rec.file_count,
-            created_at=rec.created_at.isoformat(),
-            started_at=rec.started_at.isoformat()
-            if rec.started_at is not None
-            else None,
-            finished_at=rec.finished_at.isoformat()
-            if rec.finished_at is not None
-            else None,
+            created_at=rec.created_at,
+            started_at=rec.started_at,
+            finished_at=rec.finished_at,
             progress_message=None,
             sessions_imported=rec.sessions_imported,
             import_result=rec_import_result_summary,
@@ -887,7 +878,7 @@ async def list_pipeline_jobs(
         in_memory_ids,
         db_records,
         to_status=_db_row_to_status,
-        sort_key=lambda j: datetime.fromisoformat(j.created_at),
+        sort_key=lambda j: j.created_at,
     )
     return PipelineJobsListResponse(jobs=merged)
 

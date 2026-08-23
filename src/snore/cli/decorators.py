@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,14 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@dataclass(frozen=True, slots=True)
+class CliCtx:
+    """Runtime context injected into ``@profile_scoped_command`` bodies."""
+
+    db: AsyncSession
+    profile_id: int
 
 
 def init_db(db: str | None) -> None:
@@ -40,6 +49,27 @@ async def db_session(db: str | None) -> AsyncIterator[AsyncSession]:
     await init_database(str(Path(db).expanduser()) if db else None)
     async with session_scope() as session:
         yield session
+
+
+@asynccontextmanager
+async def cli_error_boundary(label: str) -> AsyncIterator[None]:
+    """Standard CLI error boundary: ClickException passes through; any other
+    exception is reported to stderr (with a traceback at DEBUG) and re-raised
+    as a ClickException."""
+    import logging  # noqa: PLC0415
+    import traceback  # noqa: PLC0415
+
+    from snore.cli.display import err_console  # noqa: PLC0415
+
+    try:
+        yield
+    except click.ClickException:
+        raise
+    except Exception as e:
+        err_console.print(f"{label}: {e}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            traceback.print_exc()
+        raise click.ClickException(str(e)) from e
 
 
 def db_option(f: Any) -> Any:
@@ -128,8 +158,9 @@ def actor_options(f: Any) -> Any:
     the ``--user`` option used by ``snore user`` / ``snore profile`` operator
     commands.
 
-    Pass both values to ``resolve_cli_profile_id(db, actor_user, actor_profile)``
-    inside the command's async body.
+    Most commands should prefer ``profile_scoped_command``, which bundles these
+    options with the async runtime preamble.  Use ``actor_options`` directly only
+    when a command needs custom control over session/profile resolution.
     """
     f = click.option(
         "--profile",
@@ -146,3 +177,44 @@ def actor_options(f: Any) -> Any:
         help="User email (default: local admin user; env: SNORE_USER)",
     )(f)
     return f
+
+
+def profile_scoped_command(f: Any) -> Any:
+    """Bundle ``--db`` + ``--user``/``--profile`` options with the async runtime preamble.
+
+    The decorated body must be ``async def body(ctx: CliCtx, **command_kwargs)``.
+    At call time this opens a DB session, resolves the profile id, builds a
+    ``CliCtx``, runs the body under ``asyncio.run``, and returns its value.
+    ``click.ClickException`` raised inside the body propagates unchanged.
+
+    An explicit ``--db`` must already exist: since ``init_database`` silently
+    creates a missing SQLite file, the path is checked before the session opens.
+    """
+    import asyncio  # noqa: PLC0415
+    import functools  # noqa: PLC0415
+
+    @functools.wraps(f)
+    def wrapper(
+        *args: Any,
+        db: str | None,
+        actor_user: str | None,
+        actor_profile: str | None,
+        **kwargs: Any,
+    ) -> Any:
+        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+
+        if db and not Path(db).expanduser().exists():
+            raise click.ClickException(f"Database not found: {db}")
+
+        async def _run() -> Any:
+            async with db_session(db) as session:
+                profile_id = await resolve_cli_profile_id(
+                    session, actor_user, actor_profile
+                )
+                return await f(
+                    CliCtx(db=session, profile_id=profile_id), *args, **kwargs
+                )
+
+        return asyncio.run(_run())
+
+    return db_option(actor_options(wrapper))

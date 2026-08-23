@@ -6,10 +6,10 @@ vi.mock('@/components/ui/button', () => ({
 }))
 
 import AnalysisJobsBanner from '@/components/AnalysisJobsBanner.vue'
-import type { AnalysisJobInfo } from '@/api/analysis'
+import type { AnalysisJobStatus } from '@/types'
 
-function makeJob(overrides: Partial<AnalysisJobInfo> = {}): AnalysisJobInfo {
-    const nowSecs = Date.now() / 1000
+function makeJob(overrides: Partial<AnalysisJobStatus> = {}): AnalysisJobStatus {
+    const now = new Date().toISOString()
     return {
         job_id: 'job-1',
         state: 'succeeded',
@@ -18,9 +18,9 @@ function makeJob(overrides: Partial<AnalysisJobInfo> = {}): AnalysisJobInfo {
         progress_completed: 5,
         progress_total: 5,
         error_message: null,
-        created_at: nowSecs,
-        started_at: nowSecs,
-        finished_at: nowSecs,
+        created_at: now,
+        started_at: now,
+        finished_at: now,
         owner_user_id: 1,
         ...overrides,
     }
@@ -41,17 +41,5 @@ describe('AnalysisJobsBanner', () => {
         const ts = wrapper.find('.job-timestamp')
         expect(ts.exists()).toBe(true)
         expect(ts.text()).toBe('just now')
-    })
-
-    it('test_monotonic_style_timestamp_does_not_render_as_just_now', () => {
-        // Guard the PR #290 bug: the API must send wall-clock epoch seconds. A
-        // time.monotonic() value (seconds since boot, e.g. ~12345) maps to a
-        // 1970-era instant, so it must NOT render as a recent relative time.
-        const wrapper = mount(AnalysisJobsBanner, {
-            props: { jobs: [makeJob({ created_at: 12345.6, finished_at: 12345.6 })] },
-        })
-        const text = wrapper.find('.job-timestamp').text()
-        expect(text).not.toBe('just now')
-        expect(text).not.toMatch(/\bago$/)
     })
 })

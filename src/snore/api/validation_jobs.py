@@ -149,7 +149,7 @@ class ValidationRunJob(JobRecordBase[ValidationRunState]):
             self._finished_at_wall = datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
-        """A JSON-serialisable status snapshot (wall-clock epoch timestamps)."""
+        """A ``model_validate`` snapshot containing wall-clock datetime values."""
         with self._lock:
             return {
                 "run_id": self.run_id,
@@ -162,13 +162,9 @@ class ValidationRunJob(JobRecordBase[ValidationRunState]):
                 "engine_identity": self.engine_identity,
                 "validator_params": self.validator_params,
                 "owner_user_id": self.owner_user_id,
-                "created_at": self.created_at_wall.timestamp(),
-                "started_at": self._started_at_wall.timestamp()
-                if self._started_at_wall
-                else None,
-                "finished_at": self._finished_at_wall.timestamp()
-                if self._finished_at_wall
-                else None,
+                "created_at": self.created_at_wall,
+                "started_at": self._started_at_wall,
+                "finished_at": self._finished_at_wall,
                 "reused": False,
             }
 

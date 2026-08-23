@@ -1,8 +1,13 @@
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 import snore.api.analysis_jobs as aj_store
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
+
 
 # ---------------------------------------------------------------------------
 # Fixture: clean analysis job state between tests
@@ -369,6 +374,48 @@ class TestAnalysisJobsAPI:
         data = response.json()
         ids = [j["job_id"] for j in data["jobs"]]
         assert job.job_id in ids
+
+        j = next(j for j in data["jobs"] if j["job_id"] == job.job_id)
+        _assert_utc_timestamp(j["created_at"])
+        assert j["started_at"] is None
+        assert j["finished_at"] is None
+
+    def test_list_jobs_includes_persisted_terminal_job(self, api_client, db_session):
+        from snore.database.models import AnalysisJobRecord
+
+        now = datetime.now(UTC)
+        db_session.add(
+            AnalysisJobRecord(
+                job_id="persisted-analysis-job",
+                source="batch",
+                profile_id=1,
+                owner_user_id=None,
+                session_ids_json=[10],
+                modes=["aasm"],
+                primary_mode="aasm",
+                store_results=True,
+                state="succeeded",
+                progress_completed=1,
+                progress_total=1,
+                error_message=None,
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+                updated_at=now,
+            )
+        )
+        db_session.commit()
+
+        response = api_client.get("/api/v1/analysis/jobs")
+        assert response.status_code == 200
+        job = next(
+            job
+            for job in response.json()["jobs"]
+            if job["job_id"] == "persisted-analysis-job"
+        )
+        _assert_utc_timestamp(job["created_at"])
+        _assert_utc_timestamp(job["started_at"])
+        _assert_utc_timestamp(job["finished_at"])
 
 
 # ---------------------------------------------------------------------------

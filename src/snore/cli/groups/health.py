@@ -11,13 +11,12 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import (
+    CliCtx,
     actor_options,
     date_range_options,
     db_option,
     init_db,
-)
-from snore.cli.decorators import (
-    db_session as open_db_session,
+    profile_scoped_command,
 )
 from snore.cli.display import (
     ICON_CHART,
@@ -106,6 +105,7 @@ def health() -> None:
     show_default=True,
     help="Records per database transaction",
 )
+# Not @profile_scoped_command: resolves the profile briefly, then manages its own per-batch write sessions.
 @db_option
 @actor_options
 def health_import(
@@ -137,8 +137,8 @@ def health_import(
     async def _run() -> None:
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
-        from snore.services.health_import_service import (
-            HealthImportService,  # noqa: PLC0415
+        from snore.services.health_import_service import (  # noqa: PLC0415
+            HealthImportService,
         )
 
         async with session_scope() as session:
@@ -202,166 +202,139 @@ def health_import(
     show_default=True,
     help="Max nights to show",
 )
-@db_option
-@actor_options
-def health_list(
+@profile_scoped_command
+async def health_list(
+    ctx: CliCtx,
     date_from: datetime | None,
     date_to: datetime | None,
     limit: int,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """List nightly sleep summaries (newest first)."""
+    from snore.services.health_service import HealthService  # noqa: PLC0415
 
-    async def _run() -> None:
-        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.services.health_service import HealthService  # noqa: PLC0415
+    svc = HealthService(ctx.db, ctx.profile_id)
+    rows, _ = await svc.list_nights(
+        from_date=date_from.date() if date_from else None,
+        to_date=date_to.date() if date_to else None,
+        limit=limit,
+        offset=0,
+    )
 
-        async with open_db_session(db) as session:
-            profile_id = await resolve_cli_profile_id(
-                session, actor_user, actor_profile
-            )
-            svc = HealthService(session, profile_id)
-            rows, _ = await svc.list_nights(
-                from_date=date_from.date() if date_from else None,
-                to_date=date_to.date() if date_to else None,
-                limit=limit,
-                offset=0,
-            )
+    if not rows:
+        console.print("No sleep data found")
+        return
 
-        if not rows:
-            console.print("No sleep data found")
-            return
-
-        print_table(
-            [
-                ("Date", 12),
-                ("Sleep", 8),
-                ("Eff%", 6),
-                ("Core", 7),
-                ("Deep", 7),
-                ("REM", 7),
-                ("Source", 0),
-            ],
+    print_table(
+        [
+            ("Date", 12),
+            ("Sleep", 8),
+            ("Eff%", 6),
+            ("Core", 7),
+            ("Deep", 7),
+            ("REM", 7),
+            ("Source", 0),
+        ],
+        (
             (
-                (
-                    str(row.night_date),
-                    _fmt_hours(row.total_sleep_seconds),
-                    _fmt_pct(row.sleep_efficiency_pct),
-                    _fmt_hours(row.core_seconds),
-                    _fmt_hours(row.deep_seconds),
-                    _fmt_hours(row.rem_seconds),
-                    row.preferred_source or "—",
-                )
-                for row in rows
-            ),
-            wide=False,
-        )
-
-    asyncio.run(_run())
+                str(row.night_date),
+                _fmt_hours(row.total_sleep_seconds),
+                _fmt_pct(row.sleep_efficiency_pct),
+                _fmt_hours(row.core_seconds),
+                _fmt_hours(row.deep_seconds),
+                _fmt_hours(row.rem_seconds),
+                row.preferred_source or "—",
+            )
+            for row in rows
+        ),
+        wide=False,
+    )
 
 
 @health.command("show")
 @click.argument("night_date", metavar="DATE", type=click.DateTime(formats=["%Y-%m-%d"]))
-@db_option
-@actor_options
-def health_show(
-    night_date: datetime,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
-) -> None:
+@profile_scoped_command
+async def health_show(ctx: CliCtx, night_date: datetime) -> None:
     """Show sleep detail for a single night (YYYY-MM-DD)."""
+    from sqlalchemy import select as sa_select  # noqa: PLC0415
+
+    from snore.database.models import HealthSample  # noqa: PLC0415
+    from snore.exceptions import NotFoundError  # noqa: PLC0415
+    from snore.parsers.apple_health.type_handlers import SLEEP_TYPE  # noqa: PLC0415
+    from snore.services.health_service import HealthService  # noqa: PLC0415
+
     night = night_date.date()
+    svc = HealthService(ctx.db, ctx.profile_id)
 
-    async def _run() -> None:
-        from sqlalchemy import select as sa_select  # noqa: PLC0415
+    try:
+        detail = await svc.get_night_detail(night)
+    except NotFoundError:
+        raise click.ClickException(f"No health data for {night}") from None
 
-        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.database.models import HealthSample  # noqa: PLC0415
-        from snore.exceptions import NotFoundError  # noqa: PLC0415
-        from snore.parsers.apple_health.type_handlers import SLEEP_TYPE  # noqa: PLC0415
-        from snore.services.health_service import HealthService  # noqa: PLC0415
+    sleep_samples = await svc.get_night_samples(night)
 
-        async with open_db_session(db) as session:
-            profile_id = await resolve_cli_profile_id(
-                session, actor_user, actor_profile
-            )
-            svc = HealthService(session, profile_id)
-
-            try:
-                detail = await svc.get_night_detail(night)
-            except NotFoundError:
-                raise click.ClickException(f"No health data for {night}") from None
-
-            sleep_samples = await svc.get_night_samples(night)
-
-            quantity_samples = list(
-                (
-                    await session.execute(
-                        sa_select(HealthSample)
-                        .where(
-                            HealthSample.profile_id == profile_id,
-                            HealthSample.night_date == night,
-                            HealthSample.record_type != SLEEP_TYPE,
-                        )
-                        .order_by(HealthSample.start_time)
-                    )
+    quantity_samples = list(
+        (
+            await ctx.db.execute(
+                sa_select(HealthSample)
+                .where(
+                    HealthSample.profile_id == ctx.profile_id,
+                    HealthSample.night_date == night,
+                    HealthSample.record_type != SLEEP_TYPE,
                 )
-                .scalars()
-                .all()
+                .order_by(HealthSample.start_time)
             )
+        )
+        .scalars()
+        .all()
+    )
 
-        # Display sleep stage intervals from the preferred source.
-        if sleep_samples:
-            source_display = detail.preferred_source or "unknown"
-            print_header(f"Sleep Intervals — {source_display}", ICON_SCAN)
-            print_table(
-                [("Start", 8), ("End", 8), ("Stage", 22), ("Duration", 0)],
+    # Display sleep stage intervals from the preferred source.
+    if sleep_samples:
+        source_display = detail.preferred_source or "unknown"
+        print_header(f"Sleep Intervals — {source_display}", ICON_SCAN)
+        print_table(
+            [("Start", 8), ("End", 8), ("Stage", 22), ("Duration", 0)],
+            (
                 (
-                    (
-                        f"{s.start_time:%H:%M}",
-                        f"{s.end_time:%H:%M}",
-                        _stage_label(s.value_text),
-                        _fmt_duration_label(s.start_time, s.end_time),
-                    )
-                    for s in sleep_samples
-                ),
-                wide=False,
-            )
+                    f"{s.start_time:%H:%M}",
+                    f"{s.end_time:%H:%M}",
+                    _stage_label(s.value_text),
+                    _fmt_duration_label(s.start_time, s.end_time),
+                )
+                for s in sleep_samples
+            ),
+            wide=False,
+        )
 
-        # Summary totals block.
-        print_header("Totals", ICON_STATS)
-        for label, value in [
-            ("Total sleep", _fmt_hours(detail.total_sleep_seconds)),
-            ("Time in bed", _fmt_hours(detail.time_in_bed_seconds)),
-            ("Efficiency", _fmt_pct(detail.sleep_efficiency_pct)),
-            ("Core", _fmt_hours(detail.core_seconds)),
-            ("Deep", _fmt_hours(detail.deep_seconds)),
-            ("REM", _fmt_hours(detail.rem_seconds)),
-            ("Awake", _fmt_hours(detail.awake_seconds)),
-            ("Stage coverage", _fmt_pct(detail.stage_coverage_pct)),
-        ]:
-            console.print(f"  {label:<18} {value}", markup=False, highlight=False)
-        print_footer()
+    # Summary totals block.
+    print_header("Totals", ICON_STATS)
+    for label, value in [
+        ("Total sleep", _fmt_hours(detail.total_sleep_seconds)),
+        ("Time in bed", _fmt_hours(detail.time_in_bed_seconds)),
+        ("Efficiency", _fmt_pct(detail.sleep_efficiency_pct)),
+        ("Core", _fmt_hours(detail.core_seconds)),
+        ("Deep", _fmt_hours(detail.deep_seconds)),
+        ("REM", _fmt_hours(detail.rem_seconds)),
+        ("Awake", _fmt_hours(detail.awake_seconds)),
+        ("Stage coverage", _fmt_pct(detail.stage_coverage_pct)),
+    ]:
+        console.print(f"  {label:<18} {value}", markup=False, highlight=False)
+    print_footer()
 
-        # Quantity samples (SpO2, heart rate, etc.) for that night.
-        if quantity_samples:
-            print_header("Health Samples", ICON_CHART)
-            print_table(
-                [("Type", 30), ("Value", 15), ("Timestamp", 0)],
+    # Quantity samples (SpO2, heart rate, etc.) for that night.
+    if quantity_samples:
+        print_header("Health Samples", ICON_CHART)
+        print_table(
+            [("Type", 30), ("Value", 15), ("Timestamp", 0)],
+            (
                 (
-                    (
-                        _metric_label(s.record_type),
-                        f"{s.value_num} {s.unit}"
-                        if s.value_num is not None
-                        else str(s.value_text or ""),
-                        f"{s.start_time:%Y-%m-%d %H:%M}",
-                    )
-                    for s in quantity_samples
-                ),
-                wide=False,
-            )
-
-    asyncio.run(_run())
+                    _metric_label(s.record_type),
+                    f"{s.value_num} {s.unit}"
+                    if s.value_num is not None
+                    else str(s.value_text or ""),
+                    f"{s.start_time:%Y-%m-%d %H:%M}",
+                )
+                for s in quantity_samples
+            ),
+            wide=False,
+        )

@@ -281,10 +281,9 @@ import {
     getAnalysisDeletePreview,
     getAnalysisJobs,
     cancelAnalysisJob,
-    type AnalysisJobInfo,
 } from '@/api/analysis'
 import { formatDateShort } from '@/utils/formatting'
-import type { AnalysisListItem, AnalysisDeletePreview } from '@/types'
+import type { AnalysisListItem, AnalysisDeletePreview, AnalysisJobStatus } from '@/types'
 import { useAuth } from '@/composables/useAuth'
 import { useAvailableDates } from '@/composables/useAvailableDates'
 import { useIsMobile } from '@/composables/useIsMobile'
@@ -310,7 +309,7 @@ const batchTo = ref('')
 const batchMode = ref('aasm')
 const batchRunning = ref(false)
 
-const analysisJobs = ref<AnalysisJobInfo[]>([])
+const analysisJobs = ref<AnalysisJobStatus[]>([])
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let stopped = false
 

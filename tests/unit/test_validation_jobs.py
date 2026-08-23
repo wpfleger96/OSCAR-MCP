@@ -193,8 +193,9 @@ def test_to_dict_shape():
     assert d["reused"] is False
     assert d["started_at"] is None
     assert d["finished_at"] is None
-    # Timestamps serialise as wall-clock epoch seconds, not time.monotonic().
-    assert abs(float(d["created_at"]) - time.time()) < 60
+    # Timestamps are wall-clock datetimes, not time.monotonic().
+    assert isinstance(d["created_at"], datetime)
+    assert abs((d["created_at"] - datetime.now(UTC)).total_seconds()) < 60
 
 
 # ---------------------------------------------------------------------------

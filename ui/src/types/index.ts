@@ -81,6 +81,8 @@ export type AnalysisListItem = Schemas['AnalysisListItem']
 export type AnalysisSessionDetail = Schemas['AnalysisSessionDetail']
 export type AnalysisDeletePreview = Schemas['AnalysisDeletePreview']
 export type AnalysisResult = Schemas['AnalysisResult']
+export type AnalysisJobStatus = Schemas['AnalysisJobStatus']
+export type AnalysisJobsListResponse = Schemas['AnalysisJobsListResponse']
 export type AnalysisEvent = Schemas['AnalysisEvent']
 export type ModeResult = Schemas['ModeResult']
 export type ApneaEvent = Schemas['ApneaEvent']
@@ -161,9 +163,6 @@ export type ValidationRunRequest = Schemas['ValidationRunRequest']
 // ValidatorType is a bare Literal on the backend, so openapi-typescript inlines
 // it rather than emitting a named schema — derive it from the request field.
 export type ValidatorType = ValidationRunRequest['validator_type']
-
-// Analysis jobs (background queue — not in OpenAPI spec)
-export type { AnalysisJobInfo } from '@/api/analysis'
 
 // Waveform compare
 export type EventComparisonResult = Schemas['EventComparisonResult']

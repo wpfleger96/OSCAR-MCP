@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from datetime import datetime
 from pathlib import Path
 
 import click
 
-from snore.cli.decorators import actor_options, db_option
-from snore.cli.decorators import db_session as open_db_session
+from snore.cli.decorators import CliCtx, profile_scoped_command
 from snore.cli.display import ICON_CHART, print_footer, print_header, print_kv
 
 
@@ -42,15 +39,12 @@ def report() -> None:
     type=click.Path(),
     help="Output file path (default: snore-report.html)",
 )
-@db_option
-@actor_options
-def summary(
+@profile_scoped_command
+async def summary(
+    ctx: CliCtx,
     from_date: datetime,
     to_date: datetime,
     output: str,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """Generate a summary HTML report for a date range.
 
@@ -58,23 +52,16 @@ def summary(
         snore report summary --from 2025-01-01 --to 2025-01-31
         snore report summary --from 2025-01-01 --to 2025-01-31 -o ~/Desktop/report.html
     """
+    from snore.services import ReportService  # noqa: PLC0415
+
     fd = from_date.date()
     td = to_date.date()
     if fd > td:
         raise click.UsageError("--from must not be after --to")
 
-    async def _run() -> str:
-        async with open_db_session(db) as session:
-            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-            from snore.services import ReportService
+    svc = ReportService(ctx.db, ctx.profile_id)
+    html = await svc.generate_summary_report(fd, td)
 
-            profile_id = await resolve_cli_profile_id(
-                session, actor_user, actor_profile
-            )
-            svc = ReportService(session, profile_id)
-            return await svc.generate_summary_report(fd, td)
-
-    html = asyncio.run(_run())
     out_path = Path(output)
     out_path.write_text(html, encoding="utf-8")
     size_kb = len(html.encode("utf-8")) / 1024
@@ -122,17 +109,14 @@ def summary(
     type=click.Path(),
     help="Output file path (default: snore-comparison.html)",
 )
-@db_option
-@actor_options
-def comparison(
+@profile_scoped_command
+async def comparison(
+    ctx: CliCtx,
     from_date: datetime,
     to_date: datetime,
     compare_from: datetime,
     compare_to: datetime,
     output: str,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """Generate a comparison HTML report across two date ranges.
 
@@ -142,6 +126,8 @@ def comparison(
         snore report comparison --from 2025-01-01 --to 2025-01-31 \\
           --compare-from 2025-02-01 --compare-to 2025-02-28 -o ~/Desktop/report.html
     """
+    from snore.services import ReportService  # noqa: PLC0415
+
     fd = from_date.date()
     td = to_date.date()
     cfd = compare_from.date()
@@ -152,18 +138,9 @@ def comparison(
     if cfd > ctd:
         raise click.UsageError("--compare-from must not be after --compare-to")
 
-    async def _run() -> str:
-        async with open_db_session(db) as session:
-            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-            from snore.services import ReportService
+    svc = ReportService(ctx.db, ctx.profile_id)
+    html = await svc.generate_comparison_report((fd, td), (cfd, ctd))
 
-            profile_id = await resolve_cli_profile_id(
-                session, actor_user, actor_profile
-            )
-            svc = ReportService(session, profile_id)
-            return await svc.generate_comparison_report((fd, td), (cfd, ctd))
-
-    html = asyncio.run(_run())
     out_path = Path(output)
     out_path.write_text(html, encoding="utf-8")
     size_kb = len(html.encode("utf-8")) / 1024
