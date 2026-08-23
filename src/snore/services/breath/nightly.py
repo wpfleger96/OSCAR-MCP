@@ -375,6 +375,7 @@ class NightlyMixin(_BreathServiceCore):
         therapy_date: date,
         device_id: int | None = None,
         compliance_threshold_hours: float = 4.0,
+        include_waveform_stats: bool = True,
     ) -> NightlyAnalysisSummary:
         """Latest-run analysis fields aggregated across all OK sessions of a day.
 
@@ -383,12 +384,18 @@ class NightlyMixin(_BreathServiceCore):
         and no device_id was given, ``ValueError`` when an explicit owned
         device has no sessions on the date; ``DeviceAmbiguityError`` and
         ``DeviceNotOwnedError`` propagate from device resolution.
+
+        ``include_waveform_stats=False`` skips the two full-night waveform
+        blobs, leaving only the ``device_flg_*``/``snore_*`` fields null; the
+        breath-derived FL/RERA fields are unaffected (see
+        ``get_nightly_range_summary``).
         """
         range_summary = await self.get_nightly_range_summary(
             therapy_date,
             therapy_date,
             device_id=device_id,
             compliance_threshold_hours=compliance_threshold_hours,
+            include_waveform_stats=include_waveform_stats,
         )
         if not range_summary.nights:
             if device_id is None:
@@ -402,8 +409,17 @@ class NightlyMixin(_BreathServiceCore):
         date_end: date,
         device_id: int | None = None,
         compliance_threshold_hours: float = 4.0,
+        include_waveform_stats: bool = True,
     ) -> NightlyRangeSummary:
-        """Per-night summaries + aggregate compliance (bulk-query path)."""
+        """Per-night summaries + aggregate compliance (bulk-query path).
+
+        ``include_waveform_stats=False`` skips loading the per-session ``fl``/
+        ``snore`` waveform blobs, which feed only the ``device_flg_*``/
+        ``snore_*`` distribution fields (left null); the breath-table-derived
+        FL/RERA metrics are computed identically either way.  Callers that
+        consume only breath-derived fields (e.g. day detail) pass ``False`` to
+        avoid the waveform I/O on their hot path.
+        """
         from snore.services.breath_service import BreathService  # noqa: PLC0415
 
         if date_end < date_start:
@@ -507,11 +523,18 @@ class NightlyMixin(_BreathServiceCore):
                 for row in breath_result:
                     breath_rows_by_ar_id[row.analysis_result_id].append(row)
 
-        # Bulk fetch fl and snore waveform values for all sessions in range
-        (
-            fl_vals_by_session,
-            snore_vals_by_session,
-        ) = await BreathService._fetch_waveform_channel_vals(self._db, all_session_ids)
+        # Bulk fetch fl and snore waveform values for all sessions in range.
+        # Skipped when the caller only needs breath-derived metrics — this
+        # avoids loading both full-night waveform blobs per session.
+        fl_vals_by_session: dict[int, list[float]] | None = None
+        snore_vals_by_session: dict[int, list[float]] | None = None
+        if include_waveform_stats:
+            (
+                fl_vals_by_session,
+                snore_vals_by_session,
+            ) = await BreathService._fetch_waveform_channel_vals(
+                self._db, all_session_ids
+            )
 
         # Per-night builder loop (nights without sessions are skipped)
         nights: list[NightlyAnalysisSummary] = []
