@@ -8,7 +8,6 @@ the database.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from datetime import datetime
@@ -19,12 +18,9 @@ import click
 from rich.table import Table
 
 from snore.cli.decorators import (
-    actor_options,
+    CliCtx,
     date_range_options_required,
-    db_option,
-)
-from snore.cli.decorators import (
-    db_session as open_db_session,
+    profile_scoped_command,
 )
 from snore.cli.display import console, err_console, fmt_sig
 from snore.validation.sweep import SweepResult
@@ -137,9 +133,9 @@ def _render_table(result: SweepResult, top: int) -> None:
     show_default=True,
     help="Number of top-ranked rows to display (export always writes all)",
 )
-@db_option
-@actor_options
-def sweep_thresholds(
+@profile_scoped_command
+async def sweep_thresholds(
+    ctx: CliCtx,
     date_from: datetime,
     date_to: datetime,
     target: str,
@@ -150,9 +146,6 @@ def sweep_thresholds(
     flg_low_raw: str | None,
     flg_high_raw: str | None,
     top: int,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """
     Offline threshold-sweep harness for FL/RERA tuning.
@@ -165,8 +158,6 @@ def sweep_thresholds(
     """
     if date_from > date_to:
         raise click.ClickException("--from date must be before or equal to --to date")
-    if db and not Path(db).expanduser().exists():
-        raise click.ClickException(f"Database not found: {db}")
     if export and Path(export).suffix != ".csv":
         raise click.ClickException("--export path must end in .csv")
 
@@ -178,82 +169,71 @@ def sweep_thresholds(
         "flg_high_raw": flg_high_raw,
     }
 
-    async def _run() -> None:
-        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.validation.sweep import (  # noqa: PLC0415
-            DEFAULT_GRIDS,
-            evaluate_grid,
-            export_sweep_csv,
-            load_sweep_data,
+    from snore.validation.sweep import (  # noqa: PLC0415
+        DEFAULT_GRIDS,
+        evaluate_grid,
+        export_sweep_csv,
+        load_sweep_data,
+    )
+
+    grid = {k: list(v) for k, v in DEFAULT_GRIDS[target].items()}
+    for opt_name, raw in overrides.items():
+        values = _parse_floats(raw)
+        if values is None:
+            continue
+        knob = _OPTION_TO_KNOB[opt_name]
+        if knob in grid:
+            grid[knob] = values
+
+    empty_knobs = [knob for knob, vals in grid.items() if not vals]
+    if empty_knobs:
+        raise click.ClickException(
+            f"Empty parameter grid: no values for {', '.join(empty_knobs)}. "
+            "Provide at least one value per swept knob."
         )
 
-        grid = {k: list(v) for k, v in DEFAULT_GRIDS[target].items()}
-        for opt_name, raw in overrides.items():
-            values = _parse_floats(raw)
-            if values is None:
-                continue
-            knob = _OPTION_TO_KNOB[opt_name]
-            if knob in grid:
-                grid[knob] = values
+    try:
+        console.print(
+            f"Sweeping target={target} from {date_from.date()} to {date_to.date()}..."
+        )
+        data = await load_sweep_data(
+            ctx.db,
+            ctx.profile_id,
+            date_from.strftime("%Y-%m-%d"),
+            date_to.strftime("%Y-%m-%d"),
+            target,
+        )
+        result = evaluate_grid(data, grid)
 
-        empty_knobs = [knob for knob, vals in grid.items() if not vals]
-        if empty_knobs:
-            raise click.ClickException(
-                f"Empty parameter grid: no values for {', '.join(empty_knobs)}. "
-                "Provide at least one value per swept knob."
+        console.print(
+            f"\nLoaded {result.n_units_loaded} {result.unit_label}; "
+            f"evaluated {len(result.rows)} grid combinations."
+        )
+        console.print(f"[dim]{result.notice}[/dim]")
+
+        if result.reference:
+            ref = ", ".join(f"{k}={_fmt(v)}" for k, v in result.reference.items())
+            console.print(f"[dim]Reference: {ref}[/dim]")
+
+        if not result.rows or result.n_units_loaded == 0:
+            console.print("\n[yellow]No data to sweep in this range.[/yellow]")
+        else:
+            _render_table(result, top)
+
+        if export:
+            export_path = Path(export)
+            export_sweep_csv(result, export_path)
+            console.print(
+                f"\nFull ranked grid ({len(result.rows)} rows) exported to "
+                f"{export_path}"
             )
 
-        async with open_db_session(db) as async_db:
-            try:
-                profile_id = await resolve_cli_profile_id(
-                    async_db, actor_user, actor_profile
-                )
-                console.print(
-                    f"Sweeping target={target} from {date_from.date()} "
-                    f"to {date_to.date()}..."
-                )
-                data = await load_sweep_data(
-                    async_db,
-                    profile_id,
-                    date_from.strftime("%Y-%m-%d"),
-                    date_to.strftime("%Y-%m-%d"),
-                    target,
-                )
-                result = evaluate_grid(data, grid)
+    except click.ClickException:
+        raise
+    except Exception as e:
+        import traceback  # noqa: PLC0415
 
-                console.print(
-                    f"\nLoaded {result.n_units_loaded} {result.unit_label}; "
-                    f"evaluated {len(result.rows)} grid combinations."
-                )
-                console.print(f"[dim]{result.notice}[/dim]")
-
-                if result.reference:
-                    ref = ", ".join(
-                        f"{k}={_fmt(v)}" for k, v in result.reference.items()
-                    )
-                    console.print(f"[dim]Reference: {ref}[/dim]")
-
-                if not result.rows or result.n_units_loaded == 0:
-                    console.print("\n[yellow]No data to sweep in this range.[/yellow]")
-                else:
-                    _render_table(result, top)
-
-                if export:
-                    export_path = Path(export)
-                    export_sweep_csv(result, export_path)
-                    console.print(
-                        f"\nFull ranked grid ({len(result.rows)} rows) exported to "
-                        f"{export_path}"
-                    )
-
-            except click.ClickException:
-                raise
-            except Exception as e:
-                import traceback  # noqa: PLC0415
-
-                err_console.print(f"Sweep error: {e}")
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    traceback.print_exc()
-                raise click.ClickException(str(e)) from e
-
-    asyncio.run(_run())
+        err_console.print(f"Sweep error: {e}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            traceback.print_exc()
+        raise click.ClickException(str(e)) from e

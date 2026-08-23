@@ -10,8 +10,8 @@ from typing import Any
 
 import click
 
-from snore.auth.factory import resolve_cli_profile_id, resolve_local_profile_id
-from snore.cli.decorators import actor_options, db_option, db_session
+from snore.auth.factory import resolve_local_profile_id
+from snore.cli.decorators import CliCtx, db_option, db_session, profile_scoped_command
 from snore.cli.display import (
     ICON_STATS,
     console,
@@ -63,56 +63,48 @@ def init(db: str | None) -> None:
 
 
 @db.command("stats")
-@db_option
-@actor_options
-def db_stats(db: str | None, actor_user: str | None, actor_profile: str | None) -> None:
+@profile_scoped_command
+async def db_stats(ctx: CliCtx) -> None:
     """Show database statistics."""
-    db_path = Path(db) if db else Path(DEFAULT_DATABASE_PATH)
+    from snore.database.session import get_db_path  # noqa: PLC0415
 
-    async def _run() -> None:
-        async with db_session(db) as session:
-            profile_id = await resolve_cli_profile_id(
-                session, actor_user, actor_profile
-            )
-            service = DatabaseService(session, profile_id)
-            stats = await service.get_stats(str(db_path))
+    service = DatabaseService(ctx.db, ctx.profile_id)
+    stats = await service.get_stats(get_db_path())
 
-            print_header("Database Statistics", ICON_STATS)
-            print_kv("Database", str(stats.db_path), indent=0)
-            print_kv("Size", f"{stats.size_mb:.1f} MB", indent=0)
+    print_header("Database Statistics", ICON_STATS)
+    print_kv("Database", str(stats.db_path), indent=0)
+    print_kv("Size", f"{stats.size_mb:.1f} MB", indent=0)
 
-            print_subsection("Row Counts")
-            print_kv("Profiles", str(stats.profile_count))
-            print_kv("Devices", str(stats.device_count))
-            print_kv("Sessions", str(stats.session_count))
-            print_kv("Days", str(stats.day_count))
-            print_kv("Events", str(stats.event_count))
-            print_kv("Waveforms", str(stats.waveform_count))
-            print_kv("Analysis Results", str(stats.analysis_count))
-            print_kv("Detected Patterns", str(stats.pattern_count))
+    print_subsection("Row Counts")
+    print_kv("Profiles", str(stats.profile_count))
+    print_kv("Devices", str(stats.device_count))
+    print_kv("Sessions", str(stats.session_count))
+    print_kv("Days", str(stats.day_count))
+    print_kv("Events", str(stats.event_count))
+    print_kv("Waveforms", str(stats.waveform_count))
+    print_kv("Analysis Results", str(stats.analysis_count))
+    print_kv("Detected Patterns", str(stats.pattern_count))
 
-            print_subsection("Data Coverage")
-            print_kv(
-                "Sessions with waveforms",
-                f"{stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)",
-            )
-            print_kv(
-                "Sessions with events",
-                f"{stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)",
-            )
-            print_kv(
-                "Sessions analyzed",
-                f"{stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)",
-            )
+    print_subsection("Data Coverage")
+    print_kv(
+        "Sessions with waveforms",
+        f"{stats.sessions_with_waveforms}/{stats.session_count} ({stats.waveform_coverage_pct:.1f}%)",
+    )
+    print_kv(
+        "Sessions with events",
+        f"{stats.sessions_with_events}/{stats.session_count} ({stats.event_coverage_pct:.1f}%)",
+    )
+    print_kv(
+        "Sessions analyzed",
+        f"{stats.analysis_count}/{stats.session_count} ({stats.analysis_coverage_pct:.1f}%)",
+    )
 
-            if stats.first_session and stats.last_session:
-                console.print(
-                    f"\nDate range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
-                )
+    if stats.first_session and stats.last_session:
+        console.print(
+            f"\nDate range: {stats.first_session:%Y-%m-%d} to {stats.last_session:%Y-%m-%d}"
+        )
 
-            print_footer()
-
-    asyncio.run(_run())
+    print_footer()
 
 
 @db.command()

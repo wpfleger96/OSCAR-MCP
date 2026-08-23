@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 
@@ -12,12 +11,9 @@ from pathlib import Path
 import click
 
 from snore.cli.decorators import (
-    actor_options,
+    CliCtx,
     date_range_options,
-    db_option,
-)
-from snore.cli.decorators import (
-    db_session as open_db_session,
+    profile_scoped_command,
 )
 from snore.cli.display import (
     ICON_CHECK,
@@ -58,18 +54,15 @@ from snore.cli.display import (
     default=None,
     help="Restrict integrity check to a specific device ID",
 )
-@db_option
-@actor_options
-def validate(
+@profile_scoped_command
+async def validate(
+    ctx: CliCtx,
     date_from: datetime | None,
     date_to: datetime | None,
     mode: str,
     export: str | None,
     integrity: bool,
     device_id: int | None,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """
     Run batch validation across multiple sessions.
@@ -79,14 +72,11 @@ def validate(
 
     Use --integrity to run a structural data-integrity check instead (dates not required).
     """
-    if db and not Path(db).expanduser().exists():
-        raise click.ClickException(f"Database not found: {db}")
-
     if device_id is not None and not integrity:
         raise click.UsageError("--device-id requires --integrity")
 
     if integrity:
-        asyncio.run(_run_integrity(db, actor_user, actor_profile, device_id))
+        await _run_integrity(ctx, device_id)
         return
 
     if date_from is None or date_to is None:
@@ -95,141 +85,121 @@ def validate(
     if date_from > date_to:
         raise click.ClickException("--from date must be before or equal to --to date")
 
-    async def _run() -> None:
-        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.validation import (
-            BatchValidator,
-            export_report_csv,
-            export_report_json,
+    from snore.validation import (
+        BatchValidator,
+        export_report_csv,
+        export_report_json,
+    )
+
+    try:
+        validator = BatchValidator(ctx.db, ctx.profile_id)
+
+        console.print(
+            f"Running validation from {date_from.date()} to {date_to.date()}..."
+        )
+        console.print(f"Mode: {mode}\n")
+
+        report = await validator.validate_date_range(
+            date_from.strftime("%Y-%m-%d"),
+            date_to.strftime("%Y-%m-%d"),
+            mode=mode,
         )
 
-        async with open_db_session(db) as async_db:
-            try:
-                profile_id = await resolve_cli_profile_id(
-                    async_db, actor_user, actor_profile
-                )
-                validator = BatchValidator(async_db, profile_id)
+        print_footer()
+        print_header("VALIDATION REPORT")
+        console.print(
+            f"Date Range: {report.date_range_start} to {report.date_range_end}"
+        )
+        console.print(f"Sessions Analyzed: {report.aggregate.total_sessions}")
+        console.print(f"Total Machine Events: {report.aggregate.total_machine_events}")
+        console.print(
+            f"Total Programmatic Events: {report.aggregate.total_programmatic_events}"
+        )
 
+        console.print("\nAggregate Metrics:")
+        console.print(
+            f"  Apneas:     "
+            f"Avg Sens: {report.aggregate.avg_apnea_sensitivity * 100:.0f}%  "
+            f"Avg Prec: {report.aggregate.avg_apnea_precision * 100:.0f}%  "
+            f"Avg F1: {report.aggregate.avg_apnea_f1:.2f}"
+        )
+        console.print(
+            f"  Hypopneas:  "
+            f"Avg Sens: {report.aggregate.avg_hypopnea_sensitivity * 100:.0f}%  "
+            f"Avg Prec: {report.aggregate.avg_hypopnea_precision * 100:.0f}%  "
+            f"Avg F1: {report.aggregate.avg_hypopnea_f1:.2f}"
+        )
+
+        if report.aggregate.low_sensitivity_sessions:
+            console.print(
+                f"\nSessions with Low Sensitivity (<60%): "
+                f"{len(report.aggregate.low_sensitivity_sessions)}"
+            )
+            console.print(
+                f"  Session IDs: {report.aggregate.low_sensitivity_sessions[:10]}"
+            )
+            if len(report.aggregate.low_sensitivity_sessions) > 10:
                 console.print(
-                    f"Running validation from {date_from.date()} to {date_to.date()}..."
-                )
-                console.print(f"Mode: {mode}\n")
-
-                report = await validator.validate_date_range(
-                    date_from.strftime("%Y-%m-%d"),
-                    date_to.strftime("%Y-%m-%d"),
-                    mode=mode,
+                    f"  ... and {len(report.aggregate.low_sensitivity_sessions) - 10} more"
                 )
 
-                print_footer()
-                print_header("VALIDATION REPORT")
-                console.print(
-                    f"Date Range: {report.date_range_start} to {report.date_range_end}"
+        console.print("\nPer-Session Results:")
+        console.print(
+            f"{'Date':<12} {'ID':<6} {'Machine':<8} {'Prog':<8} {'Apnea Sens':<11} {'Hypopnea Sens':<13}"
+        )
+        print_footer()
+
+        for session in report.sessions[:10]:
+            console.print(
+                f"{session.date:<12} "
+                f"{session.session_id:<6} "
+                f"{session.machine_event_count:<8} "
+                f"{session.programmatic_event_count:<8} "
+                f"{session.apnea_sensitivity * 100:>6.0f}%     "
+                f"{session.hypopnea_sensitivity * 100:>6.0f}%"
+            )
+
+        if len(report.sessions) > 10:
+            console.print(f"... and {len(report.sessions) - 10} more sessions")
+
+        if export:
+            export_path = Path(export)
+            if export_path.suffix == ".json":
+                export_report_json(report, export_path)
+                console.print(f"\nReport exported to {export_path}")
+            elif export_path.suffix == ".csv":
+                export_report_csv(report, export_path)
+                console.print(f"\nReport exported to {export_path}")
+            else:
+                raise click.ClickException(
+                    f"Unknown export format '{export_path.suffix}'. Use .json or .csv"
                 )
-                console.print(f"Sessions Analyzed: {report.aggregate.total_sessions}")
-                console.print(
-                    f"Total Machine Events: {report.aggregate.total_machine_events}"
-                )
-                console.print(
-                    f"Total Programmatic Events: {report.aggregate.total_programmatic_events}"
-                )
 
-                console.print("\nAggregate Metrics:")
-                console.print(
-                    f"  Apneas:     "
-                    f"Avg Sens: {report.aggregate.avg_apnea_sensitivity * 100:.0f}%  "
-                    f"Avg Prec: {report.aggregate.avg_apnea_precision * 100:.0f}%  "
-                    f"Avg F1: {report.aggregate.avg_apnea_f1:.2f}"
-                )
-                console.print(
-                    f"  Hypopneas:  "
-                    f"Avg Sens: {report.aggregate.avg_hypopnea_sensitivity * 100:.0f}%  "
-                    f"Avg Prec: {report.aggregate.avg_hypopnea_precision * 100:.0f}%  "
-                    f"Avg F1: {report.aggregate.avg_hypopnea_f1:.2f}"
-                )
+    except click.ClickException:
+        raise
+    except Exception as e:
+        import traceback
 
-                if report.aggregate.low_sensitivity_sessions:
-                    console.print(
-                        f"\nSessions with Low Sensitivity (<60%): "
-                        f"{len(report.aggregate.low_sensitivity_sessions)}"
-                    )
-                    console.print(
-                        f"  Session IDs: {report.aggregate.low_sensitivity_sessions[:10]}"
-                    )
-                    if len(report.aggregate.low_sensitivity_sessions) > 10:
-                        console.print(
-                            f"  ... and {len(report.aggregate.low_sensitivity_sessions) - 10} more"
-                        )
-
-                console.print("\nPer-Session Results:")
-                console.print(
-                    f"{'Date':<12} {'ID':<6} {'Machine':<8} {'Prog':<8} {'Apnea Sens':<11} {'Hypopnea Sens':<13}"
-                )
-                print_footer()
-
-                for session in report.sessions[:10]:
-                    console.print(
-                        f"{session.date:<12} "
-                        f"{session.session_id:<6} "
-                        f"{session.machine_event_count:<8} "
-                        f"{session.programmatic_event_count:<8} "
-                        f"{session.apnea_sensitivity * 100:>6.0f}%     "
-                        f"{session.hypopnea_sensitivity * 100:>6.0f}%"
-                    )
-
-                if len(report.sessions) > 10:
-                    console.print(f"... and {len(report.sessions) - 10} more sessions")
-
-                if export:
-                    export_path = Path(export)
-                    if export_path.suffix == ".json":
-                        export_report_json(report, export_path)
-                        console.print(f"\nReport exported to {export_path}")
-                    elif export_path.suffix == ".csv":
-                        export_report_csv(report, export_path)
-                        console.print(f"\nReport exported to {export_path}")
-                    else:
-                        raise click.ClickException(
-                            f"Unknown export format '{export_path.suffix}'. Use .json or .csv"
-                        )
-
-            except click.ClickException:
-                raise
-            except Exception as e:
-                import traceback
-
-                err_console.print(f"Validation error: {e}")
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    traceback.print_exc()
-                raise click.ClickException(str(e)) from e
-
-    asyncio.run(_run())
+        err_console.print(f"Validation error: {e}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            traceback.print_exc()
+        raise click.ClickException(str(e)) from e
 
 
-async def _run_integrity(
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
-    device_id: int | None,
-) -> None:
+async def _run_integrity(ctx: CliCtx, device_id: int | None) -> None:
     """Run the data-integrity check and print results; exits nonzero on issues."""
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
     from snore.validation.batch import BatchValidator
 
-    async with open_db_session(db) as async_db:
-        try:
-            profile_id = await resolve_cli_profile_id(
-                async_db, actor_user, actor_profile
-            )
-            validator = BatchValidator(async_db, profile_id)
-            report = await validator.check_data_integrity(device_id=device_id)
-        except Exception as e:
-            import traceback
+    try:
+        validator = BatchValidator(ctx.db, ctx.profile_id)
+        report = await validator.check_data_integrity(device_id=device_id)
+    except Exception as e:
+        import traceback
 
-            err_console.print(f"Integrity check error: {e}")
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                traceback.print_exc()
-            raise click.ClickException(str(e)) from e
+        err_console.print(f"Integrity check error: {e}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            traceback.print_exc()
+        raise click.ClickException(str(e)) from e
 
     print_header("DATA INTEGRITY REPORT")
     filter_label = str(device_id) if device_id is not None else "all devices"
