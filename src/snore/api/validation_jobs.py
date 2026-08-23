@@ -149,7 +149,7 @@ class ValidationRunJob(JobRecordBase[ValidationRunState]):
             self._finished_at_wall = datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
-        """A JSON-serialisable status snapshot (wall-clock epoch timestamps)."""
+        """A ``model_validate`` snapshot containing wall-clock datetime values."""
         with self._lock:
             return {
                 "run_id": self.run_id,

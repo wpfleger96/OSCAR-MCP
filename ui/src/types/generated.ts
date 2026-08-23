@@ -2158,8 +2158,11 @@ export interface components {
             source: string
             /** Started At */
             started_at: string | null
-            /** State */
-            state: string
+            /**
+             * State
+             * @enum {string}
+             */
+            state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
         }
         /** AnalysisJobsListResponse */
         AnalysisJobsListResponse: {

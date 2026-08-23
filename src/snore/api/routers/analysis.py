@@ -197,7 +197,7 @@ async def list_analysis_jobs(
     def _db_row_to_status(rec: models.AnalysisJobRecord) -> AnalysisJobStatus:
         return AnalysisJobStatus(
             job_id=rec.job_id,
-            state=rec.state,
+            state=analysis_jobs.AnalysisJobState(rec.state).value,
             source=rec.source,
             session_count=len(rec.session_ids_json) if rec.session_ids_json else 0,
             progress_completed=rec.progress_completed,

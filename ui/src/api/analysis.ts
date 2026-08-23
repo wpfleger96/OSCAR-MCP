@@ -4,7 +4,7 @@ import type {
     AnalysisListItem,
     AnalysisResult,
     AnalysisDeletePreview,
-    AnalysisJobStatus,
+    AnalysisJobsListResponse,
 } from '@/types'
 
 export interface AnalysisSessionsParams {
@@ -56,7 +56,7 @@ export const runBatchAnalysis = apiPost<
     ]
 >('/analysis/batch', (body) => ({ data: body }))
 
-export const getAnalysisJobs = apiGet<{ jobs: AnalysisJobStatus[] }>('/analysis/jobs')
+export const getAnalysisJobs = apiGet<AnalysisJobsListResponse>('/analysis/jobs')
 
 export const cancelAnalysisJob = apiDelete<void, [jobId: string]>(
     (jobId) => `/analysis/jobs/${jobId}`,

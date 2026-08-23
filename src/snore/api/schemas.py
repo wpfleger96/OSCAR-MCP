@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal, cast
 
 from pydantic import (
     AfterValidator,
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
+    Strict,
     StringConstraints,
     model_validator,
 )
@@ -287,6 +289,18 @@ class MaskLogUpdateRequest(_MaskLogFields):
     """PATCH body: omitted fields are unchanged; explicit null clears any field."""
 
 
+def _normalize_response_timestamp(value: datetime) -> datetime:
+    """Normalize an aware response timestamp to UTC."""
+    return value.astimezone(UTC)
+
+
+UTCResponseTimestamp = Annotated[
+    AwareDatetime,
+    Strict(),
+    AfterValidator(_normalize_response_timestamp),
+]
+
+
 class AnalysisJobStatus(BaseModel):
     """Snapshot of one analysis job.
 
@@ -295,15 +309,15 @@ class AnalysisJobStatus(BaseModel):
     """
 
     job_id: str
-    state: str
+    state: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     source: str
     session_count: int
     progress_completed: int
     progress_total: int
     error_message: str | None
-    created_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
+    created_at: UTCResponseTimestamp
+    started_at: UTCResponseTimestamp | None
+    finished_at: UTCResponseTimestamp | None
     owner_user_id: int | None
 
 
@@ -355,9 +369,9 @@ class ValidationRunStatus(BaseModel):
     engine_identity: dict[str, object]
     validator_params: dict[str, object]
     owner_user_id: int | None
-    created_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
+    created_at: UTCResponseTimestamp
+    started_at: UTCResponseTimestamp | None
+    finished_at: UTCResponseTimestamp | None
     # True when this run was returned by dedup instead of computed anew.
     reused: bool = False
 
@@ -420,9 +434,9 @@ class PipelineJobStatus(BaseModel):
     state: str
     stage: str
     file_count: int
-    created_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
+    created_at: UTCResponseTimestamp
+    started_at: UTCResponseTimestamp | None
+    finished_at: UTCResponseTimestamp | None
     progress_message: str | None
     sessions_imported: int | None
     import_result: ImportResultSummary | None
