@@ -133,7 +133,7 @@ async def _store_analysis_with_breaths(
     n_breaths: int = 5,
     flow_class: int | None = 1,
     is_recovery: bool = False,
-    flow_specs: list[tuple[int | None, float]] | None = None,
+    flow_specs: list[tuple[int | None, float | None]] | None = None,
 ) -> models.AnalysisResult:
     """Write an AnalysisResult + Breath rows via AnalysisService.store_result.
 
@@ -762,7 +762,8 @@ class TestCompareEpochs:
     ):
         """flow_class_distribution counts only rule-matched breaths (confidence >
         FL_DEFAULT_CONFIDENCE); fallback guesses stamped at exactly the default
-        confidence land in flow_class_distribution_fallback.  Union equals total.
+        confidence land in flow_class_distribution_fallback.  Missing and
+        below-default confidence values are excluded from both.
         """
         _, profile_id = await _make_profile(async_db_session)
         dev = await _make_device(async_db_session, profile_id)
@@ -782,6 +783,8 @@ class TestCompareEpochs:
                 (4, 0.75),
                 (1, default_conf),
                 (4, default_conf),
+                (7, None),
+                (6, 0.4),
             ],
         )
 
@@ -801,7 +804,8 @@ class TestCompareEpochs:
         assert es.null_reason is None
         assert es.flow_class_distribution == {3: 1, 4: 2}
         assert es.flow_class_distribution_fallback == {1: 1, 4: 1}
-        # Every classified breath lands in exactly one dict; union equals total.
+        # Only the five classifier-canonical rows land in a distribution.  Missing
+        # and below-default confidence cannot be identified as fallback guesses.
         rule_total = sum(es.flow_class_distribution.values())
         fallback_total = sum(es.flow_class_distribution_fallback.values())
         assert rule_total + fallback_total == 5
@@ -3612,7 +3616,7 @@ class TestCompareEpochsRefusal:
         assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
 
     async def test_one_violating_epoch_among_three_nulls_only_itself(
-        self, async_db_session
+        self, async_db_session, monkeypatch
     ):
         """A mid-epoch RX change nulls only its own epoch; the two clean epochs
         still compute, and the top-level null_reason stays None."""
@@ -3649,6 +3653,20 @@ class TestCompareEpochsRefusal:
             async_db_session, s4, profile_id, n_breaths=3
         )
 
+        waveform_session_ids: list[int] = []
+
+        async def _record_waveform_session_ids(
+            _db: AsyncSession, session_ids: list[int]
+        ) -> tuple[dict[int, list[float]], dict[int, list[float]]]:
+            waveform_session_ids.extend(session_ids)
+            return {}, {}
+
+        monkeypatch.setattr(
+            BreathService,
+            "_fetch_waveform_channel_vals",
+            staticmethod(_record_waveform_session_ids),
+        )
+
         svc = BreathService(async_db_session, profile_id=profile_id)
         result = await svc.compare_epochs(
             epochs=[
@@ -3678,6 +3696,8 @@ class TestCompareEpochsRefusal:
         assert result.null_reason is None
         assert len(result.rx_violations) == 1
         assert result.rx_violations[0].epoch_label == "violating"
+        # Nulled epochs must not load and deserialize full-night waveform blobs.
+        assert set(waveform_session_ids) == {s1.id, s4.id}
 
     async def test_all_epochs_violating_sets_top_level_refusal(self, async_db_session):
         """When every epoch has a mid-epoch RX change, the top-level null_reason is

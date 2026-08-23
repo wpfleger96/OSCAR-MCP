@@ -208,9 +208,10 @@ def register(mcp: FastMCP) -> None:
             ``fl_class_ge4_pct``.  ``flow_class_distribution_fallback`` counts the
             low-confidence fallback guesses — breaths triaged on flatness alone when
             no shape rule matched, stamped at exactly the default confidence — kept
-            separate so they don't inflate FL rates.  Every classified breath lands
-            in exactly one of the two.  Both use string keys (``"0"``, ``"1"``, ...)
-            because JSON object keys are always strings.
+            separate so they don't inflate FL rates.  Rows with missing or
+            below-default confidence values are excluded from both distributions.
+            Both use string keys (``"0"``, ``"1"``, ...) because JSON object keys
+            are always strings.
             ``rx_settings`` holds representative therapy settings observed for the epoch.
             ``rx_violations`` lists any therapy-settings changes detected within an
             epoch's date range; callers should split affected epochs at those dates.

@@ -97,7 +97,9 @@ class EpochsMixin(_BreathServiceCore):
 
         flow_class_distribution counts rule-matched classifications only (the same
         confidence gate as nightly fl_class_ge4_pct); low-confidence fallback
-        guesses are reported separately in flow_class_distribution_fallback.
+        guesses stamped at the default confidence are reported separately in
+        flow_class_distribution_fallback.  Rows with missing or below-default
+        confidence values are excluded from both distributions.
         """
         from snore.services.breath_service import BreathService  # noqa: PLC0415
 
@@ -362,7 +364,10 @@ class EpochsMixin(_BreathServiceCore):
         # Bulk-fetch waveform channel values for all contributing sessions across
         # all epochs in one query, then slice per epoch below.
         all_contrib_session_ids: list[int] = [
-            sid for ed in epoch_resolved for sid, _ in ed["contributing_sessions"]
+            sid
+            for ed in epoch_resolved
+            if ed["null_reason"] is None
+            for sid, _ in ed["contributing_sessions"]
         ]
         (
             all_fl_by_sess,
@@ -460,8 +465,8 @@ class EpochsMixin(_BreathServiceCore):
             # rule-matched (flow_confidence > FL_DEFAULT_CONFIDENCE) go in fc_dist so
             # the class>=4 fraction reconciles with nightly fl_class_ge4_pct; low-
             # confidence fallback flatness-triage guesses (confidence exactly at the
-            # default) go in fc_dist_fallback so they don't inflate FL rates.  Every
-            # breath with a non-null flow_class lands in exactly one dict.
+            # default) go in fc_dist_fallback so they don't inflate FL rates.  Rows
+            # with missing or below-default confidence are excluded from both.
             fc_dist: dict[int, int] = {}
             fc_dist_fallback: dict[int, int] = {}
             for b in all_breath_rows:
@@ -472,7 +477,7 @@ class EpochsMixin(_BreathServiceCore):
                     and b.flow_confidence > FLC.FL_DEFAULT_CONFIDENCE
                 ):
                     fc_dist[b.flow_class] = fc_dist.get(b.flow_class, 0) + 1
-                else:
+                elif b.flow_confidence == FLC.FL_DEFAULT_CONFIDENCE:
                     fc_dist_fallback[b.flow_class] = (
                         fc_dist_fallback.get(b.flow_class, 0) + 1
                     )

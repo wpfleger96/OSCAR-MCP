@@ -376,6 +376,7 @@ class EpochBreathStats(BaseModel):
     flow_class_distribution: dict[int, int]
     # Low-confidence fallback flatness-triage guesses (flow_confidence exactly at
     # FL_DEFAULT_CONFIDENCE); reported separately so they don't inflate FL rates.
+    # Missing or below-default confidence values are excluded from both buckets.
     flow_class_distribution_fallback: dict[int, int] = Field(default_factory=dict)
     tidal_volume_ml: DistributionStats
     ie_ratio: DistributionStats

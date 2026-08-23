@@ -549,7 +549,8 @@ class EpochStats(BaseModel):
     # nightly fl_class_ge4_pct.  Keys are strings because JSON object keys are.
     flow_class_distribution: dict[str, int] = {}
     # Low-confidence fallback flatness-triage guesses (confidence at the default),
-    # reported separately so they don't inflate FL rates.
+    # reported separately so they don't inflate FL rates.  Missing or below-default
+    # confidence values are excluded from both distributions.
     flow_class_distribution_fallback: dict[str, int] = {}
     tidal_volume_ml: EpochDistribution
     ie_ratio: EpochDistribution
