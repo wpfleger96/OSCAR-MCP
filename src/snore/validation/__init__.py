@@ -49,6 +49,18 @@ from snore.validation.rera_report import (
 )
 from snore.validation.rera_validator import ReraValidator
 from snore.validation.stats import mean_or_none, spearman_or_none
+from snore.validation.sweep import (
+    DEFAULT_GRIDS,
+    DEFAULT_KNOBS,
+    NOT_SWEEPABLE_NOTICE,
+    TARGETS,
+    SweepData,
+    SweepResult,
+    SweepRow,
+    evaluate_grid,
+    export_sweep_csv,
+    load_sweep_data,
+)
 
 __all__ = [
     "AppleCrossValidator",
@@ -88,4 +100,14 @@ __all__ = [
     "ReraAggregateMetrics",
     "export_rera_report_json",
     "export_rera_report_csv",
+    "load_sweep_data",
+    "evaluate_grid",
+    "export_sweep_csv",
+    "SweepData",
+    "SweepResult",
+    "SweepRow",
+    "DEFAULT_GRIDS",
+    "DEFAULT_KNOBS",
+    "TARGETS",
+    "NOT_SWEEPABLE_NOTICE",
 ]
