@@ -329,6 +329,10 @@ def init_db(temp_db: Any) -> Any:
     """Initialise the global database at a temp path; migrate + tear down."""
     from snore.database.session import cleanup_database, init_database
 
+    # init_database() is process-global and returns early when another test has
+    # already initialized an engine.  Reset first so this fixture always owns
+    # the unique temp_db it was given, regardless of test execution order.
+    _run(cleanup_database())
     _run(init_database(str(temp_db)))
     yield
     _run(cleanup_database())

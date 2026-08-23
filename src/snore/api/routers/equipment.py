@@ -15,7 +15,7 @@ from snore.services.schemas import MaskEpochResponse
 router = APIRouter()
 
 MaskLogServiceDep = Annotated[MaskLogService, Depends(service_dep(MaskLogService))]
-MaskLogWriteServiceDep = Annotated[
+MaskLogImmediateServiceDep = Annotated[
     MaskLogService, Depends(service_dep_immediate(MaskLogService))
 ]
 MaskEpochServiceDep = Annotated[
@@ -51,7 +51,7 @@ async def update_mask_log_entry(
     entry_id: int,
     body: MaskLogUpdateRequest,
     _actor: RequireWritable,
-    service: MaskLogWriteServiceDep,
+    service: MaskLogImmediateServiceDep,
 ) -> MaskLogEntryResponse:
     return await service.update_entry(entry_id, body.model_dump(exclude_unset=True))
 
@@ -60,6 +60,6 @@ async def update_mask_log_entry(
 async def delete_mask_log_entry(
     entry_id: int,
     _actor: RequireWritable,
-    service: MaskLogWriteServiceDep,
+    service: MaskLogImmediateServiceDep,
 ) -> None:
     await service.delete_entry(entry_id)

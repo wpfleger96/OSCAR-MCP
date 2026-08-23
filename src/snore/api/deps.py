@@ -146,7 +146,12 @@ def service_dep[T](cls: Callable[[AsyncSession, int], T]) -> Callable[..., T]:
 def service_dep_immediate[T](
     cls: Callable[[AsyncSession, int], T],
 ) -> Callable[..., T]:
-    """Construct ``cls`` with a profile-scoped BEGIN IMMEDIATE session."""
+    """Return a FastAPI dependency that constructs ``cls`` with a
+    profile-scoped BEGIN IMMEDIATE session.
+
+    Routes with a writable guard must declare that guard before this dependency
+    so rejected requests do not acquire SQLite's writer lock.
+    """
 
     async def _dep(
         actor: ActorDep,

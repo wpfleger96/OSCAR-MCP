@@ -32,7 +32,7 @@ from snore.services.schemas import (
 router = APIRouter()
 
 AnalysisFacadeDep = Annotated[AnalysisFacade, Depends(service_dep(AnalysisFacade))]
-AnalysisWriteFacadeDep = Annotated[
+AnalysisImmediateFacadeDep = Annotated[
     AnalysisFacade, Depends(service_dep_immediate(AnalysisFacade))
 ]
 
@@ -93,7 +93,7 @@ async def run_analysis(
 async def delete_analysis(
     body: AnalysisDeleteRequest,
     _actor: RequireWritable,
-    facade: AnalysisWriteFacadeDep,
+    facade: AnalysisImmediateFacadeDep,
 ) -> dict[str, int]:
     if body.session_ids:
         owned = await facade.get_owned_session_ids(body.session_ids)

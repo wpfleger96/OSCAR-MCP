@@ -12,18 +12,23 @@ from snore.api.deps import get_db, get_db_immediate
 from snore.api.routers.analysis import (
     delete_analysis,
     get_analysis,
+    get_analysis_delete_preview,
+    list_analysis_sessions,
     run_analysis,
     run_batch_analysis,
 )
 from snore.api.routers.equipment import (
     create_mask_log_entry,
     delete_mask_log_entry,
+    list_mask_epochs,
     list_mask_log_entries,
     update_mask_log_entry,
 )
 from snore.api.routers.sessions import (
     bulk_delete_preview,
     delete_sessions,
+    get_delete_preview,
+    get_session,
     list_sessions,
     update_session,
 )
@@ -76,9 +81,14 @@ def test_read_then_write_service_routes_use_immediate_transactions(
     [
         (list_sessions, "service"),
         (bulk_delete_preview, "service"),
+        (get_delete_preview, "service"),
+        (get_session, "service"),
+        (list_analysis_sessions, "facade"),
         (get_analysis, "facade"),
+        (get_analysis_delete_preview, "facade"),
         (run_analysis, "facade"),
         (run_batch_analysis, "facade"),
+        (list_mask_epochs, "service"),
         (list_mask_log_entries, "service"),
         (create_mask_log_entry, "service"),
     ],

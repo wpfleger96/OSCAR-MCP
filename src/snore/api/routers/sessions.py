@@ -22,7 +22,7 @@ from snore.services.schemas import DeletePreview, SessionDetail, SessionListItem
 router = APIRouter()
 
 SessionServiceDep = Annotated[SessionService, Depends(service_dep(SessionService))]
-SessionWriteServiceDep = Annotated[
+SessionImmediateServiceDep = Annotated[
     SessionService, Depends(service_dep_immediate(SessionService))
 ]
 
@@ -93,7 +93,7 @@ async def update_session(
     session_id: int,
     body: SessionEnabledRequest,
     _actor: RequireWritable,
-    service: SessionWriteServiceDep,
+    service: SessionImmediateServiceDep,
 ) -> SessionDetail:
     await service.set_session_enabled(session_id, body.enabled)
     return await service.get_session_detail(session_id)
@@ -103,7 +103,7 @@ async def update_session(
 async def delete_sessions(
     body: SessionDeleteRequest,
     _actor: RequireWritable,
-    service: SessionWriteServiceDep,
+    service: SessionImmediateServiceDep,
 ) -> dict[str, int]:
     if body.session_ids:
         owned = await service.get_owned_ids(body.session_ids)
