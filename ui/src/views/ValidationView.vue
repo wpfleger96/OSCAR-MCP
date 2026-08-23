@@ -1,304 +1,110 @@
 <template>
     <div class="mx-auto px-4 py-6" style="max-width: 1200px">
-        <h1 class="text-2xl font-bold mb-6">Validation</h1>
+        <h1 class="mb-2 text-2xl font-bold">Validation</h1>
+        <p class="mb-6 max-w-3xl text-sm text-muted-foreground">
+            Validate SNORE's programmatic analysis against the device's own signals and an
+            independent Apple Health axis. Event detection (apnea/hypopnea) is measured against
+            machine-flagged events; the FL, RERA, and Apple metrics are
+            <span class="font-medium">experimental trend instruments</span>, not clinically
+            validated absolute measurements. Runs are persisted — use History to revisit a run and
+            Compare Runs to measure the effect of an algorithm or parameter change.
+        </p>
 
-        <div v-if="!result" class="space-y-4 max-w-md">
-            <div class="space-y-2">
-                <label class="text-sm font-medium">From Date</label>
-                <DatePickerInput
-                    v-model="fromDate"
-                    :is-date-disabled="isDateDisabled"
-                    :min-value="minValue"
-                    :max-value="maxValue"
-                />
-            </div>
-            <div class="space-y-2">
-                <label class="text-sm font-medium">To Date</label>
-                <DatePickerInput
-                    v-model="toDate"
-                    :is-date-disabled="isDateDisabled"
-                    :min-value="minValue"
-                    :max-value="maxValue"
-                />
-            </div>
-            <div class="space-y-2">
-                <label class="text-sm font-medium">Mode</label>
-                <Select v-model="mode">
-                    <SelectTrigger class="w-full">
-                        <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                        <SelectItem value="aasm">aasm</SelectItem>
-                        <SelectItem value="aasm_relaxed">aasm_relaxed</SelectItem>
-                        <SelectItem value="resmed">resmed</SelectItem>
-                    </SelectContent>
-                </Select>
-            </div>
+        <!-- unmount-on-hide=false keeps every panel's freshly-run report and picked
+             dates alive across tab switches, not just History-loaded runs. -->
+        <Tabs v-model="activeTab" :unmount-on-hide="false">
+            <TabsList>
+                <TabsTrigger v-for="t in TABS" :key="t" :value="t">
+                    {{ VALIDATOR_LABELS[t] }}
+                </TabsTrigger>
+            </TabsList>
 
-            <div v-if="error" class="flex items-center gap-2 text-sm text-destructive">
-                <AlertTriangle class="h-4 w-4" />
-                {{ error }}
-            </div>
+            <TabsContent value="events">
+                <EventsValidationPanel :load-run-id="loadRunFor('events')" />
+            </TabsContent>
+            <TabsContent value="fl">
+                <FlValidationPanel :load-run-id="loadRunFor('fl')" />
+            </TabsContent>
+            <TabsContent value="breaths">
+                <BreathTrendsPanel :load-run-id="loadRunFor('breaths')" />
+            </TabsContent>
+            <TabsContent value="rera">
+                <ReraValidationPanel :load-run-id="loadRunFor('rera')" />
+            </TabsContent>
+            <TabsContent value="apple">
+                <AppleCrossPanel :load-run-id="loadRunFor('apple')" />
+            </TabsContent>
+        </Tabs>
 
-            <Button :disabled="!canWrite || !fromDate || !toDate || running" @click="handleRun">
-                <Loader2 v-if="running" class="mr-2 h-4 w-4 animate-spin" />
-                Run Validation
-            </Button>
-        </div>
+        <Separator class="my-8" />
+        <RunComparison />
 
-        <div v-else class="space-y-6">
-            <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-                <StatCard
-                    label="Avg Apnea Sensitivity"
-                    :value="
-                        result.aggregate.avg_apnea_sensitivity != null
-                            ? result.aggregate.avg_apnea_sensitivity * 100
-                            : null
-                    "
-                    unit="%"
-                    :decimals="1"
-                    glossary-key="sensitivity"
-                />
-                <StatCard
-                    label="Avg Apnea F1"
-                    :value="
-                        result.aggregate.avg_apnea_f1 != null
-                            ? result.aggregate.avg_apnea_f1 * 100
-                            : null
-                    "
-                    unit="%"
-                    :decimals="1"
-                    glossary-key="f1"
-                />
-                <StatCard
-                    label="Avg Hypopnea Sensitivity"
-                    :value="
-                        result.aggregate.avg_hypopnea_sensitivity != null
-                            ? result.aggregate.avg_hypopnea_sensitivity * 100
-                            : null
-                    "
-                    unit="%"
-                    :decimals="1"
-                    glossary-key="sensitivity"
-                />
-                <StatCard
-                    label="Avg Hypopnea F1"
-                    :value="
-                        result.aggregate.avg_hypopnea_f1 != null
-                            ? result.aggregate.avg_hypopnea_f1 * 100
-                            : null
-                    "
-                    unit="%"
-                    :decimals="1"
-                    glossary-key="f1"
-                />
-                <StatCard
-                    label="Sessions Validated"
-                    :value="result.aggregate.total_sessions"
-                    :decimals="0"
-                />
-            </div>
-
-            <!-- Deliberate mobile treatment: this dense validation metrics matrix stays a horizontally scrolling table rather than cards. -->
-            <div class="rounded-md border overflow-x-auto">
-                <Table>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead>Date</TableHead>
-                            <TableHead>Duration</TableHead>
-                            <TableHead class="whitespace-nowrap"
-                                >Apnea Sens <InfoHint glossary-key="sensitivity"
-                            /></TableHead>
-                            <TableHead class="whitespace-nowrap"
-                                >Apnea Prec <InfoHint glossary-key="precision"
-                            /></TableHead>
-                            <TableHead class="whitespace-nowrap"
-                                >Apnea F1 <InfoHint glossary-key="f1"
-                            /></TableHead>
-                            <TableHead class="whitespace-nowrap"
-                                >Hypopnea Sens <InfoHint glossary-key="sensitivity"
-                            /></TableHead>
-                            <TableHead class="whitespace-nowrap"
-                                >Hypopnea Prec <InfoHint glossary-key="precision"
-                            /></TableHead>
-                            <TableHead class="whitespace-nowrap"
-                                >Hypopnea F1 <InfoHint glossary-key="f1"
-                            /></TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        <TableRow v-if="result.sessions.length === 0">
-                            <TableCell :colspan="8" class="py-8 text-center text-muted-foreground">
-                                No validated sessions found in the selected date range.
-                            </TableCell>
-                        </TableRow>
-                        <TableRow
-                            v-else
-                            v-for="session in result.sessions"
-                            :key="session.session_id"
-                            :class="{
-                                'bg-amber-50 dark:bg-amber-950/30': isLowSensitivity(session),
-                                'even:bg-muted/50': !isLowSensitivity(session),
-                            }"
-                        >
-                            <TableCell>
-                                <RouterLink
-                                    :to="`/sessions/${session.session_id}/analysis`"
-                                    class="text-primary hover:underline"
-                                >
-                                    {{ formatDateShort(session.date) }}
-                                </RouterLink>
-                            </TableCell>
-                            <TableCell>{{ session.duration_hours.toFixed(1) }}h</TableCell>
-                            <TableCell>{{ pct(session.apnea_sensitivity) }}</TableCell>
-                            <TableCell>{{ pct(session.apnea_precision) }}</TableCell>
-                            <TableCell>{{ pct(session.apnea_f1) }}</TableCell>
-                            <TableCell>{{ pct(session.hypopnea_sensitivity) }}</TableCell>
-                            <TableCell>{{ pct(session.hypopnea_precision) }}</TableCell>
-                            <TableCell>{{ pct(session.hypopnea_f1) }}</TableCell>
-                        </TableRow>
-                    </TableBody>
-                </Table>
-            </div>
-
-            <div class="flex gap-2 flex-wrap">
-                <Button variant="outline" @click="result = null">Run Again</Button>
-                <Button variant="outline" @click="downloadJson">Download JSON</Button>
-                <Button variant="outline" @click="downloadCsv">Download CSV</Button>
-            </div>
-        </div>
+        <Separator class="my-8" />
+        <ValidationRunHistory @select="onSelectRun" />
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { RouterLink } from 'vue-router'
-import StatCard from '@/components/StatCard.vue'
-import InfoHint from '@/components/InfoHint.vue'
-import { Button } from '@/components/ui/button'
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from '@/components/ui/select'
-import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
-} from '@/components/ui/table'
-import { Loader2, AlertTriangle } from '@lucide/vue'
-import { formatDateShort } from '@/utils/formatting'
-import { runValidation } from '@/api/validation'
-import { useAuth } from '@/composables/useAuth'
-import { useAvailableDates } from '@/composables/useAvailableDates'
-import DatePickerInput from '@/components/DatePickerInput.vue'
-import type { ValidationReport, SessionValidation } from '@/types'
+import { ref, watch, onMounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { Separator } from '@/components/ui/separator'
+import EventsValidationPanel from '@/components/validation/EventsValidationPanel.vue'
+import FlValidationPanel from '@/components/validation/FlValidationPanel.vue'
+import BreathTrendsPanel from '@/components/validation/BreathTrendsPanel.vue'
+import ReraValidationPanel from '@/components/validation/ReraValidationPanel.vue'
+import AppleCrossPanel from '@/components/validation/AppleCrossPanel.vue'
+import RunComparison from '@/components/validation/RunComparison.vue'
+import ValidationRunHistory from '@/components/validation/ValidationRunHistory.vue'
+import { VALIDATOR_LABELS } from '@/utils/validationMetrics'
+import type { ValidatorType, ValidationRunStatus } from '@/types'
 
-const { canWrite } = useAuth()
-const { load: loadDates, isDateDisabled, minValue, maxValue } = useAvailableDates()
+// Single source of truth for tab identity/order; the explicit TabsContent blocks
+// below stay because each renders a different panel component.
+const TABS = Object.keys(VALIDATOR_LABELS) as ValidatorType[]
+
+const route = useRoute()
+const router = useRouter()
+
+function isTab(value: unknown): value is ValidatorType {
+    return typeof value === 'string' && (TABS as string[]).includes(value)
+}
+
+const activeTab = ref<ValidatorType>(isTab(route.query.tab) ? route.query.tab : 'events')
+
+// Keep the active tab addressable via ?tab=<validator>.
+watch(activeTab, (tab) => {
+    if (route.query.tab !== tab) {
+        void router.replace({ query: { ...route.query, tab } })
+    }
+})
+watch(
+    () => route.query.tab,
+    (tab) => {
+        if (isTab(tab) && tab !== activeTab.value) activeTab.value = tab
+    },
+)
+
+// A run selected from History loads into its matching tab.
+const pendingLoad = ref<{ type: ValidatorType; runId: number } | null>(null)
+
+function loadRunFor(type: ValidatorType): number | null {
+    return pendingLoad.value?.type === type ? pendingLoad.value.runId : null
+}
+
+async function onSelectRun(run: ValidationRunStatus): Promise<void> {
+    const type = run.validator_type as ValidatorType
+    activeTab.value = type
+    pendingLoad.value = { type, runId: run.run_id }
+    // Clear once the panel's loadRunId watcher has consumed it, so re-selecting the
+    // same run is a fresh null→id transition that re-triggers the load.
+    await nextTick()
+    pendingLoad.value = null
+}
 
 onMounted(() => {
-    void loadDates()
+    if (!isTab(route.query.tab)) {
+        void router.replace({ query: { ...route.query, tab: activeTab.value } })
+    }
 })
-
-const fromDate = ref('')
-const toDate = ref('')
-const mode = ref<'aasm' | 'aasm_relaxed' | 'resmed'>('aasm')
-const running = ref(false)
-const result = ref<ValidationReport | null>(null)
-const error = ref<string | null>(null)
-
-function pct(value: number | null | undefined): string {
-    return value != null ? `${(value * 100).toFixed(1)}%` : '---'
-}
-
-function csvCell(value: unknown): string {
-    const s = String(value ?? '')
-    // Neutralize formula injection: prefix cells starting with =, +, -, or @
-    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s
-    // Wrap in double quotes, escape embedded double quotes as ""
-    return `"${safe.replaceAll('"', '""')}"`
-}
-
-function isLowSensitivity(session: SessionValidation): boolean {
-    return session.apnea_sensitivity < 0.7 || session.hypopnea_sensitivity < 0.7
-}
-
-function downloadBlob(content: string, filename: string, mimeType: string): void {
-    const blob = new Blob([content], { type: mimeType })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-}
-
-function downloadJson(): void {
-    if (!result.value) return
-    const filename = `validation-report-${fromDate.value}-${toDate.value}.json`
-    downloadBlob(JSON.stringify(result.value, null, 2), filename, 'application/json')
-}
-
-function downloadCsv(): void {
-    if (!result.value) return
-    const headers = [
-        'session_id',
-        'date',
-        'duration_hours',
-        'machine_events',
-        'programmatic_events',
-        'apnea_sens',
-        'apnea_prec',
-        'apnea_f1',
-        'hypopnea_sens',
-        'hypopnea_prec',
-        'hypopnea_f1',
-        'notes',
-    ]
-    const rows = result.value.sessions.map((s) => [
-        s.session_id,
-        s.date,
-        s.duration_hours.toFixed(1),
-        s.machine_event_count,
-        s.programmatic_event_count,
-        `${(s.apnea_sensitivity * 100).toFixed(0)}%`,
-        `${(s.apnea_precision * 100).toFixed(0)}%`,
-        s.apnea_f1.toFixed(2),
-        `${(s.hypopnea_sensitivity * 100).toFixed(0)}%`,
-        `${(s.hypopnea_precision * 100).toFixed(0)}%`,
-        s.hypopnea_f1.toFixed(2),
-        s.notes ?? '',
-    ])
-    const csv = [headers, ...rows].map((r) => r.map(csvCell).join(',')).join('\n')
-    const filename = `validation-report-${fromDate.value}-${toDate.value}.csv`
-    downloadBlob(csv, filename, 'text/csv')
-}
-
-async function handleRun(): Promise<void> {
-    if (fromDate.value && toDate.value && fromDate.value > toDate.value) {
-        error.value = 'From date must be before To date'
-        return
-    }
-    running.value = true
-    error.value = null
-    try {
-        result.value = await runValidation({
-            from_date: fromDate.value,
-            to_date: toDate.value,
-            mode: mode.value,
-        })
-    } catch (err) {
-        error.value = err instanceof Error ? err.message : 'Validation failed'
-    } finally {
-        running.value = false
-    }
-}
 </script>

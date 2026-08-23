@@ -101,6 +101,37 @@ export function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
+// Adaptive percent formatting, mirroring the backend's `fmt_sig` philosophy: fixed
+// decimals at ordinary magnitudes, but significant figures / scientific notation for
+// tiny values so a chance-precision floor (~4e-5 → 0.004%) stays legible beside a
+// proxy precision (~1e-3 → 0.1%) instead of both flooring to 0.00%. Comparing those
+// near-zero magnitudes is the whole point of the RERA framing.
+function adaptivePercentText(pct: number, decimals: number): string {
+    const a = Math.abs(pct)
+    if (a === 0 || a >= 0.1) return pct.toFixed(decimals)
+    if (a >= 1e-4) return pct.toPrecision(2)
+    return pct.toExponential(1)
+}
+
+/** Format a 0–1 ratio as an adaptive-precision percent string (e.g. "25.0%",
+ *  "0.0040%"); null when the input is null/undefined/non-finite. */
+export function formatPercent(ratio: number | null | undefined, decimals = 1): string | null {
+    if (ratio == null || !Number.isFinite(ratio)) return null
+    return `${adaptivePercentText(ratio * 100, decimals)}%`
+}
+
+/** Format a signed ratio delta as adaptive-precision percentage points (e.g.
+ *  "+5.0 pp", "+0.0040 pp"); null when the input is null/undefined/non-finite. */
+export function formatPercentPointsDelta(
+    delta: number | null | undefined,
+    decimals = 1,
+): string | null {
+    if (delta == null || !Number.isFinite(delta)) return null
+    const pp = delta * 100
+    const sign = pp > 0 ? '+' : ''
+    return `${sign}${adaptivePercentText(pp, decimals)} pp`
+}
+
 // Lazily-created, module-cached formatters for uPlot axis tick labels (allocation-free on hot path).
 let _fmtWithSecs: Intl.DateTimeFormat | undefined
 let _fmtNoSecs: Intl.DateTimeFormat | undefined
@@ -141,6 +172,8 @@ export function avg(vals: (number | null | undefined)[]): number | null {
 const NULL_REASON_LABELS: Record<string, string> = {
     analysis_not_run: 'Breath analysis has not been run for this night.',
     analysis_stale: 'Breath analysis is out of date for this night.',
+    device_ambiguous:
+        'The night has sessions from more than one device and no device was pinned to disambiguate.',
     algo_version_mismatch: 'Produced by a different analysis algorithm version.',
     channel_absent: 'A required signal channel is not available.',
     channel_unaligned: 'Signal channels could not be aligned for this night.',

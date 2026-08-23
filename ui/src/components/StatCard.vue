@@ -7,7 +7,8 @@
             /></span>
         </div>
         <div class="stat-value">
-            <template v-if="value != null">
+            <span v-if="value != null && display != null">{{ display }}</span>
+            <template v-else-if="value != null">
                 {{ decimals != null ? value.toFixed(decimals) : value }}
                 <span v-if="unit" class="stat-unit">{{ unit }}</span>
             </template>
@@ -28,6 +29,10 @@ const props = defineProps<{
     value: number | null | undefined
     unit?: string
     decimals?: number
+    // Pre-formatted display string that overrides numeric formatting when `value`
+    // is present (e.g. an adaptive-precision percent). The em-dash empty state still
+    // keys off `value`, so a null value keeps its reason tooltip.
+    display?: string | null
     glossaryKey?: string
     // Null-with-reason code (e.g. 'analysis_not_run'); shown as a tooltip on the
     // em-dash state to explain why a value is absent for this night.

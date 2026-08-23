@@ -195,6 +195,14 @@ class FlValidationRequest(DateRangeValidationRequest):
     pass
 
 
+class BreathTrendsValidationRequest(DateRangeValidationRequest):
+    pass
+
+
+class ReraValidationRequest(DateRangeValidationRequest):
+    pass
+
+
 # Apple cross-validation walks its calendar span in 90-night pages in the
 # request path, so an unbounded span means thousands of sequential queries.
 # One year of nights is far beyond any real Apple Watch export horizon.
@@ -217,14 +225,6 @@ class AppleCrossValidationRequest(BaseModel):
                 f"{_APPLE_CROSS_MAX_SPAN_NIGHTS}. Narrow the range."
             )
         return self
-
-
-class BreathTrendsValidationRequest(DateRangeValidationRequest):
-    pass
-
-
-class ReraValidationRequest(DateRangeValidationRequest):
-    pass
 
 
 # Style vocabulary must stay in sync: DB CHECKs (models.py, migrations 008/009), services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.

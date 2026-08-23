@@ -1,6 +1,56 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { formatWallClockTime, nullReasonLabel } from '@/utils/formatting'
+import {
+    formatPercent,
+    formatPercentPointsDelta,
+    formatWallClockTime,
+    nullReasonLabel,
+} from '@/utils/formatting'
+
+describe('formatPercent', () => {
+    it('test_ordinary_ratio_uses_fixed_decimals', () => {
+        expect(formatPercent(0.25)).toBe('25.0%')
+        expect(formatPercent(0.25, 2)).toBe('25.00%')
+        expect(formatPercent(0.001, 2)).toBe('0.10%')
+    })
+
+    it('test_chance_floor_scale_stays_visible_not_zero', () => {
+        // ~4e-5 ratio is the chance precision floor: it must NOT floor to 0.00%.
+        expect(formatPercent(4e-5, 2)).toBe('0.0040%')
+        // ~3.6e-4 scored floor.
+        expect(formatPercent(3.6e-4, 2)).toBe('0.036%')
+    })
+
+    it('test_vanishing_magnitude_switches_to_scientific', () => {
+        expect(formatPercent(5e-7)).toBe('5.0e-5%')
+    })
+
+    it('test_zero_and_nullish_and_non_finite', () => {
+        expect(formatPercent(0)).toBe('0.0%')
+        expect(formatPercent(null)).toBeNull()
+        expect(formatPercent(undefined)).toBeNull()
+        expect(formatPercent(Number.NaN)).toBeNull()
+    })
+})
+
+describe('formatPercentPointsDelta', () => {
+    it('test_ordinary_delta_signs_percentage_points', () => {
+        expect(formatPercentPointsDelta(0.05)).toBe('+5.0 pp')
+        expect(formatPercentPointsDelta(-0.05)).toBe('-5.0 pp')
+        expect(formatPercentPointsDelta(0)).toBe('0.0 pp')
+    })
+
+    it('test_chance_floor_scale_delta_stays_visible', () => {
+        // A run-vs-run move at the chance-floor scale must be representable, not +0.0 pp.
+        expect(formatPercentPointsDelta(4e-5)).toBe('+0.0040 pp')
+        expect(formatPercentPointsDelta(-4e-5)).toBe('-0.0040 pp')
+    })
+
+    it('test_nullish_returns_null', () => {
+        expect(formatPercentPointsDelta(null)).toBeNull()
+        expect(formatPercentPointsDelta(undefined)).toBeNull()
+    })
+})
 
 describe('nullReasonLabel', () => {
     it('test_known_code_returns_sentence', () => {
