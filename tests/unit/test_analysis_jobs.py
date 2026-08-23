@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import time
 
+from datetime import UTC, datetime
+
 import pytest
 
 import snore.api.analysis_jobs as jobs
@@ -361,21 +363,23 @@ def test_to_dict_fields_and_no_profile_id():
     assert d["eta_seconds"] is None
 
 
-def test_to_dict_timestamps_are_wall_clock_epoch():
-    """created_at/started_at/finished_at must serialize as wall-clock epoch
-    seconds, not time.monotonic() — the UI multiplies by 1000 for ``new Date``,
-    so a monotonic value would render as a 1970-era date (see PR #290)."""
+def test_to_dict_timestamps_are_wall_clock_datetimes():
+    """created_at/started_at/finished_at must be wall-clock ``datetime`` values,
+    not time.monotonic() — a monotonic value (seconds since boot) fed to the
+    client would render as a 1970-era date (see PR #290)."""
     job = _enqueue_one()
     job.try_start()
     job.finish(succeeded=True)
 
     d = job.to_dict()
-    now = time.time()
-    # A just-created/started/finished job's timestamps are within seconds of now;
-    # a monotonic value (seconds since boot) would be off by years.
-    assert abs(float(d["created_at"]) - now) < 60
-    assert abs(float(d["started_at"]) - now) < 60
-    assert abs(float(d["finished_at"]) - now) < 60
+    now = datetime.now(UTC)
+    # A just-created/started/finished job's timestamps are within seconds of now.
+    assert isinstance(d["created_at"], datetime)
+    assert isinstance(d["started_at"], datetime)
+    assert isinstance(d["finished_at"], datetime)
+    assert abs((d["created_at"] - now).total_seconds()) < 60
+    assert abs((d["started_at"] - now).total_seconds()) < 60
+    assert abs((d["finished_at"] - now).total_seconds()) < 60
 
 
 # ---------------------------------------------------------------------------

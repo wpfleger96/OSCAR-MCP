@@ -4,6 +4,7 @@ import type {
     AnalysisListItem,
     AnalysisResult,
     AnalysisDeletePreview,
+    AnalysisJobStatus,
 } from '@/types'
 
 export interface AnalysisSessionsParams {
@@ -55,21 +56,7 @@ export const runBatchAnalysis = apiPost<
     ]
 >('/analysis/batch', (body) => ({ data: body }))
 
-export interface AnalysisJobInfo {
-    job_id: string
-    state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-    source: string
-    session_count: number
-    progress_completed: number
-    progress_total: number
-    error_message: string | null
-    created_at: number
-    started_at: number | null
-    finished_at: number | null
-    owner_user_id: number | null
-}
-
-export const getAnalysisJobs = apiGet<{ jobs: AnalysisJobInfo[] }>('/analysis/jobs')
+export const getAnalysisJobs = apiGet<{ jobs: AnalysisJobStatus[] }>('/analysis/jobs')
 
 export const cancelAnalysisJob = apiDelete<void, [jobId: string]>(
     (jobId) => `/analysis/jobs/${jobId}`,

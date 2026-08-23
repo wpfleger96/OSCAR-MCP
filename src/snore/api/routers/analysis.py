@@ -203,9 +203,9 @@ async def list_analysis_jobs(
             progress_completed=rec.progress_completed,
             progress_total=rec.progress_total,
             error_message=rec.error_message,
-            created_at=rec.created_at.timestamp(),
-            started_at=rec.started_at.timestamp() if rec.started_at else None,
-            finished_at=rec.finished_at.timestamp() if rec.finished_at else None,
+            created_at=rec.created_at,
+            started_at=rec.started_at,
+            finished_at=rec.finished_at,
             owner_user_id=rec.owner_user_id,
         )
 

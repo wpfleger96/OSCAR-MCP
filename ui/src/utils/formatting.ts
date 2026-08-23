@@ -60,9 +60,9 @@ export function formatDateMonthDay(iso: string): string {
 }
 
 /** e.g. "just now", "5m ago", "3h ago", or "Jan 5, 03:12 AM" for older times.
- *  Accepts an ISO 8601 string (import endpoint) or epoch seconds (analysis endpoint). */
-export function formatRelativeTime(value: string | number): string {
-    const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
+ *  Accepts an ISO 8601 datetime string; returns "—" for invalid input. */
+export function formatRelativeTime(value: string): string {
+    const d = new Date(value)
     if (isNaN(d.getTime())) return '—'
     const diffMin = Math.floor((Date.now() - d.getTime()) / 60_000)
     if (diffMin < 1) return 'just now'

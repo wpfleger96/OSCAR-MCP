@@ -129,9 +129,9 @@ def _row_to_status(row: Any) -> ValidationRunStatus:
         engine_identity=row.engine_identity_json,
         validator_params=row.validator_params_json,
         owner_user_id=row.owner_user_id,
-        created_at=row.created_at.timestamp(),
-        started_at=row.started_at.timestamp() if row.started_at else None,
-        finished_at=row.finished_at.timestamp() if row.finished_at else None,
+        created_at=row.created_at,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
         reused=False,
     )
 

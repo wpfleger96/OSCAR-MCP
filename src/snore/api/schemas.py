@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated, Literal, cast
 
 from pydantic import (
@@ -288,6 +288,12 @@ class MaskLogUpdateRequest(_MaskLogFields):
 
 
 class AnalysisJobStatus(BaseModel):
+    """Snapshot of one analysis job.
+
+    created_at, started_at, and finished_at are tz-aware UTC datetimes
+    serialized as ISO 8601 strings.
+    """
+
     job_id: str
     state: str
     source: str
@@ -295,9 +301,9 @@ class AnalysisJobStatus(BaseModel):
     progress_completed: int
     progress_total: int
     error_message: str | None
-    created_at: float
-    started_at: float | None
-    finished_at: float | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
     owner_user_id: int | None
 
 
@@ -333,6 +339,12 @@ class ValidationRunRequest(BaseModel):
 
 
 class ValidationRunStatus(BaseModel):
+    """Snapshot of one validation run.
+
+    created_at, started_at, and finished_at are tz-aware UTC datetimes
+    serialized as ISO 8601 strings.
+    """
+
     run_id: int
     job_id: str | None
     validator_type: str
@@ -343,9 +355,9 @@ class ValidationRunStatus(BaseModel):
     engine_identity: dict[str, object]
     validator_params: dict[str, object]
     owner_user_id: int | None
-    created_at: float
-    started_at: float | None
-    finished_at: float | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
     # True when this run was returned by dedup instead of computed anew.
     reused: bool = False
 
@@ -399,7 +411,8 @@ class HealthImportResultSummary(BaseModel):
 class PipelineJobStatus(BaseModel):
     """Stitched view of one import job and its downstream analysis job.
 
-    created_at, started_at, and finished_at are ISO 8601 UTC datetime strings.
+    created_at, started_at, and finished_at are tz-aware UTC datetimes
+    serialized as ISO 8601 strings.
     """
 
     job_id: str
@@ -407,9 +420,9 @@ class PipelineJobStatus(BaseModel):
     state: str
     stage: str
     file_count: int
-    created_at: str
-    started_at: str | None
-    finished_at: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
     progress_message: str | None
     sessions_imported: int | None
     import_result: ImportResultSummary | None

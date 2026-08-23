@@ -163,6 +163,13 @@ def test_list_and_filter_runs(
     all_runs = client.get("/api/v1/validate/runs").json()
     assert all_runs["total"] == 2
 
+    run = all_runs["runs"][0]
+    datetime.fromisoformat(run["created_at"])
+    if run["started_at"] is not None:
+        datetime.fromisoformat(run["started_at"])
+    if run["finished_at"] is not None:
+        datetime.fromisoformat(run["finished_at"])
+
     fl_only = client.get("/api/v1/validate/runs?validator_type=fl").json()
     assert fl_only["total"] == 1
     assert fl_only["runs"][0]["validator_type"] == "fl"

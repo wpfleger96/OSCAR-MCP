@@ -370,6 +370,13 @@ class TestAnalysisJobsAPI:
         ids = [j["job_id"] for j in data["jobs"]]
         assert job.job_id in ids
 
+        j = next(j for j in data["jobs"] if j["job_id"] == job.job_id)
+        datetime.fromisoformat(j["created_at"])
+        if j["started_at"] is not None:
+            datetime.fromisoformat(j["started_at"])
+        if j["finished_at"] is not None:
+            datetime.fromisoformat(j["finished_at"])
+
 
 # ---------------------------------------------------------------------------
 # Route-level two-profile isolation: DELETE /analysis must 404 on foreign IDs

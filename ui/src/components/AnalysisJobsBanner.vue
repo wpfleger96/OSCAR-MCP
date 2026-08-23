@@ -62,13 +62,13 @@
 <script setup lang="ts">
 import { Loader2, Clock, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import type { AnalysisJobInfo } from '@/api/analysis'
+import type { AnalysisJobStatus } from '@/types'
 import { formatRelativeTime } from '@/utils/formatting'
 
-defineProps<{ jobs: AnalysisJobInfo[] }>()
+defineProps<{ jobs: AnalysisJobStatus[] }>()
 const emit = defineEmits<{ cancel: [jobId: string] }>()
 
-function jobLabel(job: AnalysisJobInfo): string {
+function jobLabel(job: AnalysisJobStatus): string {
     if (job.source === 'import') return `Post-import: ${job.session_count} session(s)`
     if (job.source === 'batch') return `Batch: ${job.session_count} session(s)`
     return `${job.session_count} session(s)`

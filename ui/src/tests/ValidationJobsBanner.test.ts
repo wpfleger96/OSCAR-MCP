@@ -9,7 +9,7 @@ import ValidationJobsBanner from '@/components/validation/ValidationJobsBanner.v
 import type { ValidationRunStatus, ValidatorType } from '@/types'
 
 function makeRun(overrides: Partial<ValidationRunStatus> = {}): ValidationRunStatus {
-    const now = Date.now() / 1000
+    const now = new Date().toISOString()
     return {
         run_id: 1,
         validator_type: 'rera' as ValidatorType,
@@ -48,7 +48,9 @@ describe('ValidationJobsBanner', () => {
 
     it('test_terminal_run_has_no_cancel_affordance', () => {
         const wrapper = mount(ValidationJobsBanner, {
-            props: { runs: [makeRun({ state: 'succeeded', finished_at: Date.now() / 1000 })] },
+            props: {
+                runs: [makeRun({ state: 'succeeded', finished_at: new Date().toISOString() })],
+            },
         })
         expect(wrapper.find('button[title="Cancel run"]').exists()).toBe(false)
     })
