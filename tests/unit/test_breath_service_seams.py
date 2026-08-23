@@ -5195,7 +5195,7 @@ class TestNightlySummaryReraRdi:
 
 
 # ---------------------------------------------------------------------------
-# RERA-proxy v2 — _iter_fl_run_recoveries / _count_fl_run_reras
+# RERA-proxy v2 — iter_fl_run_recoveries / _count_fl_run_reras
 # ---------------------------------------------------------------------------
 
 
@@ -5335,7 +5335,7 @@ class TestReraProxyV2Scanner:
     def test_iterator_yields_run_and_recovery_indices(self):
         """The scanner yields (run_start_idx, run_last_idx, recovery_idx)."""
         from snore.services.breath_service import (  # noqa: PLC0415
-            _iter_fl_run_recoveries,
+            iter_fl_run_recoveries,
         )
 
         rows = [
@@ -5344,7 +5344,7 @@ class TestReraProxyV2Scanner:
             _fl_row(5, peak_flow_lpm=20.0),
             _fl_row(1, peak_flow_lpm=26.0),
         ]
-        assert list(_iter_fl_run_recoveries(rows)) == [(1, 2, 3)]
+        assert list(iter_fl_run_recoveries(rows)) == [(1, 2, 3)]
 
     async def test_windows_and_count_identify_same_events(self, async_db_session):
         """_find_fl_run_windows and _count_fl_run_reras agree on the same rows."""

@@ -1875,6 +1875,23 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/validate/apple': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Apple Cross Validation */
+        post: operations['run_apple_cross_validation_api_v1_validate_apple_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
     '/api/v1/validate/breaths': {
         parameters: {
             query?: never
@@ -1904,6 +1921,59 @@ export interface paths {
         /** Run Fl Validation */
         post: operations['run_fl_validation_api_v1_validate_fl_post']
         delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/validate/rera': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        get?: never
+        put?: never
+        /** Run Rera Validation */
+        post: operations['run_rera_validation_api_v1_validate_rera_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/validate/runs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Validation Runs */
+        get: operations['list_validation_runs_api_v1_validate_runs_get']
+        put?: never
+        /** Create Validation Run */
+        post: operations['create_validation_run_api_v1_validate_runs_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/validate/runs/{run_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Validation Run */
+        get: operations['get_validation_run_api_v1_validate_runs__run_id__get']
+        put?: never
+        post?: never
+        /** Delete Validation Run */
+        delete: operations['delete_validation_run_api_v1_validate_runs__run_id__delete']
         options?: never
         head?: never
         patch?: never
@@ -2307,6 +2377,156 @@ export interface components {
         }
         /** @enum {string} */
         ApneaEventType: 'OA' | 'CA' | 'MA' | 'UA'
+        /**
+         * AppleCrossAggregate
+         * @description Aggregate coverage counters and the four cross-source correlations.
+         *
+         *     The skip counters below are independent axes over the same nights, not a
+         *     partition: the SNORE-side counters (``n_analysis_not_run``,
+         *     ``n_analysis_stale``, ``n_device_ambiguous``) classify why a night's SNORE
+         *     indices are unusable, while the Apple-side ``n_skipped_no_apple_bd`` counts
+         *     nights lacking an Apple breathing-disturbance value.  A single night can be
+         *     counted on both axes, so the counters must not be summed.
+         */
+        AppleCrossAggregate: {
+            /** @description fl_class_ge4_pct vs Apple breathing disturbances */
+            fl_vs_apple_bd: components['schemas']['PairCorrelation']
+            /** @description fl_class_ge4_pct vs Apple sleep_efficiency_pct */
+            fl_vs_sleep_efficiency: components['schemas']['PairCorrelation']
+            /**
+             * N Analysis Not Run
+             * @description Nights skipped: SNORE analysis never ran
+             */
+            n_analysis_not_run: number
+            /**
+             * N Analysis Stale
+             * @description Nights skipped: SNORE analysis stale / version-mismatched
+             */
+            n_analysis_stale: number
+            /**
+             * N Device Ambiguous
+             * @description Nights skipped: multiple devices, no device_id pinned
+             */
+            n_device_ambiguous: number
+            /**
+             * N Skipped No Apple Bd
+             * @description Nights with no Apple breathing-disturbance value (an independent axis from the SNORE-side skip counters; do not sum)
+             */
+            n_skipped_no_apple_bd: number
+            /**
+             * N With Apple Bd
+             * @description Nights carrying an Apple breathing-disturbance value
+             */
+            n_with_apple_bd: number
+            /** @description rera_index vs Apple breathing disturbances */
+            rera_vs_apple_bd: components['schemas']['PairCorrelation']
+            /** @description rera_index vs Apple awake_seconds (fragmentation) */
+            rera_vs_awake_seconds: components['schemas']['PairCorrelation']
+            /**
+             * Total Nights
+             * @description Nights carrying SNORE sessions in range (resolved + device-ambiguous)
+             */
+            total_nights: number
+        }
+        /**
+         * AppleCrossNightRecord
+         * @description One night's SNORE indices, independent Apple signals, and skip status.
+         */
+        AppleCrossNightRecord: {
+            /**
+             * Apple Bd Reason
+             * @description 'no_apple_bd' when Apple recorded no disturbance value; else None
+             */
+            apple_bd_reason?: string | null
+            /**
+             * Apple Breathing Disturbances
+             * @description Mean Apple sleeping-breathing-disturbance value for the night
+             */
+            apple_breathing_disturbances?: number | null
+            /**
+             * Awake Seconds
+             * @description Apple-derived awake time in seconds (fragmentation)
+             */
+            awake_seconds?: number | null
+            /**
+             * Fl Class Ge4 Pct
+             * @description SNORE percent of leak-valid classified breaths at flow_class >= 4
+             */
+            fl_class_ge4_pct?: number | null
+            /**
+             * Fl Class Ge4 Pct Reason
+             * @description NullReason code when fl_class_ge4_pct is null
+             */
+            fl_class_ge4_pct_reason?: string | null
+            /**
+             * Night Date
+             * @description Therapy night (YYYY-MM-DD, noon-split)
+             */
+            night_date: string
+            /**
+             * Rera Index
+             * @description SNORE nightly RERA index (RERAs / therapy hour)
+             */
+            rera_index?: number | null
+            /**
+             * Rera Index Reason
+             * @description NullReason code when rera_index is null
+             */
+            rera_index_reason?: string | null
+            /**
+             * Skip Reason
+             * @description Why the night contributes no SNORE side to any correlation: 'analysis_not_run' — SNORE analysis never ran for the night; 'analysis_stale' — SNORE analysis is stale / version-mismatched; 'device_ambiguous' — the night has sessions from more than one device and no device_id was pinned to disambiguate; None — the night carries usable SNORE indices
+             */
+            skip_reason?: string | null
+            /**
+             * Sleep Efficiency Pct
+             * @description Apple-derived sleep efficiency percent
+             */
+            sleep_efficiency_pct?: number | null
+        }
+        /**
+         * AppleCrossValidationReport
+         * @description Complete Apple Health cross-source night-level validation report.
+         */
+        AppleCrossValidationReport: {
+            /** @description Coverage + correlations */
+            aggregate: components['schemas']['AppleCrossAggregate']
+            /**
+             * Date Range End
+             * @description End date of the requested range
+             */
+            date_range_end: string
+            /**
+             * Date Range Start
+             * @description Start date of the requested range
+             */
+            date_range_start: string
+            /**
+             * Nights
+             * @description Per-night records
+             */
+            nights: components['schemas']['AppleCrossNightRecord'][]
+            /**
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             */
+            report_date: string
+        }
+        /** AppleCrossValidationRequest */
+        AppleCrossValidationRequest: {
+            /** Device Id */
+            device_id?: number | null
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
+        }
         /** AuthStatusResponse */
         AuthStatusResponse: {
             /** Active Profile Id */
@@ -3869,6 +4089,33 @@ export interface components {
             /** Total */
             total: number
         }
+        /**
+         * PairCorrelation
+         * @description Spearman correlation for one SNORE↔Apple metric pair over paired nights.
+         */
+        PairCorrelation: {
+            /**
+             * N Paired Nights
+             * @description Nights contributing a value to both series
+             * @default 0
+             */
+            n_paired_nights: number
+            /**
+             * P Value
+             * @description p-value for rho; None whenever rho is None
+             */
+            p_value?: number | null
+            /**
+             * Reason
+             * @description Why rho is null: 'insufficient_pairs' (< 3 paired nights); 'degenerate' (>= 3 pairs but a side is constant / scipy returned NaN); None when rho was computed
+             */
+            reason?: string | null
+            /**
+             * Rho
+             * @description Spearman rho over nights present in both series; None when fewer than 3 pairs or a side is constant (see reason)
+             */
+            rho?: number | null
+        }
         /** PasswordChangeRequest */
         PasswordChangeRequest: {
             /** Current Password */
@@ -4154,6 +4401,322 @@ export interface components {
             name?: string | null
             /** Timezone */
             timezone?: string | null
+        }
+        /**
+         * ReraAggregateMetrics
+         * @description Aggregate RERA validation metrics across a date range.
+         */
+        ReraAggregateMetrics: {
+            /**
+             * Amplitude Density
+             * @description Pooled amplitude RERAs per therapy hour
+             */
+            amplitude_density?: number | null
+            /**
+             * Chance Precision Floor
+             * @description Whole-dataset chance-precision floor (density context): machine RE per SECOND over ALL evaluated therapy hours (scored + no-machine-RE sessions) x (2 x match_tolerance_seconds). Most hours carry zero RE, so this reads against the pooled densities. For the scored-session scores below use `scored_chance_precision_floor` instead. Null when no evaluated therapy hours exist.
+             */
+            chance_precision_floor?: number | null
+            /**
+             * Machine Re Density
+             * @description Pooled machine RE per therapy hour
+             */
+            machine_re_density?: number | null
+            /**
+             * Match Tolerance Seconds
+             * @description Start-time tolerance used for machine-RE matching
+             */
+            match_tolerance_seconds: number
+            /**
+             * Mean Amplitude F1
+             * @description Mean amplitude F1 over scored sessions
+             */
+            mean_amplitude_f1?: number | null
+            /**
+             * Mean Amplitude Precision
+             * @description Mean amplitude precision over scored sessions
+             */
+            mean_amplitude_precision?: number | null
+            /**
+             * Mean Amplitude Sensitivity
+             * @description Mean amplitude sensitivity over scored sessions
+             */
+            mean_amplitude_sensitivity?: number | null
+            /**
+             * Mean Proxy F1
+             * @description Mean FL-run-proxy F1 over scored sessions
+             */
+            mean_proxy_f1?: number | null
+            /**
+             * Mean Proxy Precision
+             * @description Mean FL-run-proxy precision over scored sessions
+             */
+            mean_proxy_precision?: number | null
+            /**
+             * Mean Proxy Sensitivity
+             * @description Mean FL-run-proxy sensitivity over scored sessions
+             */
+            mean_proxy_sensitivity?: number | null
+            /**
+             * Pooled Amplitude Precision
+             * @description Pooled amplitude precision over scored sessions (total matched / total amplitude RERAs), not a per-session mean
+             */
+            pooled_amplitude_precision?: number | null
+            /**
+             * Pooled Amplitude Sensitivity
+             * @description Pooled amplitude sensitivity over scored sessions (total matched / total machine RE), not a per-session mean
+             */
+            pooled_amplitude_sensitivity?: number | null
+            /**
+             * Pooled Proxy Precision
+             * @description Pooled FL-run-proxy precision over scored sessions (total matched / total proxy RERAs), not a per-session mean
+             */
+            pooled_proxy_precision?: number | null
+            /**
+             * Pooled Proxy Sensitivity
+             * @description Pooled FL-run-proxy sensitivity over scored sessions (total matched / total machine RE), not a per-session mean
+             */
+            pooled_proxy_sensitivity?: number | null
+            /**
+             * Proxy Density
+             * @description Pooled FL-run-proxy RERAs per therapy hour
+             */
+            proxy_density?: number | null
+            /**
+             * Scored Chance Precision Floor
+             * @description Scored-population chance-precision floor: machine RE per SECOND over scored-session hours only x (2 x match_tolerance_seconds). Scored sessions carry far more RE than the dataset average, so this is the honest baseline to compare the precision/sensitivity below against. Null when no scored therapy hours exist.
+             */
+            scored_chance_precision_floor?: number | null
+            /**
+             * Sessions Skipped Error
+             * @description Sessions skipped: unhandled error during validation
+             */
+            sessions_skipped_error: number
+            /**
+             * Sessions Skipped No Analysis
+             * @description Sessions skipped: no completed analysis result
+             */
+            sessions_skipped_no_analysis: number
+            /**
+             * Sessions Skipped No Machine Re
+             * @description Sessions skipped: device flagged zero RE (dominant case)
+             */
+            sessions_skipped_no_machine_re: number
+            /**
+             * Sessions Skipped No Valid Breaths
+             * @description Sessions skipped: analysis present but no stored breaths
+             */
+            sessions_skipped_no_valid_breaths: number
+            /**
+             * Sessions With Machine Re
+             * @description Sessions the device flagged >= 1 RE — the scored population
+             */
+            sessions_with_machine_re: number
+            /**
+             * Total Amplitude Reras
+             * @description Total amplitude-detector RERAs
+             */
+            total_amplitude_reras: number
+            /**
+             * Total Machine Re
+             * @description Total machine RE across all sessions
+             */
+            total_machine_re: number
+            /**
+             * Total Proxy Reras
+             * @description Total FL-run-proxy RERAs
+             */
+            total_proxy_reras: number
+            /**
+             * Total Sessions
+             * @description Sessions in the requested range
+             */
+            total_sessions: number
+        }
+        /**
+         * ReraSessionValidation
+         * @description RERA validation results for a single session (possibly skipped).
+         */
+        ReraSessionValidation: {
+            /**
+             * Amplitude Density
+             * @description Amplitude RERAs per therapy hour
+             */
+            amplitude_density?: number | null
+            /**
+             * Amplitude Density Reason
+             * @description Why amplitude_density is null
+             */
+            amplitude_density_reason?: string | null
+            /**
+             * Amplitude F1
+             * @description Amplitude-RERA F1 vs machine RE
+             */
+            amplitude_f1?: number | null
+            /**
+             * Amplitude F1 Reason
+             * @description Why amplitude_f1 is null
+             */
+            amplitude_f1_reason?: string | null
+            /**
+             * Amplitude Matched
+             * @description Amplitude RERAs matched to a machine RE event (scored sessions only; null when the session was skipped)
+             */
+            amplitude_matched?: number | null
+            /**
+             * Amplitude Precision
+             * @description Amplitude-RERA precision vs machine RE (matched / amplitude RERAs)
+             */
+            amplitude_precision?: number | null
+            /**
+             * Amplitude Precision Reason
+             * @description Why amplitude_precision is null
+             */
+            amplitude_precision_reason?: string | null
+            /**
+             * Amplitude Rera Count
+             * @description Amplitude-detector RERAs (mode_result.reras)
+             * @default 0
+             */
+            amplitude_rera_count: number
+            /**
+             * Amplitude Sensitivity
+             * @description Amplitude-RERA recall vs machine RE (matched / machine RE)
+             */
+            amplitude_sensitivity?: number | null
+            /**
+             * Amplitude Sensitivity Reason
+             * @description Why amplitude_sensitivity is null
+             */
+            amplitude_sensitivity_reason?: string | null
+            /**
+             * Date
+             * @description Session date (YYYY-MM-DD)
+             */
+            date: string
+            /**
+             * Duration Hours
+             * @description Session duration in hours
+             */
+            duration_hours: number
+            /**
+             * Machine Re Count
+             * @description Machine-flagged RE (RERA) events for this session
+             * @default 0
+             */
+            machine_re_count: number
+            /**
+             * Machine Re Density
+             * @description Machine RE events per therapy hour
+             */
+            machine_re_density?: number | null
+            /**
+             * Machine Re Density Reason
+             * @description Why machine_re_density is null
+             */
+            machine_re_density_reason?: string | null
+            /**
+             * Proxy Density
+             * @description FL-run-proxy RERAs per therapy hour
+             */
+            proxy_density?: number | null
+            /**
+             * Proxy Density Reason
+             * @description Why proxy_density is null
+             */
+            proxy_density_reason?: string | null
+            /**
+             * Proxy F1
+             * @description FL-run-proxy F1 vs machine RE
+             */
+            proxy_f1?: number | null
+            /**
+             * Proxy F1 Reason
+             * @description Why proxy_f1 is null
+             */
+            proxy_f1_reason?: string | null
+            /**
+             * Proxy Matched
+             * @description FL-run-proxy RERAs matched to a machine RE event (scored sessions only; null when the session was skipped)
+             */
+            proxy_matched?: number | null
+            /**
+             * Proxy Precision
+             * @description FL-run-proxy precision vs machine RE (matched / proxy RERAs)
+             */
+            proxy_precision?: number | null
+            /**
+             * Proxy Precision Reason
+             * @description Why proxy_precision is null
+             */
+            proxy_precision_reason?: string | null
+            /**
+             * Proxy Rera Count
+             * @description FL-run proxy RERAs recomputed from stored breaths
+             * @default 0
+             */
+            proxy_rera_count: number
+            /**
+             * Proxy Sensitivity
+             * @description FL-run-proxy recall vs machine RE (matched / machine RE)
+             */
+            proxy_sensitivity?: number | null
+            /**
+             * Proxy Sensitivity Reason
+             * @description Why proxy_sensitivity is null
+             */
+            proxy_sensitivity_reason?: string | null
+            /**
+             * Session Id
+             * @description Database session ID
+             */
+            session_id: number
+            /**
+             * Skipped Reason
+             * @description Why this session was excluded from the sensitivity/precision aggregates. Possible values: 'no_machine_re_events' — the device flagged zero RE events (the dominant case; counts/densities are still reported); 'no_analysis' — no completed (OK-status) analysis result; 'no_valid_breaths' — analysis present but no stored breath rows; 'error' — unhandled exception during session validation; None — session was fully scored against machine RE.
+             */
+            skipped_reason?: string | null
+        }
+        /**
+         * ReraValidationReport
+         * @description Complete RERA validation report.
+         */
+        ReraValidationReport: {
+            /** @description Aggregate metrics */
+            aggregate: components['schemas']['ReraAggregateMetrics']
+            /**
+             * Date Range End
+             * @description End date of the requested range
+             */
+            date_range_end: string
+            /**
+             * Date Range Start
+             * @description Start date of the requested range
+             */
+            date_range_start: string
+            /**
+             * Report Date
+             * @description Report generation timestamp (YYYY-MM-DD HH:MM:SS)
+             */
+            report_date: string
+            /**
+             * Sessions
+             * @description Per-session results
+             */
+            sessions: components['schemas']['ReraSessionValidation'][]
+        }
+        /** ReraValidationRequest */
+        ReraValidationRequest: {
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
         }
         /** RescanRequest */
         RescanRequest: {
@@ -4993,6 +5556,124 @@ export interface components {
              * Format: date
              */
             to_date: string
+        }
+        /** ValidationRunDetail */
+        ValidationRunDetail: {
+            /** Created At */
+            created_at: number
+            /** Date From */
+            date_from: string
+            /** Date To */
+            date_to: string
+            /** Engine Identity */
+            engine_identity: {
+                [key: string]: unknown
+            }
+            /** Error Message */
+            error_message: string | null
+            /** Finished At */
+            finished_at: number | null
+            /** Job Id */
+            job_id: string | null
+            /** Owner User Id */
+            owner_user_id: number | null
+            /** Report Json */
+            report_json: {
+                [key: string]: unknown
+            } | null
+            /**
+             * Reused
+             * @default false
+             */
+            reused: boolean
+            /** Run Id */
+            run_id: number
+            /** Started At */
+            started_at: number | null
+            /** State */
+            state: string
+            /** Validator Params */
+            validator_params: {
+                [key: string]: unknown
+            }
+            /** Validator Type */
+            validator_type: string
+        }
+        /** ValidationRunRequest */
+        ValidationRunRequest: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /** Params */
+            params?: {
+                [key: string]: unknown
+            } | null
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
+            /**
+             * Validator Type
+             * @enum {string}
+             */
+            validator_type: 'events' | 'fl' | 'breaths' | 'rera' | 'apple'
+        }
+        /** ValidationRunStatus */
+        ValidationRunStatus: {
+            /** Created At */
+            created_at: number
+            /** Date From */
+            date_from: string
+            /** Date To */
+            date_to: string
+            /** Engine Identity */
+            engine_identity: {
+                [key: string]: unknown
+            }
+            /** Error Message */
+            error_message: string | null
+            /** Finished At */
+            finished_at: number | null
+            /** Job Id */
+            job_id: string | null
+            /** Owner User Id */
+            owner_user_id: number | null
+            /**
+             * Reused
+             * @default false
+             */
+            reused: boolean
+            /** Run Id */
+            run_id: number
+            /** Started At */
+            started_at: number | null
+            /** State */
+            state: string
+            /** Validator Params */
+            validator_params: {
+                [key: string]: unknown
+            }
+            /** Validator Type */
+            validator_type: string
+        }
+        /** ValidationRunsListResponse */
+        ValidationRunsListResponse: {
+            /** Limit */
+            limit: number
+            /** Offset */
+            offset: number
+            /** Runs */
+            runs: components['schemas']['ValidationRunStatus'][]
+            /** Total */
+            total: number
         }
         /** WaveformDataResponse */
         WaveformDataResponse: {
@@ -7874,6 +8555,39 @@ export interface operations {
             }
         }
     }
+    run_apple_cross_validation_api_v1_validate_apple_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['AppleCrossValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['AppleCrossValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
     run_breath_trends_validation_api_v1_validate_breaths_post: {
         parameters: {
             query?: never
@@ -7928,6 +8642,165 @@ export interface operations {
                 content: {
                     'application/json': components['schemas']['FlValidationReport']
                 }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    run_rera_validation_api_v1_validate_rera_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['ReraValidationRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ReraValidationReport']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_validation_runs_api_v1_validate_runs_get: {
+        parameters: {
+            query?: {
+                validator_type?: ('events' | 'fl' | 'breaths' | 'rera' | 'apple') | null
+                limit?: number
+                offset?: number
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ValidationRunsListResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    create_validation_run_api_v1_validate_runs_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['ValidationRunRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ValidationRunStatus']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_validation_run_api_v1_validate_runs__run_id__get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                run_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ValidationRunDetail']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    delete_validation_run_api_v1_validate_runs__run_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                run_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
             }
             /** @description Validation Error */
             422: {
