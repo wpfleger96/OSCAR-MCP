@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from datetime import datetime
 from pathlib import Path
 
 import click
 
 from snore.cli.decorators import (
+    CliCtx,
     actor_options,
     date_range_options,
     db_option,
     device_option,
     init_db,
+    profile_scoped_command,
 )
 from snore.cli.display import console, print_dry_run_header, print_warning
 from snore.services.export_service import ExportService
@@ -42,6 +42,7 @@ def export() -> None:
     is_flag=True,
     help="Trim STR.edf to only include the exported date range",
 )
+# Not @profile_scoped_command: resolves the profile briefly, then runs sync export work outside any session.
 @db_option
 @actor_options
 def export_raw(
@@ -132,58 +133,42 @@ def export_raw(
     is_flag=True,
     help="Include per-session waveform CSV files (large!)",
 )
-@db_option
-@actor_options
-def export_csv(
+@profile_scoped_command
+async def export_csv(
+    ctx: CliCtx,
     output: str | None,
     date_from: datetime | None,
     date_to: datetime | None,
     device: str | None,
     include_waveforms: bool,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """Export parsed data as CSV files (sessions, events, settings).
 
     Creates sessions.csv, events.csv, and settings.csv in the output directory.
     Optionally includes per-session waveform files with --include-waveforms.
     """
-    from snore.database.session import session_scope  # noqa: PLC0415
-
     if output is None:
         output = "snore_export_csv"
 
-    init_db(db)
+    svc = ExportService(profile_id=ctx.profile_id)
+    try:
+        result = await svc.export_csv(
+            db_session=ctx.db,
+            output=Path(output),
+            date_from=date_from.date() if date_from else None,
+            date_to=date_to.date() if date_to else None,
+            device_serial=device,
+            include_waveforms=include_waveforms,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
-    async def _run() -> None:
-        async with session_scope() as db_session:
-            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    console.print(f"Nights: {result.nights_exported}")
+    console.print(f"Files:  {result.files_written}")
+    console.print(f"Output: {result.output_path}")
 
-            profile_id = await resolve_cli_profile_id(
-                db_session, actor_user, actor_profile
-            )
-            svc = ExportService(profile_id=profile_id)
-            try:
-                result = await svc.export_csv(
-                    db_session=db_session,
-                    output=Path(output),
-                    date_from=date_from.date() if date_from else None,
-                    date_to=date_to.date() if date_to else None,
-                    device_serial=device,
-                    include_waveforms=include_waveforms,
-                )
-            except Exception as e:
-                raise click.ClickException(str(e)) from e
-
-        console.print(f"Nights: {result.nights_exported}")
-        console.print(f"Files:  {result.files_written}")
-        console.print(f"Output: {result.output_path}")
-
-        for w in result.warnings:
-            print_warning(w)
-
-    asyncio.run(_run())
+    for w in result.warnings:
+        print_warning(w)
 
 
 @export.command("json")
@@ -195,51 +180,35 @@ def export_csv(
 )
 @date_range_options
 @device_option
-@db_option
-@actor_options
-def export_json(
+@profile_scoped_command
+async def export_json(
+    ctx: CliCtx,
     output: str | None,
     date_from: datetime | None,
     date_to: datetime | None,
     device: str | None,
-    db: str | None,
-    actor_user: str | None,
-    actor_profile: str | None,
 ) -> None:
     """Export parsed data as a JSON document.
 
     Creates a single JSON file with sessions, events, statistics, and settings.
     """
-    from snore.database.session import session_scope  # noqa: PLC0415
-
     if output is None:
         output = "snore_export.json"
 
-    init_db(db)
+    svc = ExportService(profile_id=ctx.profile_id)
+    try:
+        result = await svc.export_json(
+            db_session=ctx.db,
+            output=Path(output),
+            date_from=date_from.date() if date_from else None,
+            date_to=date_to.date() if date_to else None,
+            device_serial=device,
+        )
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
 
-    async def _run() -> None:
-        async with session_scope() as db_session:
-            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    console.print(f"Nights: {result.nights_exported}")
+    console.print(f"Output: {result.output_path}")
 
-            profile_id = await resolve_cli_profile_id(
-                db_session, actor_user, actor_profile
-            )
-            svc = ExportService(profile_id=profile_id)
-            try:
-                result = await svc.export_json(
-                    db_session=db_session,
-                    output=Path(output),
-                    date_from=date_from.date() if date_from else None,
-                    date_to=date_to.date() if date_to else None,
-                    device_serial=device,
-                )
-            except Exception as e:
-                raise click.ClickException(str(e)) from e
-
-        console.print(f"Nights: {result.nights_exported}")
-        console.print(f"Output: {result.output_path}")
-
-        for w in result.warnings:
-            print_warning(w)
-
-    asyncio.run(_run())
+    for w in result.warnings:
+        print_warning(w)

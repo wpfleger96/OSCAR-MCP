@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import click
 
-from snore.cli.decorators import actor_options, db_option
-from snore.cli.decorators import db_session as open_db_session
+from snore.cli.decorators import CliCtx, profile_scoped_command
 from snore.cli.display import (
     console,
     print_footer,
@@ -47,11 +44,8 @@ def rx() -> None:
 
 
 @rx.command("history")
-@db_option
-@actor_options
-def rx_history(
-    db: str | None, actor_user: str | None, actor_profile: str | None
-) -> None:
+@profile_scoped_command
+async def rx_history(ctx: CliCtx) -> None:
     """
     Show RX settings history with average outcomes.
 
@@ -61,74 +55,63 @@ def rx_history(
     Example:
         snore rx history
     """
-    from snore.analysis.rx_tracker import RxTracker
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
-    async def _run() -> None:
-        async with open_db_session(db) as db_session:
-            profile_id = await resolve_cli_profile_id(
-                db_session, actor_user, actor_profile
+    stats_periods = await RxTracker(ctx.profile_id).get_history(ctx.db)
+
+    if not stats_periods:
+        console.print("No RX periods found")
+        return
+
+    print_header("RX Settings History", wide=True)
+
+    for i, period in enumerate(stats_periods, 1):
+        days_count = period.days_count
+        end_str = (
+            period.end_date.strftime("%Y-%m-%d")
+            if i < len(stats_periods)
+            else "present"
+        )
+
+        console.print(
+            f"\nPeriod {i}: {period.start_date.strftime('%Y-%m-%d')} to {end_str} ({days_count} days)"
+        )
+
+        mode = period.settings.get("mode", "?")
+        pressure_str = _format_pressure(period.settings)
+
+        summary_parts = [
+            f"Mode: {mode}",
+            f"Pressure: {pressure_str}",
+        ]
+        if "epr_level" in period.settings and "epr_mode" in period.settings:
+            summary_parts.append(
+                f"EPR: {period.settings['epr_level']} {period.settings['epr_mode']}"
             )
-            stats_periods = await RxTracker(profile_id).get_history(db_session)
+        elif "ps" in period.settings:
+            summary_parts.append(f"PS: {period.settings['ps']}")
 
-            if not stats_periods:
-                console.print("No RX periods found")
-                return
+        console.print("  " + " | ".join(summary_parts))
 
-            print_header("RX Settings History", wide=True)
+        ahi_str = (
+            f"  Avg AHI: {period.avg_ahi:.1f}"
+            if period.avg_ahi is not None
+            else "  Avg AHI: N/A"
+        )
+        parts = [ahi_str]
+        if period.avg_hours is not None:
+            parts.append(f"Avg Hours: {period.avg_hours:.1f}")
+        if period.avg_leak is not None:
+            parts.append(f"Avg Leak: {period.avg_leak:.1f}")
+        console.print(" | ".join(parts))
 
-            for i, period in enumerate(stats_periods, 1):
-                days_count = period.days_count
-                end_str = (
-                    period.end_date.strftime("%Y-%m-%d")
-                    if i < len(stats_periods)
-                    else "present"
-                )
-
-                console.print(
-                    f"\nPeriod {i}: {period.start_date.strftime('%Y-%m-%d')} to {end_str} ({days_count} days)"
-                )
-
-                mode = period.settings.get("mode", "?")
-                pressure_str = _format_pressure(period.settings)
-
-                summary_parts = [
-                    f"Mode: {mode}",
-                    f"Pressure: {pressure_str}",
-                ]
-                if "epr_level" in period.settings and "epr_mode" in period.settings:
-                    summary_parts.append(
-                        f"EPR: {period.settings['epr_level']} {period.settings['epr_mode']}"
-                    )
-                elif "ps" in period.settings:
-                    summary_parts.append(f"PS: {period.settings['ps']}")
-
-                console.print("  " + " | ".join(summary_parts))
-
-                ahi_str = (
-                    f"  Avg AHI: {period.avg_ahi:.1f}"
-                    if period.avg_ahi is not None
-                    else "  Avg AHI: N/A"
-                )
-                parts = [ahi_str]
-                if period.avg_hours is not None:
-                    parts.append(f"Avg Hours: {period.avg_hours:.1f}")
-                if period.avg_leak is not None:
-                    parts.append(f"Avg Leak: {period.avg_leak:.1f}")
-                console.print(" | ".join(parts))
-
-            console.print()
-            print_footer(wide=True)
-
-    asyncio.run(_run())
+    console.print()
+    print_footer(wide=True)
 
 
 @rx.command("current")
-@db_option
-@actor_options
-def rx_current(
-    db: str | None, actor_user: str | None, actor_profile: str | None
-) -> None:
+@profile_scoped_command
+async def rx_current(ctx: CliCtx) -> None:
     """
     Show current RX settings period.
 
@@ -137,73 +120,62 @@ def rx_current(
     Example:
         snore rx current
     """
-    from snore.analysis.rx_tracker import RxTracker
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
-    async def _run() -> None:
-        async with open_db_session(db) as db_session:
-            profile_id = await resolve_cli_profile_id(
-                db_session, actor_user, actor_profile
-            )
-            current = await RxTracker(profile_id).get_current(db_session)
+    current = await RxTracker(ctx.profile_id).get_current(ctx.db)
 
-            if current is None:
-                console.print("No RX periods found")
-                return
+    if current is None:
+        console.print("No RX periods found")
+        return
 
-            days_count = current.days_count
+    days_count = current.days_count
 
-            print_header("Current RX Settings", wide=True)
-            console.print(
-                f"Period: {current.start_date.strftime('%Y-%m-%d')} to present ({days_count} days)"
-            )
+    print_header("Current RX Settings", wide=True)
+    console.print(
+        f"Period: {current.start_date.strftime('%Y-%m-%d')} to present ({days_count} days)"
+    )
 
-            mode = current.settings.get("mode", "?")
-            pressure_str = _format_pressure(current.settings)
+    mode = current.settings.get("mode", "?")
+    pressure_str = _format_pressure(current.settings)
 
-            print_kv("Mode", str(mode), indent=0)
-            print_kv("Pressure", str(pressure_str), indent=0)
-            if "epr_level" in current.settings and "epr_mode" in current.settings:
-                print_kv(
-                    "EPR",
-                    f"{current.settings['epr_level']} {current.settings['epr_mode']}",
-                    indent=0,
-                )
-            elif "ps" in current.settings:
-                print_kv("PS", current.settings["ps"], indent=0)
+    print_kv("Mode", str(mode), indent=0)
+    print_kv("Pressure", str(pressure_str), indent=0)
+    if "epr_level" in current.settings and "epr_mode" in current.settings:
+        print_kv(
+            "EPR",
+            f"{current.settings['epr_level']} {current.settings['epr_mode']}",
+            indent=0,
+        )
+    elif "ps" in current.settings:
+        print_kv("PS", current.settings["ps"], indent=0)
 
-            print_subsection("Outcomes")
-            if current.avg_ahi is not None:
-                print_kv("Avg AHI", f"{current.avg_ahi:.1f}")
-            else:
-                print_kv("Avg AHI", "N/A")
+    print_subsection("Outcomes")
+    if current.avg_ahi is not None:
+        print_kv("Avg AHI", f"{current.avg_ahi:.1f}")
+    else:
+        print_kv("Avg AHI", "N/A")
 
-            if current.median_ahi is not None:
-                print_kv("Median AHI", f"{current.median_ahi:.1f}")
+    if current.median_ahi is not None:
+        print_kv("Median AHI", f"{current.median_ahi:.1f}")
 
-            if current.avg_hours is not None:
-                print_kv("Avg Hours", f"{current.avg_hours:.1f}")
+    if current.avg_hours is not None:
+        print_kv("Avg Hours", f"{current.avg_hours:.1f}")
 
-            if current.avg_leak is not None:
-                print_kv("Avg Leak", f"{current.avg_leak:.1f}")
+    if current.avg_leak is not None:
+        print_kv("Avg Leak", f"{current.avg_leak:.1f}")
 
-            print_footer(wide=True)
-
-    asyncio.run(_run())
+    print_footer(wide=True)
 
 
 @rx.command("compare")
-@db_option
 @click.option(
     "--min-days",
     type=int,
     default=7,
     help="Minimum days for period to be included (default: 7)",
 )
-@actor_options
-def rx_compare(
-    db: str | None, min_days: int, actor_user: str | None, actor_profile: str | None
-) -> None:
+@profile_scoped_command
+async def rx_compare(ctx: CliCtx, min_days: int) -> None:
     """
     Compare RX periods and identify best/worst settings.
 
@@ -214,108 +186,93 @@ def rx_compare(
         snore rx compare
         snore rx compare --min-days 14
     """
-    from snore.analysis.rx_tracker import RxTracker
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
-    async def _run() -> None:
-        async with open_db_session(db) as db_session:
-            profile_id = await resolve_cli_profile_id(
-                db_session, actor_user, actor_profile
-            )
-            comparison = await RxTracker(profile_id).get_comparison(
-                db_session, min_days=min_days
-            )
-            stats_periods = comparison.periods
+    comparison = await RxTracker(ctx.profile_id).get_comparison(
+        ctx.db, min_days=min_days
+    )
+    stats_periods = comparison.periods
 
-            if not stats_periods:
-                console.print("No RX periods found")
-                return
+    if not stats_periods:
+        console.print("No RX periods found")
+        return
 
-            if len(stats_periods) < 2:
-                console.print(
-                    "At least 2 periods are needed for comparison. Use 'snore rx history' to view the single period."
-                )
-                return
+    if len(stats_periods) < 2:
+        console.print(
+            "At least 2 periods are needed for comparison. Use 'snore rx history' to view the single period."
+        )
+        return
 
-            best = (
-                stats_periods[comparison.best_index]
-                if comparison.best_index is not None
-                else None
-            )
-            worst = (
-                stats_periods[comparison.worst_index]
-                if comparison.worst_index is not None
-                else None
-            )
+    best = (
+        stats_periods[comparison.best_index]
+        if comparison.best_index is not None
+        else None
+    )
+    worst = (
+        stats_periods[comparison.worst_index]
+        if comparison.worst_index is not None
+        else None
+    )
 
-            print_header("RX Period Comparison", wide=True)
-            console.print(
-                f"{'Dates':<25} {'Days':<6} {'Avg AHI':<10} {'Avg Leak':<10} {'Mode':<8} {'Pressure':<15} {'EPR':<10}"
-            )
-            print_footer(wide=True)
+    print_header("RX Period Comparison", wide=True)
+    console.print(
+        f"{'Dates':<25} {'Days':<6} {'Avg AHI':<10} {'Avg Leak':<10} {'Mode':<8} {'Pressure':<15} {'EPR':<10}"
+    )
+    print_footer(wide=True)
 
-            for idx, period in enumerate(stats_periods):
-                days_count = period.days_count
-                start_str = period.start_date.strftime("%Y-%m-%d")
-                end_str = (
-                    period.end_date.strftime("%Y-%m-%d")
-                    if idx < len(stats_periods) - 1
-                    else "present"
-                )
-                date_range = f"{start_str}..{end_str}"
+    for idx, period in enumerate(stats_periods):
+        days_count = period.days_count
+        start_str = period.start_date.strftime("%Y-%m-%d")
+        end_str = (
+            period.end_date.strftime("%Y-%m-%d")
+            if idx < len(stats_periods) - 1
+            else "present"
+        )
+        date_range = f"{start_str}..{end_str}"
 
-                mode = period.settings.get("mode", "?")[:7]
-                if "epr_level" in period.settings and "epr_mode" in period.settings:
-                    epr = f"{period.settings['epr_level']} {period.settings['epr_mode'][:2]}"
-                elif "ps" in period.settings:
-                    epr = f"PS:{period.settings['ps']}"
-                else:
-                    epr = "?"
+        mode = period.settings.get("mode", "?")[:7]
+        if "epr_level" in period.settings and "epr_mode" in period.settings:
+            epr = f"{period.settings['epr_level']} {period.settings['epr_mode'][:2]}"
+        elif "ps" in period.settings:
+            epr = f"PS:{period.settings['ps']}"
+        else:
+            epr = "?"
 
-                pressure_str = _format_pressure(period.settings, short=True)
+        pressure_str = _format_pressure(period.settings, short=True)
 
-                ahi_str = (
-                    f"{period.avg_ahi:.1f}" if period.avg_ahi is not None else "N/A"
-                )
-                leak_str = (
-                    f"{period.avg_leak:.1f}" if period.avg_leak is not None else "N/A"
-                )
+        ahi_str = f"{period.avg_ahi:.1f}" if period.avg_ahi is not None else "N/A"
+        leak_str = f"{period.avg_leak:.1f}" if period.avg_leak is not None else "N/A"
 
-                marker = ""
-                if idx == comparison.best_index:
-                    marker = "  <- Best"
-                elif idx == comparison.worst_index:
-                    marker = "  <- Worst"
+        marker = ""
+        if idx == comparison.best_index:
+            marker = "  <- Best"
+        elif idx == comparison.worst_index:
+            marker = "  <- Worst"
 
-                console.print(
-                    f"{date_range:<25} {days_count:<6} {ahi_str:<10} {leak_str:<10} {mode:<8} {pressure_str:<15} {epr:<10}{marker}"
-                )
+        console.print(
+            f"{date_range:<25} {days_count:<6} {ahi_str:<10} {leak_str:<10} {mode:<8} {pressure_str:<15} {epr:<10}{marker}"
+        )
 
-            print_footer(wide=True)
+    print_footer(wide=True)
 
-            if best:
-                console.print(f"\nBest Period (Avg AHI: {best.avg_ahi:.1f}):")
-                console.print(
-                    f"  {best.start_date.strftime('%Y-%m-%d')} to {best.end_date.strftime('%Y-%m-%d')} ({best.days_count} days)"
-                )
-                console.print(f"  Settings: {best.settings}")
+    if best:
+        console.print(f"\nBest Period (Avg AHI: {best.avg_ahi:.1f}):")
+        console.print(
+            f"  {best.start_date.strftime('%Y-%m-%d')} to {best.end_date.strftime('%Y-%m-%d')} ({best.days_count} days)"
+        )
+        console.print(f"  Settings: {best.settings}")
 
-            if worst:
-                console.print(f"\nWorst Period (Avg AHI: {worst.avg_ahi:.1f}):")
-                console.print(
-                    f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({worst.days_count} days)"
-                )
-                console.print(f"  Settings: {worst.settings}")
-
-    asyncio.run(_run())
+    if worst:
+        console.print(f"\nWorst Period (Avg AHI: {worst.avg_ahi:.1f}):")
+        console.print(
+            f"  {worst.start_date.strftime('%Y-%m-%d')} to {worst.end_date.strftime('%Y-%m-%d')} ({worst.days_count} days)"
+        )
+        console.print(f"  Settings: {worst.settings}")
 
 
 @rx.command("changes")
-@db_option
-@actor_options
-def rx_changes(
-    db: str | None, actor_user: str | None, actor_profile: str | None
-) -> None:
+@profile_scoped_command
+async def rx_changes(ctx: CliCtx) -> None:
     """
     Show day-level prescription settings changes across all devices.
 
@@ -326,41 +283,33 @@ def rx_changes(
     Example:
         snore rx changes
     """
-    from snore.analysis.rx_tracker import RxTracker
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
-    async def _run() -> None:
-        async with open_db_session(db) as db_session:
-            profile_id = await resolve_cli_profile_id(
-                db_session, actor_user, actor_profile
+    response = await RxTracker(ctx.profile_id).get_changes(ctx.db)
+    # Stable sort preserves the service's within-date ordering (ascending by device_id, key).
+    changes = sorted(response.changes, key=lambda c: c.date, reverse=True)
+
+    if not changes:
+        console.print("No RX settings changes found")
+        return
+
+    print_header("RX Settings Changes", wide=True)
+    print_table(
+        columns=[
+            ("Date", 12),
+            ("Device", 24),
+            ("Setting", 16),
+            ("Change", 0),
+        ],
+        rows=[
+            (
+                c.date.strftime("%Y-%m-%d"),
+                c.device_name,
+                format_setting_key(c.key),
+                f"{_format_change_value(c.key, c.old_value)} → {_format_change_value(c.key, c.new_value)}",
             )
-            response = await RxTracker(profile_id).get_changes(db_session)
-            # Stable sort preserves the service's within-date ordering (ascending by device_id, key).
-            changes = sorted(response.changes, key=lambda c: c.date, reverse=True)
-
-            if not changes:
-                console.print("No RX settings changes found")
-                return
-
-            print_header("RX Settings Changes", wide=True)
-            print_table(
-                columns=[
-                    ("Date", 12),
-                    ("Device", 24),
-                    ("Setting", 16),
-                    ("Change", 0),
-                ],
-                rows=[
-                    (
-                        c.date.strftime("%Y-%m-%d"),
-                        c.device_name,
-                        format_setting_key(c.key),
-                        f"{_format_change_value(c.key, c.old_value)} → {_format_change_value(c.key, c.new_value)}",
-                    )
-                    for c in changes
-                ],
-                wide=True,
-            )
-            print_footer(wide=True)
-
-    asyncio.run(_run())
+            for c in changes
+        ],
+        wide=True,
+    )
+    print_footer(wide=True)

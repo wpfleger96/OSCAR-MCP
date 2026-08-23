@@ -57,7 +57,7 @@ def _report(num_scored: int) -> ReraValidationReport:
 
 
 @asynccontextmanager
-async def _fake_db_session(db):
+async def _fake_session_scope(*args, **kwargs):
     yield MagicMock()
 
 
@@ -66,7 +66,8 @@ def _invoke(
 ) -> Result:
     runner = CliRunner()
     with (
-        patch("snore.cli.commands.validate_rera.open_db_session", _fake_db_session),
+        patch("snore.database.session.init_database", new_callable=AsyncMock),
+        patch("snore.database.session.session_scope", _fake_session_scope),
         patch(
             "snore.auth.factory.resolve_cli_profile_id",
             AsyncMock(return_value=1),
