@@ -13,8 +13,8 @@ from snore.cli.decorators import (
     date_range_options,
     db_option,
     device_option,
-    init_db,
     profile_scoped_command,
+    resolve_profile_id_once,
 )
 from snore.cli.display import console, print_dry_run_header, print_warning
 from snore.services.export_service import ExportService
@@ -68,8 +68,6 @@ def export_raw(
         snore export raw --from 2025-08-01 --to 2025-08-14
         snore export raw -o ~/Desktop/export.zip --zip
     """
-    from snore.database.session import session_scope  # noqa: PLC0415
-
     if trim_str and not (date_from and date_to):
         raise click.ClickException("--trim-str requires both --from and --to")
 
@@ -79,17 +77,9 @@ def export_raw(
     if output is None:
         output = "snore_export_raw.zip" if as_zip else "snore_export_raw"
 
-    init_db(db)
-
-    async def _resolve_profile_id() -> int:
-        async with session_scope() as db_session:
-            from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-
-            return await resolve_cli_profile_id(db_session, actor_user, actor_profile)
-
     import asyncio  # noqa: PLC0415
 
-    profile_id = asyncio.run(_resolve_profile_id())
+    profile_id = asyncio.run(resolve_profile_id_once(db, actor_user, actor_profile))
     svc = ExportService(profile_id)
 
     try:

@@ -13,7 +13,14 @@ import click
 from rich.markup import escape
 
 from snore import logging_config
-from snore.cli.decorators import actor_options, date_range_options, db_option, init_db
+from snore.cli.decorators import (
+    actor_options,
+    date_range_options,
+    db_option,
+    init_db,
+    profile_session,
+    resolve_profile_id_once,
+)
 from snore.cli.display import (
     ICON_BACKUP,
     ICON_FILTERS,
@@ -49,15 +56,12 @@ async def _resolve_and_import(
     date_to: str | None = None,
     parallel: bool = True,
     progress_callback: Callable[[str], None] | None = None,
+    db: str | None = None,
     actor_user: str | None = None,
     actor_profile: str | None = None,
 ) -> ImportResult:
-    """Resolve the actor profile then delegate to import_sources with profile_id: int."""
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
-
-    async with session_scope() as db:
-        profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+    """Resolve the profile briefly before the service manages its import work."""
+    profile_id = await resolve_profile_id_once(db, actor_user, actor_profile)
 
     return await service.import_sources(
         sources,
@@ -75,21 +79,20 @@ async def _resolve_and_import(
 
 
 async def _resolve_profile_timezone(
-    actor_user: str | None, actor_profile: str | None
+    db: str | None,
+    actor_user: str | None,
+    actor_profile: str | None,
 ) -> str | None:
     """Best-effort profile timezone so dry-run display matches the real import.
 
     Returns None when no profile can be resolved — dry-run must keep working
     against an unconfigured database (legacy UTC wall-clock in that case).
     """
-    from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
     from snore.database.models import Profile  # noqa: PLC0415
-    from snore.database.session import session_scope  # noqa: PLC0415
 
     try:
-        async with session_scope() as db:
-            profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
-            profile = await db.get(Profile, profile_id)
+        async with profile_session(db, actor_user, actor_profile) as ctx:
+            profile = await ctx.db.get(Profile, ctx.profile_id)
             return profile.timezone if profile else None
     except click.ClickException:
         return None
@@ -98,7 +101,8 @@ async def _resolve_profile_timezone(
 @click.command("import")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--force", is_flag=True, help="Re-import existing sessions")
-# Not @profile_scoped_command: profile resolution is best-effort (failure falls back to UTC timezone inference).
+# Not @profile_scoped_command: dry-run resolution is best-effort, while import
+# and analysis manage separate session lifetimes.
 @db_option
 @actor_options
 @click.option("--limit", "-n", type=int, help="Limit to first N sessions")
@@ -297,7 +301,7 @@ def import_data(
             parse_root = Path(source.root_path)
             try:
                 timezone_name = asyncio.run(
-                    _resolve_profile_timezone(actor_user, actor_profile)
+                    _resolve_profile_timezone(db, actor_user, actor_profile)
                 )
                 sessions = list(
                     parser.parse_sessions(
@@ -396,6 +400,7 @@ def import_data(
                     date_to=date_to_str,
                     parallel=not no_parallel,
                     progress_callback=_progress,
+                    db=db,
                     actor_user=actor_user,
                     actor_profile=actor_profile,
                 )
@@ -453,7 +458,6 @@ def import_data(
     # failure can never roll back or hide a successful import.
     if not no_analyze and all_imported_session_ids:
         from snore.analysis.modes.config import DEFAULT_MODE  # noqa: PLC0415
-        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
         from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
@@ -464,11 +468,10 @@ def import_data(
         )
 
         async def _run_analysis_phase() -> None:
-            async with session_scope() as db:
-                profile_id = await resolve_cli_profile_id(db, actor_user, actor_profile)
+            profile_id = await resolve_profile_id_once(db, actor_user, actor_profile)
 
-            async with session_scope() as db:
-                facade = AnalysisFacade(db, profile_id=profile_id)
+            async with session_scope() as analysis_session:
+                facade = AnalysisFacade(analysis_session, profile_id=profile_id)
 
                 import time as _time  # noqa: PLC0415
 

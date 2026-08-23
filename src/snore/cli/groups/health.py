@@ -15,8 +15,8 @@ from snore.cli.decorators import (
     actor_options,
     date_range_options,
     db_option,
-    init_db,
     profile_scoped_command,
+    resolve_profile_id_once,
 )
 from snore.cli.display import (
     ICON_CHART,
@@ -124,8 +124,6 @@ def health_import(
     if not export_path.exists():
         raise click.ClickException(f"Path does not exist: {export_path}")
 
-    init_db(db)
-
     processed_ref: list[int] = [0]
 
     def _progress(total: int) -> None:
@@ -135,16 +133,11 @@ def health_import(
         )
 
     async def _run() -> None:
-        from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
-        from snore.database.session import session_scope  # noqa: PLC0415
         from snore.services.health_import_service import (  # noqa: PLC0415
             HealthImportService,
         )
 
-        async with session_scope() as session:
-            profile_id = await resolve_cli_profile_id(
-                session, actor_user, actor_profile
-            )
+        profile_id = await resolve_profile_id_once(db, actor_user, actor_profile)
 
         if dry_run:
             print_dry_run_header("imported")
