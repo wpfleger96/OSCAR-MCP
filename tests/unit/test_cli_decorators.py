@@ -11,7 +11,11 @@ import pytest
 
 from click.testing import CliRunner
 
-from snore.cli.decorators import CliCtx, profile_scoped_command
+from snore.cli.decorators import (
+    CliCtx,
+    profile_scoped_command,
+    resolve_profile_id_once,
+)
 
 
 def _make_session_scope(session: Any) -> Any:
@@ -38,6 +42,66 @@ def _patches(session: Any, *, profile_id: int = 7) -> Any:
         patch("snore.database.session.session_scope", _make_session_scope(session)),
         patch("snore.auth.factory.resolve_cli_profile_id", resolve),
     ), resolve
+
+
+@pytest.mark.unit
+class TestResolveProfileIdOnce:
+    """Behavior of the short-lived CLI profile resolver."""
+
+    async def test_returns_profile_id_after_session_closes(self, tmp_path):
+        """The helper forwards actor options and closes its session before returning."""
+        session = MagicMock()
+        events: list[str] = []
+
+        @asynccontextmanager
+        async def tracked_scope(*args: Any, **kwargs: Any) -> Any:
+            events.append("open")
+            try:
+                yield session
+            finally:
+                events.append("closed")
+
+        init = AsyncMock()
+        resolve = AsyncMock(return_value=17)
+        db_path = tmp_path / "snore.db"
+
+        with (
+            patch("snore.database.session.init_database", init),
+            patch("snore.database.session.session_scope", tracked_scope),
+            patch("snore.auth.factory.resolve_cli_profile_id", resolve),
+        ):
+            profile_id = await resolve_profile_id_once(
+                str(db_path), "user@example.com", "nightly"
+            )
+
+        assert profile_id == 17
+        assert events == ["open", "closed"]
+        init.assert_awaited_once_with(str(db_path))
+        resolve.assert_awaited_once_with(session, "user@example.com", "nightly")
+
+    async def test_resolution_failure_closes_session_and_propagates(self):
+        """A ClickException propagates after the short-lived session closes."""
+        session = MagicMock()
+        closed = False
+
+        @asynccontextmanager
+        async def tracked_scope(*args: Any, **kwargs: Any) -> Any:
+            nonlocal closed
+            try:
+                yield session
+            finally:
+                closed = True
+
+        resolve = AsyncMock(side_effect=click.ClickException("no such profile"))
+        with (
+            patch("snore.database.session.init_database", new_callable=AsyncMock),
+            patch("snore.database.session.session_scope", tracked_scope),
+            patch("snore.auth.factory.resolve_cli_profile_id", resolve),
+            pytest.raises(click.ClickException, match="no such profile"),
+        ):
+            await resolve_profile_id_once(None, None, None)
+
+        assert closed is True
 
 
 @pytest.mark.unit
