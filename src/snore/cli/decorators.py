@@ -52,12 +52,12 @@ async def db_session(db: str | None) -> AsyncIterator[AsyncSession]:
 
 
 @asynccontextmanager
-async def _profile_scope(
+async def profile_session(
     db: str | None,
     actor_user: str | None,
     actor_profile: str | None,
 ) -> AsyncIterator[CliCtx]:
-    """Open a CLI database session and resolve its actor profile."""
+    """Yield a CLI database session with its actor profile resolved."""
     from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
 
     async with db_session(db) as session:
@@ -71,7 +71,7 @@ async def resolve_profile_id_once(
     actor_profile: str | None,
 ) -> int:
     """Resolve a CLI actor profile in a short-lived database session."""
-    async with _profile_scope(db, actor_user, actor_profile) as ctx:
+    async with profile_session(db, actor_user, actor_profile) as ctx:
         return ctx.profile_id
 
 
@@ -229,7 +229,7 @@ def profile_scoped_command(f: Any) -> Any:
             raise click.ClickException(f"Database not found: {db}")
 
         async def _run() -> Any:
-            async with _profile_scope(db, actor_user, actor_profile) as ctx:
+            async with profile_session(db, actor_user, actor_profile) as ctx:
                 return await f(ctx, *args, **kwargs)
 
         return asyncio.run(_run())
