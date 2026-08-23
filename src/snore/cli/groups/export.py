@@ -42,6 +42,7 @@ def export() -> None:
     is_flag=True,
     help="Trim STR.edf to only include the exported date range",
 )
+# Not @profile_scoped_command: resolves the profile briefly, then runs sync export work outside any session.
 @db_option
 @actor_options
 def export_raw(

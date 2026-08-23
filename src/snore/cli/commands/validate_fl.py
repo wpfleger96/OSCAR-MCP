@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from datetime import datetime
 from pathlib import Path
 
@@ -11,10 +9,11 @@ import click
 
 from snore.cli.decorators import (
     CliCtx,
+    cli_error_boundary,
     date_range_options_required,
     profile_scoped_command,
 )
-from snore.cli.display import console, err_console, print_footer, print_header
+from snore.cli.display import console, print_footer, print_header
 
 
 @click.command()
@@ -48,7 +47,7 @@ async def validate_fl(
         export_fl_report_json,
     )
 
-    try:
+    async with cli_error_boundary("FL validation error"):
         validator = FlowLimitationValidator(ctx.db, ctx.profile_id)
 
         console.print(
@@ -162,13 +161,3 @@ async def validate_fl(
                 raise click.ClickException(
                     f"Unknown export format '{export_path.suffix}'. Use .json or .csv"
                 )
-
-    except click.ClickException:
-        raise
-    except Exception as e:
-        import traceback
-
-        err_console.print(f"FL validation error: {e}")
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            traceback.print_exc()
-        raise click.ClickException(str(e)) from e

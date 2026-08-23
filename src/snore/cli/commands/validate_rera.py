@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from datetime import datetime
 from pathlib import Path
 
@@ -11,12 +9,12 @@ import click
 
 from snore.cli.decorators import (
     CliCtx,
+    cli_error_boundary,
     date_range_options_required,
     profile_scoped_command,
 )
 from snore.cli.display import (
     console,
-    err_console,
     fmt_sig,
     print_footer,
     print_header,
@@ -56,7 +54,7 @@ async def validate_rera(
         export_rera_report_json,
     )
 
-    try:
+    async with cli_error_boundary("RERA validation error"):
         validator = ReraValidator(ctx.db, ctx.profile_id)
 
         console.print(
@@ -184,13 +182,3 @@ async def validate_rera(
                 raise click.ClickException(
                     f"Unknown export format '{export_path.suffix}'. Use .json or .csv"
                 )
-
-    except click.ClickException:
-        raise
-    except Exception as e:
-        import traceback
-
-        err_console.print(f"RERA validation error: {e}")
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            traceback.print_exc()
-        raise click.ClickException(str(e)) from e

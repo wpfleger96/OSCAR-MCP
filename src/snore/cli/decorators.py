@@ -51,6 +51,27 @@ async def db_session(db: str | None) -> AsyncIterator[AsyncSession]:
         yield session
 
 
+@asynccontextmanager
+async def cli_error_boundary(label: str) -> AsyncIterator[None]:
+    """Standard CLI error boundary: ClickException passes through; any other
+    exception is reported to stderr (with a traceback at DEBUG) and re-raised
+    as a ClickException."""
+    import logging  # noqa: PLC0415
+    import traceback  # noqa: PLC0415
+
+    from snore.cli.display import err_console  # noqa: PLC0415
+
+    try:
+        yield
+    except click.ClickException:
+        raise
+    except Exception as e:
+        err_console.print(f"{label}: {e}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            traceback.print_exc()
+        raise click.ClickException(str(e)) from e
+
+
 def db_option(f: Any) -> Any:
     """Shared --db option for commands that access the database."""
     return click.option(

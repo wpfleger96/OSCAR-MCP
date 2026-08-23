@@ -12,6 +12,7 @@ import click
 
 from snore.cli.decorators import (
     CliCtx,
+    cli_error_boundary,
     date_range_options,
     profile_scoped_command,
 )
@@ -85,13 +86,13 @@ async def validate(
     if date_from > date_to:
         raise click.ClickException("--from date must be before or equal to --to date")
 
-    from snore.validation import (
+    from snore.validation import (  # noqa: PLC0415
         BatchValidator,
         export_report_csv,
         export_report_json,
     )
 
-    try:
+    async with cli_error_boundary("Validation error"):
         validator = BatchValidator(ctx.db, ctx.profile_id)
 
         console.print(
@@ -175,26 +176,16 @@ async def validate(
                     f"Unknown export format '{export_path.suffix}'. Use .json or .csv"
                 )
 
-    except click.ClickException:
-        raise
-    except Exception as e:
-        import traceback
-
-        err_console.print(f"Validation error: {e}")
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            traceback.print_exc()
-        raise click.ClickException(str(e)) from e
-
 
 async def _run_integrity(ctx: CliCtx, device_id: int | None) -> None:
     """Run the data-integrity check and print results; exits nonzero on issues."""
-    from snore.validation.batch import BatchValidator
+    from snore.validation.batch import BatchValidator  # noqa: PLC0415
 
     try:
         validator = BatchValidator(ctx.db, ctx.profile_id)
         report = await validator.check_data_integrity(device_id=device_id)
     except Exception as e:
-        import traceback
+        import traceback  # noqa: PLC0415
 
         err_console.print(f"Integrity check error: {e}")
         if logging.getLogger().isEnabledFor(logging.DEBUG):

@@ -105,6 +105,7 @@ def health() -> None:
     show_default=True,
     help="Records per database transaction",
 )
+# Not @profile_scoped_command: resolves the profile briefly, then manages its own per-batch write sessions.
 @db_option
 @actor_options
 def health_import(
@@ -136,8 +137,8 @@ def health_import(
     async def _run() -> None:
         from snore.auth.factory import resolve_cli_profile_id  # noqa: PLC0415
         from snore.database.session import session_scope  # noqa: PLC0415
-        from snore.services.health_import_service import (
-            HealthImportService,  # noqa: PLC0415
+        from snore.services.health_import_service import (  # noqa: PLC0415
+            HealthImportService,
         )
 
         async with session_scope() as session:

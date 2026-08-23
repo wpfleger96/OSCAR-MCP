@@ -98,6 +98,7 @@ async def _resolve_profile_timezone(
 @click.command("import")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--force", is_flag=True, help="Re-import existing sessions")
+# Not @profile_scoped_command: profile resolution is best-effort (failure falls back to UTC timezone inference).
 @db_option
 @actor_options
 @click.option("--limit", "-n", type=int, help="Limit to first N sessions")

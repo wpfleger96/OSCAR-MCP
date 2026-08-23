@@ -52,7 +52,6 @@ def analysis() -> None:
     help="Analyze single session by date (YYYY-MM-DD)",
 )
 @date_range_options
-@profile_scoped_command
 @click.option("--no-store", is_flag=True, help="Don't store results in database")
 @click.option(
     "--mode",
@@ -80,6 +79,7 @@ def analysis() -> None:
     is_flag=True,
     help="Plain output without colors/borders",
 )
+@profile_scoped_command
 async def run(
     ctx: CliCtx,
     session_id: int | None,
@@ -176,12 +176,12 @@ async def list_cmd(
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="Show analysis for session on date (YYYY-MM-DD)",
 )
-@profile_scoped_command
 @click.option(
     "--plain",
     is_flag=True,
     help="Plain output without colors/borders",
 )
+@profile_scoped_command
 async def show(
     ctx: CliCtx,
     session_id: int | None,
@@ -190,7 +190,6 @@ async def show(
 ) -> None:
     """Display stored analysis results."""
     from snore.analysis.service import AnalysisService  # noqa: PLC0415
-    from snore.database import models  # noqa: PLC0415
     from snore.services.session_service import SessionService  # noqa: PLC0415
 
     if session_id is None and date is None:
@@ -205,26 +204,7 @@ async def show(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
-    db_session_row = (
-        (
-            await ctx.db.execute(
-                select(models.Session)
-                .where(models.Session.id == sid)
-                .options(joinedload(models.Session.day))
-            )
-        )
-        .scalars()
-        .first()
-    )
-    if not db_session_row:
-        raise click.ClickException(f"Session {sid} not found")
-
-    day_date = (
-        db_session_row.day.date
-        if db_session_row.day
-        else db_session_row.start_time.date()
-    )
-    session_date_str = day_date.isoformat()
+    _, session_date_str = await _load_session_with_day(ctx.db, sid)
 
     analysis_svc = AnalysisService(ctx.db, profile_id=ctx.profile_id)
     result = await analysis_svc.get_analysis_result(sid)
@@ -409,6 +389,26 @@ async def analysis_delete(
     return 0
 
 
+async def _load_session_with_day(db_session: Any, session_id: int) -> tuple[Any, str]:
+    from snore.database import models  # noqa: PLC0415
+
+    row = (
+        (
+            await db_session.execute(
+                select(models.Session)
+                .where(models.Session.id == session_id)
+                .options(joinedload(models.Session.day))
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if not row:
+        raise click.ClickException(f"Session {session_id} not found")
+    day_date = row.day.date if row.day else row.start_time.date()
+    return row, day_date.isoformat()
+
+
 async def _analyze_single_session(
     session: Any,
     session_id: int | None,
@@ -421,7 +421,6 @@ async def _analyze_single_session(
     primary_mode: str | None = None,
 ) -> None:
     from snore.analysis.modes import AVAILABLE_CONFIGS  # noqa: PLC0415
-    from snore.database import models  # noqa: PLC0415
     from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
     from snore.services.session_service import SessionService  # noqa: PLC0415
 
@@ -432,21 +431,7 @@ async def _analyze_single_session(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
-    db_session = (
-        (
-            await session.execute(
-                select(models.Session)
-                .where(models.Session.id == session_id)
-                .options(joinedload(models.Session.day))
-            )
-        )
-        .scalars()
-        .first()
-    )
-    if not db_session:
-        raise click.ClickException(f"Session {session_id} not found")
-    day_date = db_session.day.date if db_session.day else db_session.start_time.date()
-    session_date_str = day_date.isoformat()
+    _, session_date_str = await _load_session_with_day(session, session_id)
 
     # Close the injected session BEFORE analysis so it is not held across compute.
     await session.close()
@@ -492,10 +477,15 @@ async def _analyze_batch(
     profile_id: int,
     primary_mode: str | None = None,
 ) -> None:
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+    from rich.progress import (  # noqa: PLC0415
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        TextColumn,
+    )
 
-    from snore.analysis.modes import AVAILABLE_CONFIGS
-    from snore.services.analysis_facade import AnalysisFacade
+    from snore.analysis.modes import AVAILABLE_CONFIGS  # noqa: PLC0415
+    from snore.services.analysis_facade import AnalysisFacade  # noqa: PLC0415
 
     modes: list[str] | None = None
     if all_modes:

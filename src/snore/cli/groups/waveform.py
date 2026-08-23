@@ -74,7 +74,7 @@ async def list_waveforms(
         snore waveform list --session-id 37
         snore waveform list --date 2025-10-25
     """
-    from snore.services.waveform_service import WaveformService
+    from snore.services.waveform_service import WaveformService  # noqa: PLC0415
 
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
@@ -163,8 +163,8 @@ async def show_waveform(
         snore waveform show --date 2025-10-25 --time 01:25:16 --type pressure
         snore waveform show --session-id 37 --time 01:25:16 --format csv --output waveform.csv
     """
-    from snore.analysis.service import AnalysisService
-    from snore.waveform import WaveformInspector, WaveformRenderer
+    from snore.analysis.service import AnalysisService  # noqa: PLC0415
+    from snore.waveform import WaveformInspector, WaveformRenderer  # noqa: PLC0415
 
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")
@@ -258,11 +258,11 @@ async def show_waveform(
             console.print(f"Exported {len(timestamps)} samples to {output}")
 
     else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
 
-        import numpy as np
+        import numpy as np  # noqa: PLC0415
 
-        from snore.database.session import session_scope
+        from snore.database.session import session_scope  # noqa: PLC0415
 
         async def _load_waveform_async(
             wf_type: str,
@@ -345,8 +345,8 @@ async def compare_events(
         snore waveform compare --session-id 37 --mode aasm
         snore waveform compare --date 2025-10-25 --mode resmed --show-unmatched
     """
-    from snore.exceptions import NotFoundError
-    from snore.services.waveform_service import WaveformService
+    from snore.exceptions import NotFoundError  # noqa: PLC0415
+    from snore.services.waveform_service import WaveformService  # noqa: PLC0415
 
     if session_id is None and date is None:
         raise click.ClickException("Either --session-id or --date must be provided")

@@ -100,7 +100,6 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch("snore.database.session.session_scope", scope),
             patch(
@@ -165,7 +164,6 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch("snore.database.session.session_scope", scope),
             patch(
@@ -203,7 +201,6 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch("snore.database.session.session_scope", scope),
             patch("snore.cli.display.console", stdout_console),
@@ -245,7 +242,6 @@ class TestAnalyzeBatch:
 
         runner = CliRunner()
         with (
-            patch("snore.cli.decorators.init_db"),
             patch("snore.database.session.init_database", new_callable=AsyncMock),
             patch("snore.database.session.session_scope", scope),
             patch(

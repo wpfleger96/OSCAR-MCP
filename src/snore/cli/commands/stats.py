@@ -38,8 +38,8 @@ async def stats(
     records: bool,
 ) -> None:
     """Show therapy usage and clinical statistics."""
-    from snore.services.schemas import PeriodStatistics
-    from snore.services.stats_service import StatsService
+    from snore.services.schemas import PeriodStatistics  # noqa: PLC0415
+    from snore.services.stats_service import StatsService  # noqa: PLC0415
 
     if trend and not period:
         period = "week"
@@ -134,7 +134,7 @@ async def stats(
             print_kv(ec.event_type, f"{ec.count:,} ({ec.percentage:.1f}%)")
 
     if period:
-        from snore.analysis.calculations import PeriodType
+        from snore.analysis.calculations import PeriodType  # noqa: PLC0415
 
         period_literal = cast(PeriodType, period)
         period_stats: list[PeriodStatistics] = await service.get_period_statistics(
@@ -210,7 +210,7 @@ async def stats(
             print_footer(wide=True)
 
             if trend:
-                import plotext as plt
+                import plotext as plt  # noqa: PLC0415
 
                 trends = await service.get_trends(period_literal, days)
                 ahi_trend = trends["ahi"]
@@ -221,7 +221,7 @@ async def stats(
                     date_labels = [d.strftime("%Y-%m-%d") for d in dates_for_plot]
                     x_indices = list(range(len(ahi_values)))
 
-                    from snore.analysis.calculations import (
+                    from snore.analysis.calculations import (  # noqa: PLC0415
                         calculate_ahi_trend_direction,
                     )
 

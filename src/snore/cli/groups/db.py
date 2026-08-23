@@ -392,7 +392,7 @@ async def _do_scrub_demo(session: Any, source_profile_id: int) -> None:
         Setting,
         Statistics,
     )
-    from snore.database.models import (
+    from snore.database.models import (  # noqa: PLC0415
         Session as DbSession,
     )
     from snore.services.demo_service import DemoService  # noqa: PLC0415

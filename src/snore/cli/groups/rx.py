@@ -55,7 +55,7 @@ async def rx_history(ctx: CliCtx) -> None:
     Example:
         snore rx history
     """
-    from snore.analysis.rx_tracker import RxTracker
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
     stats_periods = await RxTracker(ctx.profile_id).get_history(ctx.db)
 
@@ -120,7 +120,7 @@ async def rx_current(ctx: CliCtx) -> None:
     Example:
         snore rx current
     """
-    from snore.analysis.rx_tracker import RxTracker
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
     current = await RxTracker(ctx.profile_id).get_current(ctx.db)
 
@@ -186,7 +186,7 @@ async def rx_compare(ctx: CliCtx, min_days: int) -> None:
         snore rx compare
         snore rx compare --min-days 14
     """
-    from snore.analysis.rx_tracker import RxTracker
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
     comparison = await RxTracker(ctx.profile_id).get_comparison(
         ctx.db, min_days=min_days
@@ -283,7 +283,7 @@ async def rx_changes(ctx: CliCtx) -> None:
     Example:
         snore rx changes
     """
-    from snore.analysis.rx_tracker import RxTracker
+    from snore.analysis.rx_tracker import RxTracker  # noqa: PLC0415
 
     response = await RxTracker(ctx.profile_id).get_changes(ctx.db)
     # Stable sort preserves the service's within-date ordering (ascending by device_id, key).

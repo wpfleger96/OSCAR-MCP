@@ -8,8 +8,6 @@ the database.
 
 from __future__ import annotations
 
-import logging
-
 from datetime import datetime
 from pathlib import Path
 
@@ -19,10 +17,11 @@ from rich.table import Table
 
 from snore.cli.decorators import (
     CliCtx,
+    cli_error_boundary,
     date_range_options_required,
     profile_scoped_command,
 )
-from snore.cli.display import console, err_console, fmt_sig
+from snore.cli.display import console, fmt_sig
 from snore.validation.sweep import SweepResult
 
 
@@ -192,7 +191,7 @@ async def sweep_thresholds(
             "Provide at least one value per swept knob."
         )
 
-    try:
+    async with cli_error_boundary("Sweep error"):
         console.print(
             f"Sweeping target={target} from {date_from.date()} to {date_to.date()}..."
         )
@@ -227,13 +226,3 @@ async def sweep_thresholds(
                 f"\nFull ranked grid ({len(result.rows)} rows) exported to "
                 f"{export_path}"
             )
-
-    except click.ClickException:
-        raise
-    except Exception as e:
-        import traceback  # noqa: PLC0415
-
-        err_console.print(f"Sweep error: {e}")
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            traceback.print_exc()
-        raise click.ClickException(str(e)) from e

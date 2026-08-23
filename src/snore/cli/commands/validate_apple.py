@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from datetime import datetime
 from pathlib import Path
 
@@ -13,10 +11,11 @@ from rich.table import Table
 
 from snore.cli.decorators import (
     CliCtx,
+    cli_error_boundary,
     date_range_options_required,
     profile_scoped_command,
 )
-from snore.cli.display import console, err_console, print_header
+from snore.cli.display import console, print_header
 
 
 def _fmt_r(v: float | None) -> str:
@@ -69,7 +68,7 @@ async def validate_apple(
         export_apple_cross_report_json,
     )
 
-    try:
+    async with cli_error_boundary("Apple cross-source validation error"):
         validator = AppleCrossValidator(ctx.db, ctx.profile_id)
 
         console.print(
@@ -129,13 +128,3 @@ async def validate_apple(
             else:
                 export_apple_cross_report_csv(report, export_path)
             console.print(f"\nReport exported to {export_path}")
-
-    except click.ClickException:
-        raise
-    except Exception as e:
-        import traceback  # noqa: PLC0415
-
-        err_console.print(f"Apple cross-source validation error: {e}")
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            traceback.print_exc()
-        raise click.ClickException(str(e)) from e

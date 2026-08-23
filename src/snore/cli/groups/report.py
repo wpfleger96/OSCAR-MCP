@@ -52,7 +52,7 @@ async def summary(
         snore report summary --from 2025-01-01 --to 2025-01-31
         snore report summary --from 2025-01-01 --to 2025-01-31 -o ~/Desktop/report.html
     """
-    from snore.services import ReportService
+    from snore.services import ReportService  # noqa: PLC0415
 
     fd = from_date.date()
     td = to_date.date()
@@ -126,7 +126,7 @@ async def comparison(
         snore report comparison --from 2025-01-01 --to 2025-01-31 \\
           --compare-from 2025-02-01 --compare-to 2025-02-28 -o ~/Desktop/report.html
     """
-    from snore.services import ReportService
+    from snore.services import ReportService  # noqa: PLC0415
 
     fd = from_date.date()
     td = to_date.date()

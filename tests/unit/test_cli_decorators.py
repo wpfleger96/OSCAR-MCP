@@ -197,6 +197,70 @@ class TestProfileScopedCommand:
         assert "no such profile" in result.output
         assert ran is False
 
+    def test_body_runtime_error_surfaces_and_exits_nonzero(self):
+        """A non-Click exception in the body propagates out and exits non-zero.
+
+        The fake ``session_scope`` here yields the session directly and does not
+        model commit/rollback, so the rollback path is not observable; the
+        contract asserted is that a plain ``RuntimeError`` is not swallowed.
+        """
+
+        @click.command("dummy")
+        @profile_scoped_command
+        async def dummy(ctx: CliCtx) -> None:
+            raise RuntimeError("boom")
+
+        session = MagicMock()
+        (init_p, scope_p, resolve_p), _ = _patches(session)
+
+        runner = CliRunner()
+        with init_p, scope_p, resolve_p:
+            result = runner.invoke(dummy)
+
+        assert result.exit_code != 0
+        assert isinstance(result.exception, RuntimeError)
+        assert "boom" in str(result.exception)
+
+    def test_actor_envvars_forwarded_to_resolver(self):
+        """SNORE_USER/SNORE_PROFILE envvars reach resolve_cli_profile_id without flags."""
+
+        @click.command("dummy")
+        @profile_scoped_command
+        async def dummy(ctx: CliCtx) -> None:
+            click.echo("ok")
+
+        session = MagicMock()
+        (init_p, scope_p, resolve_p), resolve = _patches(session)
+
+        runner = CliRunner()
+        with init_p, scope_p, resolve_p:
+            result = runner.invoke(
+                dummy,
+                env={"SNORE_USER": "env@example.com", "SNORE_PROFILE": "envprof"},
+            )
+
+        assert result.exit_code == 0, result.output
+        resolve.assert_awaited_once_with(session, "env@example.com", "envprof")
+
+    def test_tilde_db_path_missing_fails_before_session(self, tmp_path, monkeypatch):
+        """A tilde --db path is expanded and, if missing, rejected before any session opens."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        ran = False
+
+        @click.command("dummy")
+        @profile_scoped_command
+        async def dummy(ctx: CliCtx) -> None:
+            nonlocal ran
+            ran = True
+
+        # No patches: the guard must fire before any DB or resolver work.
+        result = CliRunner().invoke(dummy, ["--db", "~/definitely-missing.db"])
+
+        assert result.exit_code == 1
+        assert "Database not found" in result.output
+        assert ran is False
+
     def test_help_does_not_touch_database(self):
         """--help renders the bundled options without any DB or resolver patches."""
 

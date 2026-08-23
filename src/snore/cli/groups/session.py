@@ -60,7 +60,7 @@ async def session_list(
     show_all: bool,
 ) -> None:
     """List imported sessions."""
-    from snore.services.session_service import SessionService
+    from snore.services.session_service import SessionService  # noqa: PLC0415
 
     service = SessionService(ctx.db, ctx.profile_id)
     result = await service.list_sessions(
@@ -125,8 +125,8 @@ async def session_show(
     show_settings: bool,
 ) -> None:
     """Show details for a specific session."""
-    from snore.cli.display.analysis import display_session_detail
-    from snore.services.session_service import SessionService
+    from snore.cli.display.analysis import display_session_detail  # noqa: PLC0415
+    from snore.services.session_service import SessionService  # noqa: PLC0415
 
     service = SessionService(ctx.db, ctx.profile_id)
 
@@ -166,7 +166,7 @@ async def session_delete(
     force: bool,
 ) -> None:
     """Delete sessions from the database."""
-    from snore.services.session_service import SessionService
+    from snore.services.session_service import SessionService  # noqa: PLC0415
 
     id_list = None
     if session_ids:
@@ -248,7 +248,7 @@ async def session_delete(
 
 async def _toggle_session_async(ctx: CliCtx, session_id: int, enabled: bool) -> None:
     """Enable or disable a session and recalculate day statistics."""
-    from snore.services.session_service import SessionService
+    from snore.services.session_service import SessionService  # noqa: PLC0415
 
     service = SessionService(ctx.db, ctx.profile_id)
 
