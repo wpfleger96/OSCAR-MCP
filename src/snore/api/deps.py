@@ -18,13 +18,14 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
 
 
 async def get_db_immediate() -> AsyncGenerator[AsyncSession]:
-    """FastAPI dependency providing a BEGIN IMMEDIATE session for bulk writes.
+    """FastAPI dependency providing a BEGIN IMMEDIATE session for writes.
 
     Acquires the SQLite write lock at transaction open (BEGIN IMMEDIATE) so
     contending writers queue on busy_timeout rather than failing instantly on a
-    WAL snapshot-upgrade conflict.  Use for endpoints that perform large bulk
-    deletes (e.g. /db/reset, /auth/me/delete-data) to prevent SQLITE_BUSY
-    bypassing the timeout that a deferred-BEGIN transaction would trigger.
+    WAL snapshot-upgrade conflict.  Use for endpoints that read before writing
+    or perform large bulk deletes (e.g. /db/reset, /auth/me/delete-data) to
+    prevent SQLITE_BUSY bypassing the timeout that a deferred-BEGIN transaction
+    would trigger.
     """
     async with session_scope(immediate=True) as session:
         yield session
@@ -136,6 +137,20 @@ def service_dep[T](cls: Callable[[AsyncSession, int], T]) -> Callable[..., T]:
     async def _dep(
         db: Annotated[AsyncSession, Depends(get_db)],
         actor: ActorDep,
+    ) -> T:
+        return cls(db, actor.profile_id)
+
+    return _dep  # type: ignore[return-value]
+
+
+def service_dep_immediate[T](
+    cls: Callable[[AsyncSession, int], T],
+) -> Callable[..., T]:
+    """Construct ``cls`` with a profile-scoped BEGIN IMMEDIATE session."""
+
+    async def _dep(
+        actor: ActorDep,
+        db: ImmediateDbDep,
     ) -> T:
         return cls(db, actor.profile_id)
 

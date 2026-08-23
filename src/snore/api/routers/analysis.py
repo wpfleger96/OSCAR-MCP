@@ -6,7 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snore.analysis.types import AnalysisResult
 from snore.api import analysis_jobs
-from snore.api.deps import DateRangeParams, PaginationParams, get_db, service_dep
+from snore.api.deps import (
+    DateRangeParams,
+    PaginationParams,
+    get_db,
+    service_dep,
+    service_dep_immediate,
+)
 from snore.api.errors import NotFoundError
 from snore.api.guards import RequireAuth, RequireWritable
 from snore.api.schemas import (
@@ -26,6 +32,9 @@ from snore.services.schemas import (
 router = APIRouter()
 
 AnalysisFacadeDep = Annotated[AnalysisFacade, Depends(service_dep(AnalysisFacade))]
+AnalysisWriteFacadeDep = Annotated[
+    AnalysisFacade, Depends(service_dep_immediate(AnalysisFacade))
+]
 
 
 @router.get("/analysis/sessions", response_model=PaginatedResponse[AnalysisListItem])
@@ -83,8 +92,8 @@ async def run_analysis(
 @router.delete("/analysis")
 async def delete_analysis(
     body: AnalysisDeleteRequest,
-    facade: AnalysisFacadeDep,
     _actor: RequireWritable,
+    facade: AnalysisWriteFacadeDep,
 ) -> dict[str, int]:
     if body.session_ids:
         owned = await facade.get_owned_session_ids(body.session_ids)
