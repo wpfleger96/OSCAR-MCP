@@ -1943,6 +1943,42 @@ export interface paths {
         patch?: never
         trace?: never
     }
+    '/api/v1/validate/runs': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** List Validation Runs */
+        get: operations['list_validation_runs_api_v1_validate_runs_get']
+        put?: never
+        /** Create Validation Run */
+        post: operations['create_validation_run_api_v1_validate_runs_post']
+        delete?: never
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
+    '/api/v1/validate/runs/{run_id}': {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        /** Get Validation Run */
+        get: operations['get_validation_run_api_v1_validate_runs__run_id__get']
+        put?: never
+        post?: never
+        /** Delete Validation Run */
+        delete: operations['delete_validation_run_api_v1_validate_runs__run_id__delete']
+        options?: never
+        head?: never
+        patch?: never
+        trace?: never
+    }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -5521,6 +5557,124 @@ export interface components {
              */
             to_date: string
         }
+        /** ValidationRunDetail */
+        ValidationRunDetail: {
+            /** Created At */
+            created_at: number
+            /** Date From */
+            date_from: string
+            /** Date To */
+            date_to: string
+            /** Engine Identity */
+            engine_identity: {
+                [key: string]: unknown
+            }
+            /** Error Message */
+            error_message: string | null
+            /** Finished At */
+            finished_at: number | null
+            /** Job Id */
+            job_id: string | null
+            /** Owner User Id */
+            owner_user_id: number | null
+            /** Report Json */
+            report_json: {
+                [key: string]: unknown
+            } | null
+            /**
+             * Reused
+             * @default false
+             */
+            reused: boolean
+            /** Run Id */
+            run_id: number
+            /** Started At */
+            started_at: number | null
+            /** State */
+            state: string
+            /** Validator Params */
+            validator_params: {
+                [key: string]: unknown
+            }
+            /** Validator Type */
+            validator_type: string
+        }
+        /** ValidationRunRequest */
+        ValidationRunRequest: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean
+            /**
+             * From Date
+             * Format: date
+             */
+            from_date: string
+            /** Params */
+            params?: {
+                [key: string]: unknown
+            } | null
+            /**
+             * To Date
+             * Format: date
+             */
+            to_date: string
+            /**
+             * Validator Type
+             * @enum {string}
+             */
+            validator_type: 'events' | 'fl' | 'breaths' | 'rera' | 'apple'
+        }
+        /** ValidationRunStatus */
+        ValidationRunStatus: {
+            /** Created At */
+            created_at: number
+            /** Date From */
+            date_from: string
+            /** Date To */
+            date_to: string
+            /** Engine Identity */
+            engine_identity: {
+                [key: string]: unknown
+            }
+            /** Error Message */
+            error_message: string | null
+            /** Finished At */
+            finished_at: number | null
+            /** Job Id */
+            job_id: string | null
+            /** Owner User Id */
+            owner_user_id: number | null
+            /**
+             * Reused
+             * @default false
+             */
+            reused: boolean
+            /** Run Id */
+            run_id: number
+            /** Started At */
+            started_at: number | null
+            /** State */
+            state: string
+            /** Validator Params */
+            validator_params: {
+                [key: string]: unknown
+            }
+            /** Validator Type */
+            validator_type: string
+        }
+        /** ValidationRunsListResponse */
+        ValidationRunsListResponse: {
+            /** Limit */
+            limit: number
+            /** Offset */
+            offset: number
+            /** Runs */
+            runs: components['schemas']['ValidationRunStatus'][]
+            /** Total */
+            total: number
+        }
         /** WaveformDataResponse */
         WaveformDataResponse: {
             /** Downsampled */
@@ -8521,6 +8675,132 @@ export interface operations {
                 content: {
                     'application/json': components['schemas']['ReraValidationReport']
                 }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    list_validation_runs_api_v1_validate_runs_get: {
+        parameters: {
+            query?: {
+                validator_type?: ('events' | 'fl' | 'breaths' | 'rera' | 'apple') | null
+                limit?: number
+                offset?: number
+            }
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ValidationRunsListResponse']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    create_validation_run_api_v1_validate_runs_post: {
+        parameters: {
+            query?: never
+            header?: never
+            path?: never
+            cookie?: never
+        }
+        requestBody: {
+            content: {
+                'application/json': components['schemas']['ValidationRunRequest']
+            }
+        }
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ValidationRunStatus']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    get_validation_run_api_v1_validate_runs__run_id__get: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                run_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['ValidationRunDetail']
+                }
+            }
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content: {
+                    'application/json': components['schemas']['HTTPValidationError']
+                }
+            }
+        }
+    }
+    delete_validation_run_api_v1_validate_runs__run_id__delete: {
+        parameters: {
+            query?: never
+            header?: never
+            path: {
+                run_id: number
+            }
+            cookie?: never
+        }
+        requestBody?: never
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown
+                }
+                content?: never
             }
             /** @description Validation Error */
             422: {
