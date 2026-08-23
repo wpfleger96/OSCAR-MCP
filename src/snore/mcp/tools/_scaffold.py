@@ -14,8 +14,10 @@ from server.py occurs.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import re
 
 from collections.abc import Awaitable, Callable
 from functools import wraps
@@ -25,6 +27,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import ValidationError as PydanticValidationError
 
+from snore.constants import FL_RERA_EXPERIMENTAL_DISCLAIMER
 from snore.mcp.errors import ValidationError
 
 if TYPE_CHECKING:
@@ -73,6 +76,42 @@ def tool_error_boundary(
             raise ToolError("An unexpected error occurred.") from exc
 
     return wrapper
+
+
+# A Google-style docstring section header on its own line ("Args:", "Returns:",
+# "Refusal semantics:", ...). FastMCP keeps only the leading prose as the tool
+# description and turns everything from the first such header onward into
+# parameter/return metadata — so the disclaimer must be injected BEFORE it, not
+# appended to the end of the docstring where it would be discarded.
+_DOC_SECTION_HEADER = re.compile(r"^[A-Z][A-Za-z ]*:$")
+
+
+def _with_fl_rera_disclaimer(
+    func: Callable[..., Awaitable[Any]],
+) -> Callable[..., Awaitable[Any]]:
+    """Inject the FL/RERA experimental disclaimer into a tool's description.
+
+    ``@mcp.tool()`` reads ``__doc__`` at decoration time and docstrings are static
+    string literals, so the shared constant cannot be interpolated into the
+    literal itself. Apply this decorator BELOW ``@mcp.tool()`` (decorators run
+    bottom-up) so the appended text is present when FastMCP captures the tool
+    description that clients see. The disclaimer is placed as its own paragraph
+    at the end of the leading prose (before the first ``Args:``-style section),
+    which is the region FastMCP surfaces as the client-visible description.
+    """
+    if not func.__doc__:
+        return func
+    lines = inspect.cleandoc(func.__doc__).splitlines()
+    disclaimer = f"FL/RERA proxy metrics: {FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+    insert_at = next(
+        (i for i, line in enumerate(lines) if _DOC_SECTION_HEADER.match(line)),
+        len(lines),
+    )
+    prefix = [] if insert_at > 0 and lines[insert_at - 1] == "" else [""]
+    suffix = [""] if insert_at < len(lines) else []
+    block = prefix + [disclaimer] + suffix
+    func.__doc__ = "\n".join(lines[:insert_at] + block + lines[insert_at:])
+    return func
 
 
 def _check_response_size(result: Any, tool_name: str) -> None:
