@@ -2127,14 +2127,23 @@ export interface components {
             /** Session Count */
             session_count: number
         }
-        /** AnalysisJobStatus */
+        /**
+         * AnalysisJobStatus
+         * @description Snapshot of one analysis job.
+         *
+         *     created_at, started_at, and finished_at are tz-aware UTC datetimes
+         *     serialized as ISO 8601 strings.
+         */
         AnalysisJobStatus: {
-            /** Created At */
-            created_at: number
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string
             /** Error Message */
             error_message: string | null
             /** Finished At */
-            finished_at: number | null
+            finished_at: string | null
             /** Job Id */
             job_id: string
             /** Owner User Id */
@@ -2148,9 +2157,12 @@ export interface components {
             /** Source */
             source: string
             /** Started At */
-            started_at: number | null
-            /** State */
-            state: string
+            started_at: string | null
+            /**
+             * State
+             * @enum {string}
+             */
+            state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
         }
         /** AnalysisJobsListResponse */
         AnalysisJobsListResponse: {
@@ -4280,14 +4292,18 @@ export interface components {
          * PipelineJobStatus
          * @description Stitched view of one import job and its downstream analysis job.
          *
-         *     created_at, started_at, and finished_at are ISO 8601 UTC datetime strings.
+         *     created_at, started_at, and finished_at are tz-aware UTC datetimes
+         *     serialized as ISO 8601 strings.
          */
         PipelineJobStatus: {
             /** Analysis Job Id */
             analysis_job_id: string | null
             /** Analysis Queued */
             analysis_queued: boolean | null
-            /** Created At */
+            /**
+             * Created At
+             * Format: date-time
+             */
             created_at: string
             /** Error Message */
             error_message: string | null
@@ -5586,8 +5602,11 @@ export interface components {
         }
         /** ValidationRunDetail */
         ValidationRunDetail: {
-            /** Created At */
-            created_at: number
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string
             /** Date From */
             date_from: string
             /** Date To */
@@ -5599,7 +5618,7 @@ export interface components {
             /** Error Message */
             error_message: string | null
             /** Finished At */
-            finished_at: number | null
+            finished_at: string | null
             /** Job Id */
             job_id: string | null
             /** Owner User Id */
@@ -5616,7 +5635,7 @@ export interface components {
             /** Run Id */
             run_id: number
             /** Started At */
-            started_at: number | null
+            started_at: string | null
             /** State */
             state: string
             /** Validator Params */
@@ -5653,10 +5672,19 @@ export interface components {
              */
             validator_type: 'events' | 'fl' | 'breaths' | 'rera' | 'apple'
         }
-        /** ValidationRunStatus */
+        /**
+         * ValidationRunStatus
+         * @description Snapshot of one validation run.
+         *
+         *     created_at, started_at, and finished_at are tz-aware UTC datetimes
+         *     serialized as ISO 8601 strings.
+         */
         ValidationRunStatus: {
-            /** Created At */
-            created_at: number
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string
             /** Date From */
             date_from: string
             /** Date To */
@@ -5668,7 +5696,7 @@ export interface components {
             /** Error Message */
             error_message: string | null
             /** Finished At */
-            finished_at: number | null
+            finished_at: string | null
             /** Job Id */
             job_id: string | null
             /** Owner User Id */
@@ -5681,7 +5709,7 @@ export interface components {
             /** Run Id */
             run_id: number
             /** Started At */
-            started_at: number | null
+            started_at: string | null
             /** State */
             state: string
             /** Validator Params */

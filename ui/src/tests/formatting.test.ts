@@ -1,8 +1,9 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi, afterEach } from 'vitest'
 import {
     formatPercent,
     formatPercentPointsDelta,
+    formatRelativeTime,
     formatWallClockTime,
     nullReasonLabel,
 } from '@/utils/formatting'
@@ -82,6 +83,48 @@ describe('nullReasonLabel', () => {
         expect(nullReasonLabel(null)).toBeNull()
         expect(nullReasonLabel(undefined)).toBeNull()
         expect(nullReasonLabel('')).toBeNull()
+    })
+})
+
+describe('formatRelativeTime', () => {
+    const NOW = new Date(2026, 3, 6, 12, 0, 0)
+
+    afterEach(() => {
+        vi.useRealTimers()
+    })
+
+    function at(msBefore: number): string {
+        return new Date(NOW.getTime() - msBefore).toISOString()
+    }
+
+    it('test_recent_string_renders_just_now', () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(NOW)
+        expect(formatRelativeTime(at(0))).toBe('just now')
+    })
+
+    it('test_five_minutes_ago_renders_minutes', () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(NOW)
+        expect(formatRelativeTime(at(5 * 60_000))).toBe('5m ago')
+    })
+
+    it('test_three_hours_ago_renders_hours', () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(NOW)
+        expect(formatRelativeTime(at(3 * 3_600_000))).toBe('3h ago')
+    })
+
+    it('test_older_than_24h_renders_localized_date', () => {
+        vi.useFakeTimers()
+        vi.setSystemTime(NOW)
+        const result = formatRelativeTime(at(48 * 3_600_000))
+        expect(result).not.toBe('just now')
+        expect(result).not.toMatch(/\bago$/)
+    })
+
+    it('test_invalid_string_returns_em_dash', () => {
+        expect(formatRelativeTime('not-a-date')).toBe('—')
     })
 })
 

@@ -10,7 +10,7 @@ the global ``session_scope``) is covered at unit level in
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -28,6 +28,10 @@ from tests.helpers.api_client import make_test_client
 
 _FROM = date(2024, 1, 1)
 _TO = date(2024, 1, 7)
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
 
 
 @pytest.fixture(autouse=True)
@@ -163,9 +167,31 @@ def test_list_and_filter_runs(
     all_runs = client.get("/api/v1/validate/runs").json()
     assert all_runs["total"] == 2
 
+    run = all_runs["runs"][0]
+    _assert_utc_timestamp(run["created_at"])
+    _assert_utc_timestamp(run["started_at"])
+    _assert_utc_timestamp(run["finished_at"])
+
     fl_only = client.get("/api/v1/validate/runs?validator_type=fl").json()
     assert fl_only["total"] == 1
     assert fl_only["runs"][0]["validator_type"] == "fl"
+
+
+def test_list_in_memory_run_has_null_execution_timestamps(
+    async_db_session: AsyncSession, seeded: Any
+) -> None:
+    actor, _pid, _uid = seeded
+    _twin(123, job_id="queued-memory-run", state=ValidationRunState.QUEUED)
+    client = _client(async_db_session, actor)
+
+    response = client.get("/api/v1/validate/runs")
+    assert response.status_code == 200
+    run = next(
+        run for run in response.json()["runs"] if run["job_id"] == "queued-memory-run"
+    )
+    _assert_utc_timestamp(run["created_at"])
+    assert run["started_at"] is None
+    assert run["finished_at"] is None
 
 
 def test_get_run_detail_includes_report(

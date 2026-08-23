@@ -1,6 +1,6 @@
 import json
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +10,10 @@ import snore.api.analysis_jobs as aj_store
 import snore.api.import_jobs as job_store
 
 from snore.services.schemas import ImportResult
+
+
+def _assert_utc_timestamp(value: str) -> None:
+    assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
 
 
 class TestImportUpload:
@@ -530,10 +534,29 @@ class TestPipelineJobsListAPI:
             assert j["state"] == "succeeded"
             assert j["stage"] == "done"
             assert j["file_count"] == 2
-            datetime.fromisoformat(j["created_at"])
-            datetime.fromisoformat(j["finished_at"])
+            _assert_utc_timestamp(j["created_at"])
+            _assert_utc_timestamp(j["started_at"])
+            _assert_utc_timestamp(j["finished_at"])
             assert "import_result" in j
             assert "linked_analysis" in j
+        finally:
+            remove_job(job.job_id)
+            job.cleanup_files()
+            job.release_capacity()
+
+    def test_pending_job_has_null_execution_timestamps(self, api_client):
+        from snore.api.import_jobs import JobType, create_job, remove_job
+
+        job = create_job(JobType.PATH, owner_user_id=None)
+        try:
+            response = api_client.get("/api/v1/import/jobs")
+            assert response.status_code == 200
+            item = next(
+                item for item in response.json()["jobs"] if item["job_id"] == job.job_id
+            )
+            _assert_utc_timestamp(item["created_at"])
+            assert item["started_at"] is None
+            assert item["finished_at"] is None
         finally:
             remove_job(job.job_id)
             job.cleanup_files()
@@ -672,6 +695,7 @@ class TestPipelineJobsListAPI:
                     error_message=job.error_message,
                     analysis_queued=job.analysis_queued,
                     created_at=job.created_at_wall,
+                    started_at=job.started_at_wall,
                     finished_at=job.finished_at_wall,
                     updated_at=datetime.now(UTC),
                 )
@@ -691,8 +715,9 @@ class TestPipelineJobsListAPI:
             assert j["state"] == "succeeded"
             assert j["stage"] == "done"
             assert j["file_count"] == 5
-            datetime.fromisoformat(j["created_at"])
-            datetime.fromisoformat(j["finished_at"])
+            _assert_utc_timestamp(j["created_at"])
+            _assert_utc_timestamp(j["started_at"])
+            _assert_utc_timestamp(j["finished_at"])
             assert j["import_result"] is not None
             assert j["import_result"]["total_imported"] == 3
             assert j["import_result"]["total_skipped"] == 1

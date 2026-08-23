@@ -197,15 +197,15 @@ async def list_analysis_jobs(
     def _db_row_to_status(rec: models.AnalysisJobRecord) -> AnalysisJobStatus:
         return AnalysisJobStatus(
             job_id=rec.job_id,
-            state=rec.state,
+            state=analysis_jobs.AnalysisJobState(rec.state).value,
             source=rec.source,
             session_count=len(rec.session_ids_json) if rec.session_ids_json else 0,
             progress_completed=rec.progress_completed,
             progress_total=rec.progress_total,
             error_message=rec.error_message,
-            created_at=rec.created_at.timestamp(),
-            started_at=rec.started_at.timestamp() if rec.started_at else None,
-            finished_at=rec.finished_at.timestamp() if rec.finished_at else None,
+            created_at=rec.created_at,
+            started_at=rec.started_at,
+            finished_at=rec.finished_at,
             owner_user_id=rec.owner_user_id,
         )
 

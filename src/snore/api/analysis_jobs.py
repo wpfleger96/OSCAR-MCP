@@ -186,12 +186,13 @@ class AnalysisJob(JobRecordBase[AnalysisJobState]):
             self._progress_total = total or 0
 
     def to_dict(self) -> dict[str, object]:
-        """Return a JSON-serialisable snapshot of this job's state.
+        """Return a snapshot of this job's state for ``model_validate``.
 
-        Timestamps are emitted as wall-clock epoch seconds (never the internal
-        ``time.monotonic()`` values used for ETA and TTL reaping) so this
-        in-memory path matches the DB-row path in the analysis router — feeding a
-        monotonic value to the client would render as a 1970-era date.
+        Timestamps are the wall-clock ``datetime`` values (never the internal
+        ``time.monotonic()`` values used for ETA and TTL reaping). Returning raw
+        datetimes rather than epoch floats removes the monotonic-→-1970 hazard by
+        construction: a float cannot inhabit the schema's ``datetime`` field. The
+        dict is consumed by ``AnalysisJobStatus.model_validate``, not JSON-dumped.
 
         eta_seconds is a linear extrapolation: (elapsed / done) * remaining.
         Early estimates can be imprecise; the value is clamped to zero so a
@@ -219,13 +220,9 @@ class AnalysisJob(JobRecordBase[AnalysisJobState]):
                 "progress_total": self._progress_total,
                 "eta_seconds": eta,
                 "error_message": self._error_message,
-                "created_at": self.created_at_wall.timestamp(),
-                "started_at": self._started_at_wall.timestamp()
-                if self._started_at_wall
-                else None,
-                "finished_at": self._finished_at_wall.timestamp()
-                if self._finished_at_wall
-                else None,
+                "created_at": self.created_at_wall,
+                "started_at": self._started_at_wall,
+                "finished_at": self._finished_at_wall,
             }
 
 
