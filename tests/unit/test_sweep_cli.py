@@ -28,6 +28,14 @@ def test_empty_knob_override_reports_empty_grid():
     assert "No data to sweep" not in result.output
 
 
+def test_empty_include_fallback_override_reports_empty_grid():
+    # --include-fallback "" zeroes the re-target grid on the new knob.
+    result = _invoke(["--target", "re", "--include-fallback", ""])
+    assert result.exit_code != 0
+    assert "Empty parameter grid" in result.output
+    assert "include_fallback" in result.output
+
+
 def test_top_zero_rejected_by_range():
     result = _invoke(["--target", "flg", "--top", "0"])
     assert result.exit_code != 0
