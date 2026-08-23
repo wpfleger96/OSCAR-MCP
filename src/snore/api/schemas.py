@@ -60,6 +60,11 @@ __all__ = [
     "AnalysisJobStatus",
     "AnalysisJobsListResponse",
     "AnalysisJobEnqueued",
+    "ValidatorType",
+    "ValidationRunRequest",
+    "ValidationRunStatus",
+    "ValidationRunDetail",
+    "ValidationRunsListResponse",
     "ImportSourceResultSummary",
     "ImportResultSummary",
     "LinkedAnalysisSummary",
@@ -190,14 +195,6 @@ class FlValidationRequest(DateRangeValidationRequest):
     pass
 
 
-class BreathTrendsValidationRequest(DateRangeValidationRequest):
-    pass
-
-
-class ReraValidationRequest(DateRangeValidationRequest):
-    pass
-
-
 # Apple cross-validation walks its calendar span in 90-night pages in the
 # request path, so an unbounded span means thousands of sequential queries.
 # One year of nights is far beyond any real Apple Watch export horizon.
@@ -220,6 +217,14 @@ class AppleCrossValidationRequest(BaseModel):
                 f"{_APPLE_CROSS_MAX_SPAN_NIGHTS}. Narrow the range."
             )
         return self
+
+
+class BreathTrendsValidationRequest(DateRangeValidationRequest):
+    pass
+
+
+class ReraValidationRequest(DateRangeValidationRequest):
+    pass
 
 
 # Style vocabulary must stay in sync: DB CHECKs (models.py, migrations 008/009), services/mask_epoch_service.py map, ui/src/utils/maskOptions.ts.
@@ -303,6 +308,58 @@ class AnalysisJobsListResponse(BaseModel):
 class AnalysisJobEnqueued(BaseModel):
     job_id: str
     session_count: int
+
+
+# Accepted validator types. events/fl/breaths run today; rera/apple are accepted
+# here but rejected with 400 until their sibling validators are registered.
+ValidatorType = Literal["events", "fl", "breaths", "rera", "apple"]
+
+
+class ValidationRunRequest(BaseModel):
+    validator_type: ValidatorType
+    from_date: date
+    to_date: date
+    # Query-time knobs (e.g. {"mode": "resmed"} for events); interpreted per
+    # validator type. Combined with the engine identity to form the dedup key.
+    params: dict[str, object] | None = None
+    # Force a fresh run even when a matching succeeded run already exists.
+    force: bool = False
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> ValidationRunRequest:
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be >= from_date")
+        return self
+
+
+class ValidationRunStatus(BaseModel):
+    run_id: int
+    job_id: str | None
+    validator_type: str
+    date_from: str
+    date_to: str
+    state: str
+    error_message: str | None
+    engine_identity: dict[str, object]
+    validator_params: dict[str, object]
+    owner_user_id: int | None
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+    # True when this run was returned by dedup instead of computed anew.
+    reused: bool = False
+
+
+class ValidationRunDetail(ValidationRunStatus):
+    # The whole report blob; None until the run has succeeded.
+    report_json: dict[str, object] | None
+
+
+class ValidationRunsListResponse(BaseModel):
+    runs: list[ValidationRunStatus]
+    total: int
+    limit: int
+    offset: int
 
 
 class ImportSourceResultSummary(BaseModel):

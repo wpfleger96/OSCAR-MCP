@@ -52,6 +52,7 @@ from snore.validation.rera_report import (
     ReraSessionValidation,
     ReraValidationReport,
 )
+from snore.validation.session_scoping import work_session
 from snore.validation.stats import mean_or_none
 
 logger = logging.getLogger(__name__)
@@ -204,8 +205,12 @@ def proxy_reras_from_breath_arrays(
 class ReraValidator:
     """Validates SNORE's two RERA definitions against machine RE events."""
 
-    def __init__(self, db_session: AsyncSession, profile_id: int) -> None:
-        self._db = db_session
+    def __init__(self, db_session: AsyncSession | None, profile_id: int) -> None:
+        # None → JOB mode: work_session opens a fresh short scope per session so
+        # the WAL read snapshot is released between sessions.  A real session →
+        # shared mode: every unit of work runs on it, one transaction, as before.
+        self._injected = db_session
+        self._db: AsyncSession = db_session  # type: ignore[assignment]
         self._profile_id = profile_id
 
     async def validate_date_range(
@@ -233,13 +238,17 @@ class ReraValidator:
             )
             .order_by(models.Session.start_time)
         )
-        sessions = (await self._db.execute(stmt)).scalars().all()
+        async with work_session(self._injected) as db:
+            self._db = db
+            sessions = (await db.execute(stmt)).scalars().all()
         logger.info(f"Found {len(sessions)} sessions between {date_from} and {date_to}")
 
         results: list[ReraSessionValidation] = []
         for session in sessions:
             try:
-                results.append(await self._validate_session(session))
+                async with work_session(self._injected) as db:
+                    self._db = db
+                    results.append(await self._validate_session(session))
             except Exception as e:
                 logger.warning(f"Failed to validate session {session.id}: {e}")
                 results.append(
