@@ -24,7 +24,11 @@ from snore.mcp.schemas import (
     EpochStats,
 )
 from snore.mcp.tools._helpers import str_or_none
-from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
+from snore.mcp.tools._scaffold import (
+    _scope_and_run,
+    _with_fl_rera_disclaimer,
+    tool_error_boundary,
+)
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -129,6 +133,9 @@ async def compare_epochs(
             flow_class_distribution={
                 str(k): v for k, v in s.flow_class_distribution.items()
             },
+            flow_class_distribution_fallback={
+                str(k): v for k, v in s.flow_class_distribution_fallback.items()
+            },
             tidal_volume_ml=_map_distribution(s.tidal_volume_ml),
             ie_ratio=_map_distribution(s.ie_ratio),
             rera_proxy_count=s.rera_proxy_count,
@@ -160,6 +167,7 @@ def register(mcp: FastMCP) -> None:
     from snore.mcp.validation import validate_epoch_count  # noqa: PLC0415
 
     @mcp.tool()
+    @_with_fl_rera_disclaimer
     @tool_error_boundary
     async def compare_epochs(
         ctx: Context,
@@ -199,8 +207,16 @@ def register(mcp: FastMCP) -> None:
             distributions — so ``device_flg_median`` here may differ from
             ``get_nightly_summary``, which uses all enabled sessions regardless of
             analysis status.
-            ``flow_class_distribution`` keys are strings (``"0"``, ``"1"``, ...) because
-            JSON object keys are always strings.
+            ``flow_class_distribution`` counts rule-matched FL classifications only
+            (breaths whose classifier confidence clears the default gate); its
+            class>=4 fraction reconciles with ``get_nightly_summary``'s
+            ``fl_class_ge4_pct``.  ``flow_class_distribution_fallback`` counts the
+            low-confidence fallback guesses — breaths triaged on flatness alone when
+            no shape rule matched, stamped at exactly the default confidence — kept
+            separate so they don't inflate FL rates.  Rows with missing or
+            below-default confidence values are excluded from both distributions.
+            Both use string keys (``"0"``, ``"1"``, ...) because JSON object keys
+            are always strings.
             ``rx_settings`` holds representative therapy settings observed for the epoch.
             ``rx_violations`` lists any therapy-settings changes detected within an
             epoch's date range; callers should split affected epochs at those dates.
@@ -208,10 +224,14 @@ def register(mcp: FastMCP) -> None:
             differ across epochs — distributions are still populated but callers should
             review version_warnings before drawing conclusions.
 
-        Refusal semantics (ALL epoch distributions set to null):
-            ``null_reason: "rx_changed_within_epoch"`` — therapy settings changed within
-                at least one epoch; ``rx_violations`` lists the epoch label, changed keys,
-                and change dates so the caller can split the range.
+        Refusal semantics:
+            Mid-epoch RX change nulls only the affected epoch: that epoch's
+                ``null_reason`` becomes ``"rx_changed_within_epoch"`` while clean epochs
+                in the same call keep their computed distributions.  The top-level
+                ``null_reason`` is ``"rx_changed_within_epoch"`` only when EVERY epoch was
+                nulled for an RX change; otherwise it stays ``null``.  ``rx_violations``
+                always lists the affected epoch label, changed keys, and change dates so
+                the caller can split those ranges.
             Partial degradation: when sessions within an epoch differ in ``primary_mode``,
                 the epoch's ``null_reason`` stays ``null``; only ``rera_proxy_count`` is
                 set to ``null`` with ``rera_reason: "primary_mode_mismatch"``; FL

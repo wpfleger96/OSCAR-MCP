@@ -259,9 +259,9 @@ class FlowLimitationClassifier:
             return 1
 
         matched_features["default_classification"] = "no_clear_match"
-        if flatness < 0.5:
+        if flatness < FLC.FL_FALLBACK_FLATNESS_CLASS1_MAX:
             return 1
-        elif flatness < 0.7:
+        elif flatness < FLC.FL_FALLBACK_FLATNESS_CLASS4_MAX:
             return 4
         else:
             return 7

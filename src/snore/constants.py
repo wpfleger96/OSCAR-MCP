@@ -218,6 +218,11 @@ class FlowLimitationConstants:
     FL_CLASS1_FLATNESS_MAX = 0.45
     FL_CLASS1_SYMMETRY_MAX = 0.3
 
+    # Fallback flatness-triage cutoffs: when no shape rule matches, the breath is
+    # binned by flatness alone (class 1 / 4 / 7) at FL_DEFAULT_CONFIDENCE.
+    FL_FALLBACK_FLATNESS_CLASS1_MAX = 0.5
+    FL_FALLBACK_FLATNESS_CLASS4_MAX = 0.7
+
     # Threshold-margin confidence: rule-matched confidence is
     # FL_CONFIDENCE_BASE + FL_CONFIDENCE_MARGIN_SCALE * mean(margins), where each
     # margin is the fractional distance of a value past its threshold, clipped to
@@ -309,6 +314,22 @@ FLOW_LIMITATION_CLASSES: dict[int, FlowLimitationClassInfo] = {
         "weight": 1.0,
     },
 }
+
+
+# ============================================================================
+# Experimental-metric labeling
+# ============================================================================
+
+# Shared caveat for the FL/RERA proxy metrics (fl_class_ge4_pct, rera_index,
+# proxy-derived rdi, rera_proxy_count, and the epoch flow-class distributions).
+# These are read-time proxies derived from the experimental flow-limitation
+# classifier, not device-scored events. Thread this single string into every
+# affected MCP surface (tool docs and JSON schema field descriptions) so the
+# caveat stays identical throughout that interface.
+FL_RERA_EXPERIMENTAL_DISCLAIMER = (
+    "Experimental trend instrument; not validated against device-scored events; "
+    "not clinically validated."
+)
 
 
 # ============================================================================

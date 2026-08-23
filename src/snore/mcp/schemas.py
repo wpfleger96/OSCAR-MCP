@@ -26,8 +26,9 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from snore.constants import FL_RERA_EXPERIMENTAL_DISCLAIMER
 from snore.services.schemas import MergedSettingsChange
 
 
@@ -169,9 +170,21 @@ class NightlyRow(BaseModel):
     # rera_index. This is a DIFFERENT RERA definition from the per-session
     # analysis-time amplitude-crescendo detector (ModeResult.rdi); the two
     # disagree by construction.
-    rera_index: float | None = None
+    rera_index: float | None = Field(
+        default=None,
+        description=(
+            "RERA-proxy events per therapy hour from flow-limitation runs "
+            f"(FL-run proxy, not device-reported). {FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
     rera_index_reason: str | None = None
-    rdi: float | None = None
+    rdi: float | None = Field(
+        default=None,
+        description=(
+            "Device-reported AHI plus the query-time experimental RERA-proxy "
+            f"index. {FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
     rdi_reason: str | None = None
 
     # Pressure percentiles (cmH₂O)
@@ -200,13 +213,25 @@ class NightlyRow(BaseModel):
     fl_p95_reason: str | None = None
     fl_max: float | None = None
     fl_max_reason: str | None = None
-    # Percent of leak-valid classified breaths with flow_class >= 4
-    fl_class_ge4_pct: float | None = None
+    fl_class_ge4_pct: float | None = Field(
+        default=None,
+        description=(
+            "Percent of leak-valid, rule-matched classified breaths with "
+            "flow_class >= 4; the confidence gate excludes fallback guesses "
+            f"(flow-limitation proxy). {FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
     fl_class_ge4_pct_reason: str | None = None
-    # Count from the query-time FL-run proxy: runs of flow_class >= 4 ending
-    # in a recovery breath, over stored breath rows. Distinct from the
-    # analysis-time amplitude-crescendo RERA detector (ModeResult.rdi).
-    rera_proxy_count: int | None = None
+    # Distinct from the analysis-time amplitude-crescendo RERA detector
+    # (ModeResult.rdi), which uses a different criterion over per-session results.
+    rera_proxy_count: int | None = Field(
+        default=None,
+        description=(
+            "Count from the query-time FL-run proxy: runs of flow_class >= 4 "
+            "ending in a recovery breath, over stored breath rows. "
+            f"{FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
     rera_proxy_reason: str | None = None
     # Version of the query-time RERA-proxy criterion (independent of the
     # persisted AlgorithmIdentity); stamped only when the RERA scan ran
@@ -545,10 +570,33 @@ class EpochStats(BaseModel):
     primary_mode: str | None = None
     mid_insp_flattening: EpochDistribution
     flatness_index: EpochDistribution
-    flow_class_distribution: dict[str, int] = {}
+    # Keys are strings because JSON object keys are always strings.
+    flow_class_distribution: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Rule-matched FL classifications only; the class>=4 fraction "
+            "reconciles with nightly fl_class_ge4_pct. "
+            f"{FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
+    flow_class_distribution_fallback: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Low-confidence fallback flatness-triage guesses (confidence at the "
+            "default), reported separately from flow_class_distribution so they "
+            "don't inflate FL rates. Missing or below-default confidence values "
+            f"are excluded from both distributions. {FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
     tidal_volume_ml: EpochDistribution
     ie_ratio: EpochDistribution
-    rera_proxy_count: int | None = None
+    rera_proxy_count: int | None = Field(
+        default=None,
+        description=(
+            "Count from the query-time FL-run proxy: runs of flow_class >= 4 "
+            f"ending in a recovery breath. {FL_RERA_EXPERIMENTAL_DISCLAIMER}"
+        ),
+    )
     rera_reason: str | None = None
     # Version of the query-time RERA-proxy criterion (independent of the
     # persisted AlgorithmIdentity); stamped only when the RERA scan ran

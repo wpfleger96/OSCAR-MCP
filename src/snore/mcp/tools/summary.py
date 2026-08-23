@@ -32,7 +32,11 @@ from snore.mcp.schemas import (
 )
 from snore.mcp.tools._capabilities import _has_analysis, build_device_capabilities
 from snore.mcp.tools._helpers import str_or_none
-from snore.mcp.tools._scaffold import _scope_and_run, tool_error_boundary
+from snore.mcp.tools._scaffold import (
+    _scope_and_run,
+    _with_fl_rera_disclaimer,
+    tool_error_boundary,
+)
 from snore.mcp.tools._service_errors import (
     MAPPED_SERVICE_ERRORS,
     raise_mapped_service_error,
@@ -56,10 +60,11 @@ async def get_nightly_summary(
     """Return per-night therapy summary for a date range.
 
     Analysis-derived fields (RERA index, RDI, Ti, I:E, FL — including
-    fl_class_ge4_pct, the percent of leak-valid classified breaths with
-    flow_class >= 4) are populated from
+    fl_class_ge4_pct, the percent of leak-valid, rule-matched classified breaths
+    with flow_class >= 4) are populated from
     BreathService.get_nightly_range_summary(); absent entries are null with
-    reason (A2).  Compliance uses n_calendar_nights as denominator.
+    reason (A2).  RDI here adds the experimental RERA-proxy index to the
+    device-reported AHI.  Compliance uses n_calendar_nights as denominator.
 
     Raises ValidationError when BreathService reports device ownership problems
     (DeviceAmbiguityError, DeviceNotOwnedError).  The server boundary converts
@@ -407,6 +412,7 @@ def register(mcp: FastMCP) -> None:
     )
 
     @mcp.tool()
+    @_with_fl_rera_disclaimer
     @tool_error_boundary
     async def get_nightly_summary(
         ctx: Context,
@@ -421,8 +427,10 @@ def register(mcp: FastMCP) -> None:
 
         Paginated at 30 nights/call (adjustable). Analysis-derived fields (RERA
         index, RDI) are null + reason "analysis_not_run" when analysis has not
-        been run. ``fl_class_ge4_pct`` is the percent of leak-valid classified
-        breaths with ``flow_class >= 4``. Compliance fields are included in the
+        been run. RDI here adds the experimental RERA-proxy index to the
+        device-reported AHI. ``fl_class_ge4_pct`` is the percent of leak-valid,
+        rule-matched classified breaths with ``flow_class >= 4``; the confidence
+        gate excludes fallback guesses. Compliance fields are included in the
         response.
 
         The ``compliance`` block is present whenever ``start != end`` (range

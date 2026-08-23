@@ -371,7 +371,13 @@ class EpochBreathStats(BaseModel):
     primary_mode: str | None
     mid_insp_flattening: DistributionStats
     flatness_index: DistributionStats
+    # Rule-matched FL classifications only (flow_confidence > FL_DEFAULT_CONFIDENCE),
+    # so the class>=4 fraction reconciles with nightly fl_class_ge4_pct.
     flow_class_distribution: dict[int, int]
+    # Low-confidence fallback flatness-triage guesses (flow_confidence exactly at
+    # FL_DEFAULT_CONFIDENCE); reported separately so they don't inflate FL rates.
+    # Missing or below-default confidence values are excluded from both buckets.
+    flow_class_distribution_fallback: dict[int, int] = Field(default_factory=dict)
     tidal_volume_ml: DistributionStats
     ie_ratio: DistributionStats
     rera_proxy_count: int | None

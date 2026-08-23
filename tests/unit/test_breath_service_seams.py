@@ -133,8 +133,15 @@ async def _store_analysis_with_breaths(
     n_breaths: int = 5,
     flow_class: int | None = 1,
     is_recovery: bool = False,
+    flow_specs: list[tuple[int | None, float | None]] | None = None,
 ) -> models.AnalysisResult:
-    """Write an AnalysisResult + Breath rows via AnalysisService.store_result."""
+    """Write an AnalysisResult + Breath rows via AnalysisService.store_result.
+
+    ``flow_specs`` overrides the uniform (flow_class, flow_confidence) with an
+    explicit per-breath list, used to exercise the rule-matched / fallback split.
+    """
+    if flow_specs is not None:
+        n_breaths = len(flow_specs)
     result_dto = AnalysisResultDTO(
         session_id=session.id,
         session_duration_hours=session.duration_seconds / 3600.0
@@ -171,8 +178,8 @@ async def _store_analysis_with_breaths(
             respiratory_rate_rolling=15.0,
             flatness_index=0.2,
             mid_insp_flattening=0.35,
-            flow_class=flow_class,
-            flow_confidence=0.9,
+            flow_class=flow_specs[i][0] if flow_specs is not None else flow_class,
+            flow_confidence=flow_specs[i][1] if flow_specs is not None else 0.9,
             is_recovery_breath=is_recovery if i == n_breaths - 1 else False,
             inferred_trigger_type="normal",
             trigger_confidence=0.8,
@@ -749,6 +756,59 @@ class TestCompareEpochs:
         assert es.nights_with_data > 0
         assert es.algorithm_identity is not None
         assert es.null_reason is None
+
+    async def test_mixed_confidence_splits_rule_matched_from_fallback_guesses(
+        self, async_db_session
+    ):
+        """flow_class_distribution counts only rule-matched breaths (confidence >
+        FL_DEFAULT_CONFIDENCE); fallback guesses stamped at exactly the default
+        confidence land in flow_class_distribution_fallback.  Missing and
+        below-default confidence values are excluded from both.
+        """
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        therapy_date = date(2025, 4, 1)
+        _, session = await _make_day_and_session(async_db_session, dev.id, therapy_date)
+
+        default_conf = FLC.FL_DEFAULT_CONFIDENCE
+        # 3 rule-matched (confidence above the gate): classes 3, 4, 4.
+        # 2 fallback guesses (confidence exactly at the gate): classes 1, 4.
+        await _store_analysis_with_breaths(
+            async_db_session,
+            session,
+            profile_id,
+            flow_specs=[
+                (3, 0.9),
+                (4, 0.8),
+                (4, 0.75),
+                (1, default_conf),
+                (4, default_conf),
+                (7, None),
+                (6, 0.4),
+            ],
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="apr",
+                    date_start=therapy_date,
+                    date_end=therapy_date,
+                    device_id=dev.id,
+                )
+            ]
+        )
+
+        es = result.epochs[0]
+        assert es.null_reason is None
+        assert es.flow_class_distribution == {3: 1, 4: 2}
+        assert es.flow_class_distribution_fallback == {1: 1, 4: 1}
+        # Only the five classifier-canonical rows land in a distribution.  Missing
+        # and below-default confidence cannot be identified as fallback guesses.
+        rule_total = sum(es.flow_class_distribution.values())
+        fallback_total = sum(es.flow_class_distribution_fallback.values())
+        assert rule_total + fallback_total == 5
 
 
 # ---------------------------------------------------------------------------
@@ -3460,10 +3520,12 @@ class TestSameProfileTwoDeviceExtended:
 
 @pytest.mark.unit
 class TestCompareEpochsRefusal:
-    """Verify that metadata failures null ALL epoch distributions before any breath queries.
+    """Verify metadata-check semantics run before any breath queries.
 
-    RX change within an epoch is a hard refusal (null_reason=RX_CHANGED_WITHIN_EPOCH).
-    Cross-epoch algorithm identity mismatch is now a non-blocking warning: distributions
+    A mid-epoch RX change nulls only its own epoch (null_reason=RX_CHANGED_WITHIN_EPOCH);
+    clean epochs still compute and the top-level null_reason is set only when EVERY
+    epoch was nulled for an RX change.
+    Cross-epoch algorithm identity mismatch is a non-blocking warning: distributions
     are still computed and version_warnings is populated instead of nulling everything.
     """
 
@@ -3552,6 +3614,137 @@ class TestCompareEpochsRefusal:
         assert epoch_result.mid_insp_flattening.median is None
         assert epoch_result.flatness_index.median is None
         assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+
+    async def test_one_violating_epoch_among_three_nulls_only_itself(
+        self, async_db_session, monkeypatch
+    ):
+        """A mid-epoch RX change nulls only its own epoch; the two clean epochs
+        still compute, and the top-level null_reason stays None."""
+        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        rx_key = next(iter(RX_KEYS))
+
+        # Clean epoch 1: single session with breaths → computes normally.
+        d1 = date(2026, 5, 1)
+        _, s1 = await _make_day_and_session(async_db_session, dev.id, d1)
+        await _store_analysis_with_breaths(
+            async_db_session, s1, profile_id, n_breaths=3
+        )
+
+        # Violating epoch: two sessions on different days with divergent RX.
+        d2, d3 = date(2026, 5, 10), date(2026, 5, 11)
+        _, s2 = await _make_day_and_session(async_db_session, dev.id, d2)
+        _, s3 = await _make_day_and_session(async_db_session, dev.id, d3)
+        await _store_analysis_with_breaths(
+            async_db_session, s2, profile_id, n_breaths=3
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, s3, profile_id, n_breaths=3
+        )
+        await self._make_setting(async_db_session, s2.id, rx_key, "8.0")
+        await self._make_setting(async_db_session, s3.id, rx_key, "12.0")
+
+        # Clean epoch 2: single session with breaths → computes normally.
+        d4 = date(2026, 5, 20)
+        _, s4 = await _make_day_and_session(async_db_session, dev.id, d4)
+        await _store_analysis_with_breaths(
+            async_db_session, s4, profile_id, n_breaths=3
+        )
+
+        waveform_session_ids: list[int] = []
+
+        async def _record_waveform_session_ids(
+            _db: AsyncSession, session_ids: list[int]
+        ) -> tuple[dict[int, list[float]], dict[int, list[float]]]:
+            waveform_session_ids.extend(session_ids)
+            return {}, {}
+
+        monkeypatch.setattr(
+            BreathService,
+            "_fetch_waveform_channel_vals",
+            staticmethod(_record_waveform_session_ids),
+        )
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(
+                    label="clean1", date_start=d1, date_end=d1, device_id=dev.id
+                ),
+                EpochRequest(
+                    label="violating", date_start=d2, date_end=d3, device_id=dev.id
+                ),
+                EpochRequest(
+                    label="clean2", date_start=d4, date_end=d4, device_id=dev.id
+                ),
+            ]
+        )
+
+        by_label = {e.label: e for e in result.epochs}
+        # Only the violating epoch is nulled, with the RX reason on both axes.
+        assert by_label["violating"].null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        assert by_label["violating"].mid_insp_flattening.median is None
+        assert by_label["violating"].rera_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        # Clean epochs compute normally.
+        for lbl in ("clean1", "clean2"):
+            assert by_label[lbl].null_reason is None
+            assert by_label[lbl].mid_insp_flattening.median is not None
+            assert by_label[lbl].flow_class_distribution
+        # Not a whole-comparison refusal; violation still reported.
+        assert result.null_reason is None
+        assert len(result.rx_violations) == 1
+        assert result.rx_violations[0].epoch_label == "violating"
+        # Nulled epochs must not load and deserialize full-night waveform blobs.
+        assert set(waveform_session_ids) == {s1.id, s4.id}
+
+    async def test_all_epochs_violating_sets_top_level_refusal(self, async_db_session):
+        """When every epoch has a mid-epoch RX change, the top-level null_reason is
+        RX_CHANGED_WITHIN_EPOCH and every epoch is nulled."""
+        from snore.analysis.rx_tracker import RX_KEYS  # noqa: PLC0415
+
+        _, profile_id = await _make_profile(async_db_session)
+        dev = await _make_device(async_db_session, profile_id)
+        rx_key = next(iter(RX_KEYS))
+
+        da1, da2 = date(2026, 6, 1), date(2026, 6, 2)
+        _, sa1 = await _make_day_and_session(async_db_session, dev.id, da1)
+        _, sa2 = await _make_day_and_session(async_db_session, dev.id, da2)
+        await _store_analysis_with_breaths(
+            async_db_session, sa1, profile_id, n_breaths=2
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, sa2, profile_id, n_breaths=2
+        )
+        await self._make_setting(async_db_session, sa1.id, rx_key, "8.0")
+        await self._make_setting(async_db_session, sa2.id, rx_key, "12.0")
+
+        db1, db2 = date(2026, 6, 10), date(2026, 6, 11)
+        _, sb1 = await _make_day_and_session(async_db_session, dev.id, db1)
+        _, sb2 = await _make_day_and_session(async_db_session, dev.id, db2)
+        await _store_analysis_with_breaths(
+            async_db_session, sb1, profile_id, n_breaths=2
+        )
+        await _store_analysis_with_breaths(
+            async_db_session, sb2, profile_id, n_breaths=2
+        )
+        await self._make_setting(async_db_session, sb1.id, rx_key, "9.0")
+        await self._make_setting(async_db_session, sb2.id, rx_key, "13.0")
+
+        svc = BreathService(async_db_session, profile_id=profile_id)
+        result = await svc.compare_epochs(
+            epochs=[
+                EpochRequest(label="A", date_start=da1, date_end=da2, device_id=dev.id),
+                EpochRequest(label="B", date_start=db1, date_end=db2, device_id=dev.id),
+            ]
+        )
+
+        assert result.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH
+        assert all(
+            e.null_reason == NullReason.RX_CHANGED_WITHIN_EPOCH for e in result.epochs
+        )
+        assert len(result.rx_violations) == 2
 
     async def test_cross_epoch_identity_mismatch_warns_instead_of_refusing(
         self, async_db_session
