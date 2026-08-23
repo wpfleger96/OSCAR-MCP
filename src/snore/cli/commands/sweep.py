@@ -43,6 +43,7 @@ _OPTION_TO_KNOB = {
     "fl_class_threshold_raw": "fl_class_threshold",
     "min_fl_run_length_raw": "min_fl_run_length",
     "recovery_margin_raw": "recovery_amplitude_margin",
+    "include_fallback_raw": "include_fallback",
     "flg_low_raw": "flg_low_threshold",
     "flg_high_raw": "flg_high_threshold",
 }
@@ -116,6 +117,12 @@ def _render_table(result: SweepResult, top: int) -> None:
     help="RERA-proxy recovery amplitude margin values (comma-separated; re/apple)",
 )
 @click.option(
+    "--include-fallback",
+    "include_fallback_raw",
+    help="RERA-proxy fallback inclusion: 1=all breaths, 0=exclude low-confidence "
+    "fallback guesses from FL-run detection (comma-separated; re/apple)",
+)
+@click.option(
     "--flg-low",
     "flg_low_raw",
     help="FLG AUC low-breakpoint values (comma-separated; flg)",
@@ -142,6 +149,7 @@ async def sweep_thresholds(
     fl_class_threshold_raw: str | None,
     min_fl_run_length_raw: str | None,
     recovery_margin_raw: str | None,
+    include_fallback_raw: str | None,
     flg_low_raw: str | None,
     flg_high_raw: str | None,
     top: int,
@@ -164,6 +172,7 @@ async def sweep_thresholds(
         "fl_class_threshold_raw": fl_class_threshold_raw,
         "min_fl_run_length_raw": min_fl_run_length_raw,
         "recovery_margin_raw": recovery_margin_raw,
+        "include_fallback_raw": include_fallback_raw,
         "flg_low_raw": flg_low_raw,
         "flg_high_raw": flg_high_raw,
     }

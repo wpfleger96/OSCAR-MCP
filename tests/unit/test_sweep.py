@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+from snore.constants import FlowLimitationConstants
 from snore.services.analysis_facade import AnalysisFacade
 from snore.services.health_service import HealthService
 from snore.validation.fl_validator import auc_severity_vs_flg, score_fl_arrays
@@ -25,10 +26,13 @@ from snore.validation.rera_validator import (
 )
 from snore.validation.sweep import (
     DEFAULT_GRIDS,
+    DEFAULT_KNOBS,
     NOT_SWEEPABLE_NOTICE,
     FlgSessionArrays,
     ProxySessionArrays,
     SweepData,
+    _is_default,
+    _is_fallback_flow_confidence,
     _proxy_starts,
     enumerate_grid,
     evaluate_grid,
@@ -162,11 +166,15 @@ def _proxy_session(
         peak += [20.0, 20.0, 40.0]
         start_offset += [t, t + 2.0, t + 4.0]
         t += 30.0
+    # These breaths are all rule-matched (high confidence), so the fallback-masked
+    # row list is identical — include_fallback has no effect on this fixture.
+    rows = build_proxy_breath_rows(flow_class, is_recovery, peak)
     return ProxySessionArrays(
         session_id=int(therapy_date.strftime("%Y%m%d")),
         therapy_date=therapy_date,
         duration_hours=duration_hours,
-        proxy_rows=build_proxy_breath_rows(flow_class, is_recovery, peak),
+        proxy_rows=rows,
+        proxy_rows_no_fallback=rows,
         start_offset_s=start_offset,
         machine_starts=machine_starts if machine_starts is not None else [],
     )
@@ -185,11 +193,13 @@ class TestProxyCachedRowEquivalence:
         is_recovery = [False, False, True, False, False, False, False, False]
         peak = [20.0, 22.0, 40.0, 10.0, 18.0, 19.0, 30.0, 5.0]
         start_offset = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+        rows = build_proxy_breath_rows(flow_class, is_recovery, peak)
         session = ProxySessionArrays(
             session_id=1,
             therapy_date=date(2024, 1, 1),
             duration_hours=8.0,
-            proxy_rows=build_proxy_breath_rows(flow_class, is_recovery, peak),
+            proxy_rows=rows,
+            proxy_rows_no_fallback=rows,
             start_offset_s=start_offset,
             machine_starts=[],
         )
@@ -221,6 +231,147 @@ class TestProxyCachedRowEquivalence:
                 recovery_amplitude_margin=float(knobs["recovery_amplitude_margin"]),
             )
             assert cached == seam
+
+
+# ---------------------------------------------------------------------------
+# include_fallback knob — excluding low-confidence fallback guesses offline
+# ---------------------------------------------------------------------------
+
+
+def _proxy_session_with_confidence(
+    flow_class: list[int | None],
+    is_recovery: list[bool | None],
+    peak: list[float | None],
+    flow_confidence: list[float | None],
+    start_offset: list[float],
+) -> ProxySessionArrays:
+    """Build a session with both row lists, masking fallback-confidence breaths.
+
+    Mirrors the loader: a breath is a fallback guess when its confidence is None
+    or ``<= FL_DEFAULT_CONFIDENCE``; its ``flow_class`` is nulled in the masked
+    list so the ``include_fallback=0.0`` path drops it from FL-run detection.
+    """
+    masked = [
+        None if _is_fallback_flow_confidence(c) else fc
+        for fc, c in zip(flow_class, flow_confidence, strict=True)
+    ]
+    return ProxySessionArrays(
+        session_id=1,
+        therapy_date=date(2024, 1, 1),
+        duration_hours=8.0,
+        proxy_rows=build_proxy_breath_rows(flow_class, is_recovery, peak),
+        proxy_rows_no_fallback=build_proxy_breath_rows(masked, is_recovery, peak),
+        start_offset_s=start_offset,
+        machine_starts=[],
+    )
+
+
+# A length-3 FL run whose middle breath is a fallback guess (confidence 0.5),
+# followed by an explicit recovery breath.  Included: one event; excluded: the
+# fallback breath splits the run into two sub-runs of length 1, so it no longer
+# meets min_fl_run_length=2 and the event vanishes.
+_MIXED_FLOW_CLASS = [4, 4, 4, 1]
+_MIXED_CONFIDENCE = [0.9, 0.5, 0.9, 0.9]
+_MIXED_IS_RECOVERY = [False, False, False, True]
+_MIXED_PEAK = [20.0, 20.0, 20.0, 40.0]
+_MIXED_START = [0.0, 2.0, 4.0, 6.0]
+
+_KNOBS_BASE = {
+    "fl_class_threshold": 4,
+    "min_fl_run_length": 2,
+    "recovery_amplitude_margin": 0.20,
+}
+
+
+class TestIncludeFallbackKnob:
+    def _mixed_session(self) -> ProxySessionArrays:
+        return _proxy_session_with_confidence(
+            _MIXED_FLOW_CLASS,
+            _MIXED_IS_RECOVERY,
+            _MIXED_PEAK,
+            _MIXED_CONFIDENCE,
+            _MIXED_START,
+        )
+
+    def test_include_fallback_on_matches_all_breaths(self):
+        session = self._mixed_session()
+        starts = _proxy_starts(session, {**_KNOBS_BASE, "include_fallback": 1.0})
+        # Identical to the pre-change seam driven over every breath.
+        assert starts == proxy_reras_from_breath_arrays(
+            _MIXED_FLOW_CLASS,
+            _MIXED_IS_RECOVERY,
+            _MIXED_PEAK,
+            _MIXED_START,
+            fl_class_threshold=4,
+            min_fl_run_length=2,
+            recovery_amplitude_margin=0.20,
+        )
+        assert starts == [0.0]
+
+    def test_absent_knob_defaults_to_including_fallback(self):
+        # A grid that never sweeps the knob reproduces current behaviour exactly.
+        session = self._mixed_session()
+        assert _proxy_starts(session, _KNOBS_BASE) == [0.0]
+
+    def test_include_fallback_off_drops_split_run(self):
+        session = self._mixed_session()
+        assert _proxy_starts(session, {**_KNOBS_BASE, "include_fallback": 0.0}) == []
+
+    def test_grid_proxy_count_differs_across_knob_values(self):
+        data = SweepData(
+            target="apple",
+            proxy_sessions=[self._mixed_session()],
+            apple_bd_by_night={date(2024, 1, 1): 1.0},
+        )
+        grid = {
+            "fl_class_threshold": [4],
+            "min_fl_run_length": [2],
+            "recovery_amplitude_margin": [0.20],
+            "include_fallback": [1.0, 0.0],
+        }
+        result = evaluate_grid(data, grid)
+        by_knob = {r.knobs["include_fallback"]: r for r in result.rows}
+        assert by_knob[1.0].metrics["total_proxy"] == 1
+        assert by_knob[0.0].metrics["total_proxy"] == 0
+
+    def test_default_combo_detected_with_new_knob(self):
+        data = SweepData(
+            target="re",
+            proxy_sessions=[self._mixed_session()],
+        )
+        grid = {
+            "fl_class_threshold": [4],
+            "min_fl_run_length": [2],
+            "recovery_amplitude_margin": [0.20],
+            "include_fallback": [1.0, 0.0],
+        }
+        result = evaluate_grid(data, grid)
+        by_knob = {r.knobs["include_fallback"]: r for r in result.rows}
+        assert by_knob[1.0].is_default
+        assert not by_knob[0.0].is_default
+
+    def test_is_default_treats_include_fallback_on_as_default(self):
+        base = {
+            "fl_class_threshold": 4,
+            "min_fl_run_length": 2,
+            "recovery_amplitude_margin": 0.20,
+        }
+        assert _is_default({**base, "include_fallback": 1.0}, "re")
+        assert not _is_default({**base, "include_fallback": 0.0}, "re")
+        # An unswept axis is held at its production default (fallback included).
+        assert _is_default(base, "re")
+
+    def test_fallback_confidence_classification(self):
+        floor = FlowLimitationConstants.FL_DEFAULT_CONFIDENCE
+        assert _is_fallback_flow_confidence(None)
+        assert _is_fallback_flow_confidence(floor)
+        assert not _is_fallback_flow_confidence(floor + 0.1)
+
+    def test_re_and_apple_default_grids_pin_fallback_included(self):
+        for target in ("re", "apple"):
+            assert DEFAULT_KNOBS[target]["include_fallback"] == 1.0
+            assert DEFAULT_GRIDS[target]["include_fallback"] == [1.0]
+        assert "include_fallback" not in DEFAULT_KNOBS["flg"]
 
 
 # ---------------------------------------------------------------------------
@@ -503,12 +654,14 @@ def _proxy_breath_row(
     is_recovery: bool | None,
     peak: float | None,
     start: float,
+    flow_confidence: float | None = 0.9,
 ) -> MagicMock:
     b = MagicMock()
     b.flow_class = flow_class
     b.is_recovery_breath = is_recovery
     b.peak_flow_lpm = peak
     b.start_offset_s = start
+    b.flow_confidence = flow_confidence
     return b
 
 
@@ -614,6 +767,34 @@ class TestLoadSweepData:
         assert s.duration_hours == pytest.approx(8.0)
         assert s.machine_starts == []  # apple target loads no machine RE
         assert data.apple_bd_by_night == {date(2025, 1, 1): 3.0}
+
+    @pytest.mark.asyncio
+    async def test_loader_masks_fallback_flow_class(self, mock_db_session):
+        # Middle breath is a fallback guess (confidence 0.5); the loader must
+        # null its flow_class in the fallback-masked row list only.
+        rows = [
+            _proxy_breath_row(4, False, 20.0, 0.0, flow_confidence=0.9),
+            _proxy_breath_row(4, False, 20.0, 2.0, flow_confidence=0.5),
+            _proxy_breath_row(1, True, 40.0, 4.0, flow_confidence=0.9),
+        ]
+        mock_db_session.execute = AsyncMock(
+            side_effect=[
+                _result_scalars_all([_session_row(1)]),
+                _result_scalars_first(_analysis_row(99)),
+                _result_all(rows),
+            ]
+        )
+        with patch.object(
+            HealthService,
+            "get_breathing_disturbance_by_night",
+            AsyncMock(return_value={}),
+        ):
+            data = await load_sweep_data(
+                mock_db_session, 1, "2025-01-01", "2025-01-31", "apple"
+            )
+        s = data.proxy_sessions[0]
+        assert [b.flow_class for b in s.proxy_rows] == [4, 4, 1]
+        assert [b.flow_class for b in s.proxy_rows_no_fallback] == [4, None, 1]
 
     @pytest.mark.asyncio
     async def test_re_target_extracts_machine_starts(self, mock_db_session):
