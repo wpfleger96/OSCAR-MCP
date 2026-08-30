@@ -13,6 +13,19 @@ import pytest
 sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
 sqlite3.register_converter("DATETIME", lambda s: datetime.fromisoformat(s.decode()))
 
+# --- Hermetic env baseline (module-level, before any config resolves) ---
+# The suite must be hermetic w.r.t. the invoking developer shell, which may
+# export any config var that ``snore.api.config.load_config`` reads straight
+# from ``os.environ`` (e.g. SNORE_BOOTSTRAP_ADMIN_EMAIL, SNORE_DATABASE_URL).
+# Scrub every SNORE_* var plus the OAuth/CORS vars so config resolves from a
+# clean slate that matches CI, which sets none of these.  This runs at module
+# level, not in a fixture, because module-/session-scoped fixtures and the
+# os.environ.setdefault below resolve config before any function-scoped fixture
+# can act.
+_LEAKY_ENV = {"GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "CORS_ORIGINS"}
+for _name in [k for k in os.environ if k.startswith("SNORE_") or k in _LEAKY_ENV]:
+    del os.environ[_name]
+
 # Default to local auth mode for all tests so create_app() works without
 # SNORE_SESSION_SECRET.  Phase 2 auth tests override this per-test via
 # monkeypatch + the reset_auth_config fixture.
@@ -22,16 +35,11 @@ os.environ.setdefault("SNORE_AUTH_MODE", "local")
 # Code that resolves a database outside any function-scoped fixture window —
 # module- or session-scoped fixture setup, conftest import side effects — runs
 # before the per-test _block_real_db fixture below has a chance to act.  This
-# baseline covers those windows unconditionally.  It also neutralises any
-# SNORE_DATABASE_URL inherited from the invoking shell or CI (which would
-# outrank SNORE_DB_PATH and bypass the guard entirely).
-#
-# Per-test monkeypatch.setenv calls by tests or fixtures still win because they
-# happen later; _block_real_db refines this baseline to a per-test tmp_path for
-# stronger isolation.
+# baseline covers those windows unconditionally.  Per-test monkeypatch.setenv
+# calls still win because they happen later; _block_real_db refines this
+# baseline to a per-test tmp_path for stronger isolation.
 _DB_GUARD_DIR = Path(tempfile.mkdtemp(prefix="snore-test-dbguard-"))
 os.environ["SNORE_DB_PATH"] = str(_DB_GUARD_DIR / "guard.db")  # unconditional override
-os.environ.pop("SNORE_DATABASE_URL", None)  # neutralize inherited URL
 
 
 @pytest.fixture(autouse=True)

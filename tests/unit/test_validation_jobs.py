@@ -316,6 +316,18 @@ async def _seed_run(**overrides: Any) -> int:
         return row.id
 
 
+async def _count_runs() -> int:
+    from sqlalchemy import func, select
+
+    from snore.database import models
+    from snore.database.session import session_scope
+
+    async with session_scope() as db:
+        return (
+            await db.execute(select(func.count(models.ValidationRun.id)))
+        ).scalar_one()
+
+
 async def _fetch_run(run_id: int) -> Any:
     from snore.database import models
     from snore.database.session import session_scope
@@ -334,6 +346,10 @@ def init_db(temp_db: Any) -> Any:
     # the unique temp_db it was given, regardless of test execution order.
     _run(cleanup_database())
     _run(init_database(str(temp_db)))
+    # Fail here, attributably, if the engine is not the fresh temp_db this
+    # fixture just initialised — the tests below insert fixed job_ids and a
+    # stale engine surfaces later as an opaque UNIQUE(job_id) violation.
+    assert _run(_count_runs()) == 0, "validation_runs not empty after init_db"
     yield
     _run(cleanup_database())
 
