@@ -401,10 +401,10 @@ class TestSessionServiceDelete:
         assert day.obstructive_apneas == 8
         assert day.pressure_mean == pytest.approx(12.0)
 
-    async def test_delete_all_sessions_resets_day_stats(
+    async def test_delete_all_sessions_prunes_day(
         self, async_db_session, async_test_device, async_test_session_factory
     ):
-        """Deleting every session of a day resets the day's aggregates."""
+        """Deleting every session of a day removes the orphaned Day row."""
         from snore.database.day_manager import DayManager
 
         base = datetime(2025, 3, 1, 22, 0, 0)
@@ -436,23 +436,14 @@ class TestSessionServiceDelete:
         assert day.session_count == 2
         assert day.epap_mean is not None
 
+        day_id = day.id
+
         service = SessionService(async_db_session, profile_id=1)
         deleted = await service.delete_sessions([s1.id, s2.id])
         assert deleted == 2
 
         await async_db_session.flush()
-        await async_db_session.refresh(day)
-        assert day.session_count == 0
-        assert day.total_therapy_hours == 0.0
-        assert day.obstructive_apneas == 0
-        assert day.central_apneas == 0
-        assert day.hypopneas == 0
-        assert day.reras == 0
-        assert day.ahi is None
-        assert day.epap_mean is None
-        assert day.pressure_mean is None
-        assert day.leak_median is None
-        assert day.spo2_mean is None
+        assert await async_db_session.get(Day, day_id) is None
 
     async def test_delete_spanning_multiple_days_recomputes_each(
         self, async_db_session, async_test_device, async_test_session_factory
@@ -476,7 +467,7 @@ class TestSessionServiceDelete:
             usage_hours=4.0,
             ahi=4.0,
         )
-        # Day B: one session — deleting it empties and resets the day.
+        # Day B: one session — deleting it orphans the day, which is pruned.
         b1 = await async_test_session_factory(
             async_test_device.id,
             base + timedelta(days=2),
@@ -502,11 +493,9 @@ class TestSessionServiceDelete:
 
         await async_db_session.flush()
         await async_db_session.refresh(day_a)
-        await async_db_session.refresh(day_b)
         assert day_a.session_count == 1
         assert day_a.ahi == pytest.approx(4.0)
-        assert day_b.session_count == 0
-        assert day_b.ahi is None
+        assert await async_db_session.get(Day, day_b.id) is None
 
     async def test_delete_across_chunk_boundary_recomputes_days(
         self,
@@ -599,14 +588,10 @@ class TestSessionServiceDelete:
         assert survivor == 1
 
         await async_db_session.refresh(day_a)
-        await async_db_session.refresh(day_b)
-        await async_db_session.refresh(day_c)
         assert day_a.session_count == 1
         assert day_a.ahi == pytest.approx(2.0)
-        assert day_b.session_count == 0
-        assert day_b.ahi is None
-        assert day_c.session_count == 0
-        assert day_c.ahi is None
+        assert await async_db_session.get(Day, day_b.id) is None
+        assert await async_db_session.get(Day, day_c.id) is None
 
     async def test_delete_preview_sums_counts_and_sorts_across_chunks(
         self,
@@ -853,6 +838,41 @@ class TestSessionServiceEnable:
 
         await async_db_session.refresh(session)
         assert session.enabled is False
+
+    async def test_disable_last_session_keeps_day_with_zero_count(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """Disabling a day's only session keeps its Day row (the disabled
+        session still references it) with session_count reset to 0."""
+        from snore.database.day_manager import DayManager
+
+        session = await async_test_session_factory(
+            async_test_device.id,
+            datetime(2025, 3, 1, 22, 0, 0),
+            duration_hours=6.0,
+            usage_hours=6.0,
+            ahi=5.0,
+        )
+        day = await DayManager.link_session_to_day(
+            session, async_test_device.id, async_db_session
+        )
+        assert day.session_count == 1
+
+        service = SessionService(async_db_session, profile_id=1)
+        await service.set_session_enabled(session.id, False)
+
+        await async_db_session.flush()
+        await async_db_session.refresh(day)
+        assert day.session_count == 0
+        assert day.total_therapy_hours == 0.0
+        assert day.ahi is None
+
+        await service.set_session_enabled(session.id, True)
+
+        await async_db_session.flush()
+        await async_db_session.refresh(day)
+        assert day.session_count == 1
+        assert day.ahi == pytest.approx(5.0)
 
     async def test_set_session_enabled_not_found(self, async_db_session):
         """Raises ValueError if session not found."""

@@ -357,7 +357,8 @@ class SessionService(ProfileScopedService):
 
         Day aggregates for the affected days are recalculated after the DELETE
         (mirrors ``set_session_enabled``), so a day left with fewer sessions is
-        re-aggregated and a day left with none has its statistics reset.
+        re-aggregated and a day left with no sessions at all is pruned (see
+        ``DayManager.recalculate_day``).
         """
         # Dedupe: chunked IN-binds don't implicitly de-duplicate like a single IN.
         session_ids = list(dict.fromkeys(session_ids))

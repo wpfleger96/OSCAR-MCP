@@ -564,7 +564,13 @@ class HealthNightlySummary(Base):
 
 
 class Day(Base):
-    """Daily aggregated statistics (OSCAR-compatible pre-calculated cache)."""
+    """Daily aggregated statistics (OSCAR-compatible pre-calculated cache).
+
+    Lifecycle: a row exists only while at least one Session (enabled or
+    disabled) references it; ``DayManager.recalculate_day`` prunes orphans.
+    ``session_count`` counts enabled sessions only, so a day whose sessions are
+    all disabled persists with ``session_count == 0`` and reset aggregates.
+    """
 
     __tablename__ = "days"
 

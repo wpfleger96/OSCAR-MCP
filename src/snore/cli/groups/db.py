@@ -178,7 +178,8 @@ def recompute_days(db: str | None) -> None:
     Re-runs day aggregation over the ``Statistics`` already stored for each
     session, refreshing every Day row across all devices and profiles.  Use
     after an aggregation-formula change (e.g. a new weighting) to update
-    historical Day rows without re-importing raw device data.
+    historical Day rows without re-importing raw device data.  Day rows no
+    session references any more are pruned rather than recomputed.
 
     Days are processed in chunks, each committed in its own gated write
     transaction (like ``cleanup-orphans``), so the SQLite write lock is
@@ -226,7 +227,7 @@ def recompute_days(db: str | None) -> None:
                         .all()
                     )
                     for day in days:
-                        await DayManager.aggregate_day_statistics(day, session)
+                        await DayManager.recalculate_day(day, session)
                 progress.update(task, advance=len(chunk))
 
         print_success(f"Recomputed {len(day_ids)} day(s) from session statistics")

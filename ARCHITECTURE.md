@@ -429,6 +429,8 @@ created_at, updated_at
 UNIQUE(device_id, date)
 ```
 
+A `days` row exists only while at least one `sessions` row (enabled or disabled) references it; `DayManager.recalculate_day` prunes orphaned rows after session deletion or import-time replacement. `session_count` counts enabled sessions, so a day whose sessions are all disabled persists with `session_count = 0` and reset aggregates.
+
 **sessions**
 ```sql
 id, device_id (FK devices), day_id (FK days),

@@ -11,6 +11,7 @@ from datetime import date, datetime
 import pytest
 
 from snore.database.day_manager import DayManager
+from snore.database.models import Day
 
 
 class TestDaySplitLogic:
@@ -215,6 +216,49 @@ class TestStatisticalAggregation:
         assert day.session_count == 0
         assert day.total_therapy_hours == 0.0
         assert day.obstructive_apneas == 0
+        assert day.ahi is None
+
+    async def test_recalculate_day_prunes_unreferenced_day(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """A day no Session row references is deleted, not reset in place."""
+        device = async_test_device
+
+        session = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 22, 0, 0),
+            duration_hours=8.0,
+        )
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+        day_id = day.id
+
+        await async_db_session.delete(session)
+        await async_db_session.flush()
+
+        assert await DayManager.recalculate_day(day, async_db_session) is False
+        assert await async_db_session.get(Day, day_id) is None
+
+    async def test_recalculate_day_keeps_day_with_only_disabled_sessions(
+        self, async_db_session, async_test_device, async_test_session_factory
+    ):
+        """A disabled session still references its day, so the row survives
+        with zeroed aggregates rather than being pruned."""
+        device = async_test_device
+
+        session = await async_test_session_factory(
+            device_id=device.id,
+            start_time=datetime(2024, 11, 5, 22, 0, 0),
+            duration_hours=8.0,
+            ahi=5.0,
+        )
+        day = await DayManager.link_session_to_day(session, device.id, async_db_session)
+
+        session.enabled = False
+        await async_db_session.flush()
+
+        assert await DayManager.recalculate_day(day, async_db_session) is True
+        assert await async_db_session.get(Day, day.id) is day
+        assert day.session_count == 0
         assert day.ahi is None
 
     async def test_empty_day_resets_epap_statistics(
