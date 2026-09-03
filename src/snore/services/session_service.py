@@ -406,11 +406,15 @@ class SessionService(ProfileScopedService):
         # a reused id never serves a deleted row's arrays.
         clear_waveform_array_cache()
 
+        # day_ids were collected under the profile filter; the join repeats it
+        # as defence-in-depth because recalculate_day can delete the row.
         for chunk in iter_id_chunks(list(day_ids)):
             days = (
                 (
                     await self.db_session.execute(
-                        select(models.Day).where(models.Day.id.in_(chunk))
+                        select(models.Day)
+                        .join(models.Device, models.Day.device_id == models.Device.id)
+                        .where(models.Day.id.in_(chunk), self._profile_filter())
                     )
                 )
                 .scalars()

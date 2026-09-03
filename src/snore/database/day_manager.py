@@ -220,10 +220,6 @@ class DayManager:
                         day, spec.name, cls._weighted_average(stat_pairs, spec.name)
                     )
 
-    # Private alias kept for existing callers (importers.py, tests) that still
-    # use the pre-rename name.
-    _aggregate_day_statistics = aggregate_day_statistics
-
     @classmethod
     async def link_session_to_day(
         cls,
@@ -259,13 +255,13 @@ class DayManager:
         """
         Recalculate a day after its session membership changed.
 
-        Lifecycle rule: a Day row exists only while at least one Session row,
-        enabled or disabled, references it.  Deleting the last such session
-        orphans the day and the row is pruned here (re-import recreates it via
-        ``link_session_to_day``).  Disabling the last enabled session does not
-        orphan the day: the disabled Session still points at it through the
-        composite ``(day_id, device_id)`` FK, so the row stays with
-        ``session_count == 0`` and reset aggregates.
+        Lifecycle rule: after any membership change a Day row survives only if
+        at least one Session row, enabled or disabled, still references it.
+        Deleting the last such session orphans the day and the row is pruned
+        here (re-import recreates it via ``link_session_to_day``).  Disabling
+        the last enabled session does not orphan the day: the disabled Session
+        still points at it through the composite ``(day_id, device_id)`` FK, so
+        the row stays with ``session_count == 0`` and reset aggregates.
 
         Args:
             day: Day object to recalculate
@@ -274,6 +270,10 @@ class DayManager:
         Returns:
             True if the day still exists, False if it was pruned.
         """
+        # The existence probe is a Core statement and does not trigger
+        # autoflush, so flush first: a pending Session that references this
+        # day would otherwise be invisible and the day deleted from under it.
+        await db_session.flush()
         referenced = await db_session.scalar(
             select(exists().where(SessionModel.day_id == day.id))
         )

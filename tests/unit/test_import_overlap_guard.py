@@ -450,13 +450,11 @@ class TestOverlapGuardReplacement:
         self, async_db_session, importer, device
     ):
         """A disabled session still references its Day, so replacing the day's
-        only enabled session must not prune the row (which would cascade-delete
-        the disabled session under FK enforcement)."""
-        from sqlalchemy import select as sa_select  # noqa: PLC0415
+        only enabled session must not prune the row.
 
-        from snore.database.importers import SessionImporter  # noqa: PLC0415
-        from snore.database.models import Day  # noqa: PLC0415
-
+        The old ``session_count == 0`` check counted enabled sessions only, so
+        the ORM delete would have tried to null the sibling's FK and aborted the
+        import with an IntegrityError."""
         # Enabled session on therapy day 20, replaced below by one on day 19.
         await _seed_session(
             async_db_session, device, "20260120_130000", _dt(20, 13), _dt(20, 19)
@@ -481,7 +479,9 @@ class TestOverlapGuardReplacement:
         days = (
             (
                 await async_db_session.execute(
-                    sa_select(Day).where(Day.device_id == device.id).order_by(Day.date)
+                    select(models.Day)
+                    .where(models.Day.device_id == device.id)
+                    .order_by(models.Day.date)
                 )
             )
             .scalars()
